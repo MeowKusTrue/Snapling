@@ -28,6 +28,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, w};
 
 pub mod overlay;
+pub mod targets;
+pub mod uia;
 
 /// Top-down BGRA, alpha forced to 255. `x`/`y`: screen position of the top-left pixel.
 pub struct Image {
@@ -300,4 +302,10 @@ mod live {
             assert_eq!(img.bgra.len(), (img.width * img.height * 4) as usize);
         }
     }
+}
+
+/// Exclusive-fullscreen Direct3D app in front (game): the overlay would minimize it.
+pub fn fullscreen_game() -> bool {
+    use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
+    unsafe { SHQueryUserNotificationState() }.is_ok_and(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN)
 }

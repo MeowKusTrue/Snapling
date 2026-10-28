@@ -2,10 +2,13 @@
 //! Interaction follows EiSen's overlay (MIT, © 2026 Tran Trong Thuc):
 //! drag to select, Shift = square, Space = pan, corners resize, drag inside moves,
 //! arrows nudge (Shift ×10), Enter/C/double-click copy, Esc/right click cancel.
+//! Snapling additions: hover highlights the window/element under the cursor, click picks it,
+//! the wheel walks element levels (up = outer).
 
-use crate::{Image, crop_bgra, dib_header};
-use snapling_core::selection::{Corner, Hit, Point, Rect, Selection, toolbar_position};
+use crate::{Image, crop_bgra, dib_header, targets, uia};
+use snapling_core::selection::{Corner, Hit, HoverChain, Point, Rect, Selection, toolbar_position};
 use std::cell::{Cell, RefCell};
+use std::sync::mpsc::Sender;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleDC,
@@ -26,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENWSE, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW,
     SWP_NOACTIVATE, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, WM_ACTIVATE,
     WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_SETCURSOR, WNDCLASSW,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_SETCURSOR, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
@@ -62,13 +65,109 @@ struct State {
     mouse: Point,
     decor: RECT,
     buttons: Vec<(RECT, Action)>,
-    hover: Option<usize>,
+    hover_btn: Option<usize>,
+    windows: Vec<(isize, Rect)>,
+    monitors: Vec<Rect>,
+    chain: HoverChain,
+    chain_win: Option<isize>,
+    chain_seq: u64,
     on_done: Option<Done>,
 }
+
+const WM_UIA: u32 = 0x8000 + 1;
 
 thread_local! {
     static HWND_OVERLAY: Cell<HWND> = Cell::new(HWND::default());
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    static UIA: RefCell<Option<Sender<uia::Request>>> = const { RefCell::new(None) };
+}
+
+fn rect_from(r: RECT, origin: (i32, i32)) -> Rect {
+    Rect {
+        left: r.left - origin.0,
+        top: r.top - origin.1,
+        width: r.right - r.left,
+        height: r.bottom - r.top,
+    }
+}
+
+fn clip(r: Rect, to: Rect) -> Rect {
+    let l = r.left.max(to.left);
+    let t = r.top.max(to.top);
+    Rect {
+        left: l,
+        top: t,
+        width: (r.right().min(to.right()) - l).max(0),
+        height: (r.bottom().min(to.bottom()) - t).max(0),
+    }
+}
+
+/// Window → monitor fallback under `p`, plus a UIA request for the elements inside.
+/// Returns whether the highlighted rect changed.
+fn update_hover(s: &mut State, p: Point) -> bool {
+    if s.sel.confirmed() || s.sel.is_dragging() {
+        return false;
+    }
+    let before = s.chain.current();
+    let win = s.windows.iter().find(|(_, r)| r.contains(p)).copied();
+    let id = win.map(|w| w.0);
+    if id == s.chain_win && s.chain.deepest().is_some_and(|r| r.contains(p)) {
+        return false;
+    }
+    if id == s.chain_win {
+        s.chain.retain_containing(p);
+    } else {
+        let base = win
+            .map(|w| w.1)
+            .or_else(|| s.monitors.iter().find(|m| m.contains(p)).copied());
+        s.chain = HoverChain::new(base.into_iter().collect());
+        s.chain_win = id;
+    }
+    if let Some(hwnd) = id {
+        s.chain_seq += 1;
+        let req = uia::Request {
+            seq: s.chain_seq,
+            hwnd,
+            point: POINT {
+                x: p.x + s.origin.0,
+                y: p.y + s.origin.1,
+            },
+        };
+        UIA.with(|u| u.borrow().as_ref().map(|tx| tx.send(req)));
+    }
+    before != s.chain.current()
+}
+
+/// Merges a finished UIA chain if it still belongs to the hovered window.
+/// Any finished chain for the hovered window is useful even if the cursor moved on
+/// (replies take 60–180 ms in Discord): its levels still under the cursor are kept.
+fn apply_uia() -> bool {
+    let Some((hwnd, rects)) = uia::RESULT.lock().ok().and_then(|mut r| r.take()) else {
+        return false;
+    };
+    with(|s| {
+        let Some(base) = s.chain.outermost() else {
+            return false;
+        };
+        if Some(hwnd) != s.chain_win || s.sel.confirmed() || s.sel.is_dragging() {
+            return false;
+        }
+        let mut all = vec![base];
+        all.extend(
+            rects
+                .into_iter()
+                .skip(1)
+                .map(|r| clip(rect_from(r, s.origin), base))
+                .take_while(|r| r.contains(s.mouse)),
+        );
+        let fresh = HoverChain::new(all);
+        if fresh.deepest() == s.chain.deepest() || fresh.len() < s.chain.len() {
+            return false;
+        }
+        s.chain = fresh;
+        true
+    })
+    .unwrap_or(false)
 }
 
 fn color(hex: u32) -> COLORREF {
@@ -114,6 +213,7 @@ pub fn init() -> Result<(), String> {
         )
         .map_err(|e| format!("CreateWindowExW: {e}"))?;
         HWND_OVERLAY.set(hwnd);
+        UIA.with(|u| *u.borrow_mut() = Some(uia::spawn(hwnd.0 as isize, WM_UIA)));
     }
     Ok(())
 }
@@ -147,6 +247,14 @@ pub fn show(img: Image, on_done: impl FnOnce(Option<Image>) + 'static) -> Result
         }
     }
     let (x, y, w, h) = (img.x, img.y, img.width as i32, img.height as i32);
+    let windows = targets::windows()
+        .into_iter()
+        .map(|(id, r)| (id, rect_from(r, (x, y))))
+        .collect();
+    let monitors = targets::monitors()
+        .into_iter()
+        .map(|r| rect_from(r, (x, y)))
+        .collect();
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             origin: (x, y),
@@ -160,11 +268,28 @@ pub fn show(img: Image, on_done: impl FnOnce(Option<Image>) + 'static) -> Result
             mouse: Point::default(),
             decor: RECT::default(),
             buttons: Vec::new(),
-            hover: None,
+            hover_btn: None,
+            windows,
+            monitors,
+            chain: HoverChain::default(),
+            chain_win: None,
+            chain_seq: 0,
             on_done: Some(Box::new(on_done)),
         })
     });
     drop(img);
+    let mut cursor = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut cursor);
+    }
+    with(|s| {
+        s.mouse = Point {
+            x: cursor.x - x,
+            y: cursor.y - y,
+        };
+        let m = s.mouse;
+        update_hover(s, m);
+    });
     unsafe {
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -273,7 +398,7 @@ fn in_rect(r: &RECT, p: Point) -> bool {
 /// While dragging only the old and new decoration areas are repainted.
 fn invalidate(hwnd: HWND, full: bool) {
     let areas = with(|s| {
-        let new = s.sel.rect().map(|r| {
+        let new = s.sel.rect().or(s.chain.current()).map(|r| {
             let scale = monitor_at(
                 s.origin,
                 Point {
@@ -414,7 +539,12 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
 
         s.buttons.clear();
         let mut decor = RECT::default();
-        if let Some(r) = s.sel.rect() {
+        let hovering = s.sel.rect().is_none() && !s.sel.is_dragging();
+        let shown = s
+            .sel
+            .rect()
+            .or_else(|| hovering.then(|| s.chain.current()).flatten());
+        if let Some(r) = shown {
             SelectObject(src, s.orig.into());
             let sr = to_rect(r);
             let inter = RECT {
@@ -534,7 +664,7 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
                         right: x + bw,
                         bottom: bar.top + pad + bhh,
                     };
-                    let hover = s.hover == Some(i);
+                    let hover = s.hover_btn == Some(i);
                     let bg = match (action, hover) {
                         (Action::Copy, false) => ACCENT,
                         (Action::Copy, true) => ACCENT_HOVER,
@@ -644,9 +774,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     s.sel.drag(p, shift_down());
                     return Some(false);
                 }
+                if update_hover(s, p) {
+                    return Some(false);
+                }
                 let hover = button_at(s, p);
-                (hover != s.hover).then(|| {
-                    s.hover = hover;
+                (hover != s.hover_btn).then(|| {
+                    s.hover_btn = hover;
                     true
                 })
             })
@@ -656,7 +789,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
         }
         WM_LBUTTONUP => {
-            with(|s| s.sel.release());
+            with(|s| {
+                s.sel.release();
+                // A click without a drag picks the highlighted window/element.
+                let m = s.mouse;
+                if !s.sel.confirmed()
+                    && let Some(r) = s.chain.current().filter(|r| r.contains(m))
+                {
+                    s.sel.set_rect(r);
+                }
+            });
             unsafe {
                 let _ = ReleaseCapture();
             }
@@ -669,6 +811,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
         }
         WM_RBUTTONDOWN | WM_MBUTTONDOWN => finish(hwnd, false),
+        WM_MOUSEWHEEL => {
+            let outward = ((wp.0 >> 16) & 0xFFFF) as u16 as i16 > 0;
+            let changed = with(|s| !s.sel.confirmed() && s.chain.step(outward));
+            if changed == Some(true) {
+                invalidate(hwnd, false);
+            }
+        }
+        WM_UIA => {
+            if apply_uia() {
+                invalidate(hwnd, false);
+            }
+        }
         WM_ACTIVATE if wp.0 & 0xFFFF == 0 => finish(hwnd, false),
         WM_KEYDOWN | WM_KEYUP => {
             let down = msg == WM_KEYDOWN;

@@ -294,6 +294,76 @@ impl Selection {
         self.current.x += sx;
         self.current.y += sy;
     }
+
+    /// Selects `r` (e.g. a detected window), clipped to bounds.
+    pub fn set_rect(&mut self, r: Rect) {
+        let b = self.bounds;
+        let l = r.left.max(b.left);
+        let t = r.top.max(b.top);
+        self.start = Point { x: l, y: t };
+        self.current = Point {
+            x: r.right().min(b.right()).max(l),
+            y: r.bottom().min(b.bottom()).max(t),
+        };
+        self.mode = Mode::Idle;
+        self.confirmed = self.rect().is_some();
+    }
+}
+
+/// Nested targets under the cursor, outermost (window) first.
+/// Starts at the innermost; the wheel walks outward/inward.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HoverChain {
+    rects: Vec<Rect>,
+    level: usize,
+}
+
+impl HoverChain {
+    pub fn new(mut rects: Vec<Rect>) -> Self {
+        rects.retain(|r| r.width > 0 && r.height > 0);
+        rects.dedup();
+        let level = rects.len().saturating_sub(1);
+        Self { rects, level }
+    }
+
+    pub fn current(&self) -> Option<Rect> {
+        self.rects.get(self.level).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rects.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rects.is_empty()
+    }
+
+    pub fn outermost(&self) -> Option<Rect> {
+        self.rects.first().copied()
+    }
+
+    pub fn deepest(&self) -> Option<Rect> {
+        self.rects.last().copied()
+    }
+
+    /// Keeps the outer levels still under `p` (shown until fresh inner levels arrive).
+    pub fn retain_containing(&mut self, p: Point) {
+        let keep = self.rects.iter().take_while(|r| r.contains(p)).count();
+        self.rects.truncate(keep);
+        self.level = keep.saturating_sub(1);
+    }
+
+    /// Returns true when the highlighted level changed.
+    pub fn step(&mut self, outward: bool) -> bool {
+        let next = if outward {
+            self.level.saturating_sub(1)
+        } else {
+            (self.level + 1).min(self.rects.len().saturating_sub(1))
+        };
+        let changed = next != self.level;
+        self.level = next;
+        changed
+    }
 }
 
 #[cfg(test)]
@@ -440,5 +510,41 @@ mod tests {
         s.drag(p(400, 200), true);
         s.release();
         assert_eq!(s.rect(), Some(r(100, 100, 300, 300)));
+    }
+
+    #[test]
+    fn set_rect_clips_and_confirms() {
+        let mut s = Selection::new(1920, 1080);
+        s.set_rect(r(-10, 500, 300, 900));
+        assert!(s.confirmed());
+        assert_eq!(s.rect(), Some(r(0, 500, 290, 580)));
+        s.set_rect(r(5000, 5000, 10, 10));
+        assert!(!s.confirmed());
+    }
+
+    #[test]
+    fn hover_chain_walks_levels() {
+        let win = r(0, 0, 800, 600);
+        let pane = r(10, 10, 300, 500);
+        let button = r(20, 20, 80, 30);
+        let mut h = HoverChain::new(vec![win, pane, pane, button, r(0, 0, 0, 5)]);
+        assert_eq!(h.current(), Some(button));
+        assert!(h.step(true));
+        assert_eq!(h.current(), Some(pane));
+        assert!(h.step(true));
+        assert!(!h.step(true));
+        assert_eq!(h.current(), Some(win));
+        assert!(h.step(false));
+        assert!(h.step(false));
+        assert!(!h.step(false));
+        assert_eq!(h.current(), Some(button));
+        assert_eq!(HoverChain::new(vec![]).current(), None);
+
+        h.retain_containing(p(200, 400));
+        assert_eq!(h.current(), Some(pane));
+        assert_eq!(h.outermost(), Some(win));
+        assert_eq!(h.deepest(), Some(pane));
+        h.retain_containing(p(5000, 5000));
+        assert_eq!(h.current(), None);
     }
 }

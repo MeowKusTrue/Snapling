@@ -11,3 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 snapling-core = { path = "../snapling-core" }
+snapling-win = { version = "0.0.1", path = "../snapling-win" }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+tray-icon = "0.24.2"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

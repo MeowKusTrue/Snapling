@@ -1,0 +1,9 @@
+/target
+/vendor/
+*.log
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12

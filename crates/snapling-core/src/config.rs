@@ -10,13 +10,16 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hotkeys {
+    /// Empty string disables the hotkey.
+    pub capture_region: String,
     pub capture_screen: String,
 }
 
 impl Default for Hotkeys {
     fn default() -> Self {
         Self {
-            capture_screen: "PrintScreen".into(),
+            capture_region: "PrintScreen".into(),
+            capture_screen: "Shift+PrintScreen".into(),
         }
     }
 }

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod icon;
+
 use snapling_core::config::Config;
 use snapling_core::hotkey::Hotkey;
 use std::path::PathBuf;
@@ -11,7 +13,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MSG, PostQuitMessage, TranslateMessage, WM_HOTKEY,
 };
 
-const HK_CAPTURE_SCREEN: i32 = 1;
+const HK_CAPTURE_REGION: i32 = 1;
+const HK_CAPTURE_SCREEN: i32 = 2;
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
 fn app_dir(env: &str) -> PathBuf {
@@ -42,37 +45,65 @@ fn init_log() {
 
 fn tray_icon() -> Icon {
     const N: u32 = 32;
-    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
-    for y in 0..N {
-        for x in 0..N {
-            let inner = (8..24).contains(&x) && (8..24).contains(&y);
-            rgba.extend_from_slice(if inner {
-                &[255, 255, 255, 255]
-            } else {
-                &[124, 58, 237, 255]
-            });
-        }
-    }
+    let rgba = icon::frame_spark(N, [0x29, 0x5B, 0xE8], [0xFF, 0x8A, 0x1F]);
     Icon::from_rgba(rgba, N, N).expect("valid icon")
 }
 
+fn copy(img: &snapling_win::Image, t0: Instant) {
+    match snapling_win::copy_image(img) {
+        Ok(()) => info!(
+            "copied {}x{} in {} ms",
+            img.width,
+            img.height,
+            t0.elapsed().as_millis()
+        ),
+        Err(e) => error!("clipboard: {e}"),
+    }
+}
+
 fn capture_screen() {
+    let t0 = Instant::now();
+    match snapling_win::capture_virtual_screen() {
+        Ok(img) => copy(&img, t0),
+        Err(e) => error!("capture: {e}"),
+    }
+}
+
+fn capture_region() {
+    if snapling_win::overlay::is_open() {
+        return;
+    }
     let t0 = Instant::now();
     let img = match snapling_win::capture_virtual_screen() {
         Ok(img) => img,
         Err(e) => return error!("capture: {e}"),
     };
-    let t1 = Instant::now();
-    if let Err(e) = snapling_win::copy_image(&img) {
-        return error!("clipboard: {e}");
+    let grab = t0.elapsed().as_millis();
+    let shown = snapling_win::overlay::show(img, |res| {
+        if let Some(img) = res {
+            copy(&img, Instant::now());
+        }
+    });
+    match shown {
+        Ok(()) => info!(
+            "overlay: grab {grab} ms, shown {} ms",
+            t0.elapsed().as_millis()
+        ),
+        Err(e) => error!("overlay: {e}"),
     }
-    info!(
-        "capture {}x{}: grab {} ms, clipboard {} ms",
-        img.width,
-        img.height,
-        (t1 - t0).as_millis(),
-        t1.elapsed().as_millis()
-    );
+}
+
+fn register(id: i32, name: &str, combo: &str) {
+    if combo.trim().is_empty() {
+        return;
+    }
+    match Hotkey::parse(combo).and_then(|hk| snapling_win::register_hotkey(id, &hk).map(|_| hk)) {
+        Ok(hk) => info!("hotkey {name} = {hk}"),
+        Err(e) => {
+            warn!("hotkey {name}: {e}");
+            snapling_win::warn(&e);
+        }
+    }
 }
 
 fn main() {
@@ -95,22 +126,33 @@ fn main() {
         ));
         Config::default()
     });
-
-    match Hotkey::parse(&cfg.hotkeys.capture_screen)
-        .and_then(|hk| snapling_win::register_hotkey(HK_CAPTURE_SCREEN, &hk).map(|_| hk))
-    {
-        Ok(hk) => info!("hotkey capture_screen = {hk}"),
-        Err(e) => {
-            warn!("hotkey: {e}");
-            snapling_win::warn(&e);
-        }
+    if let Err(e) = snapling_win::overlay::init() {
+        error!("overlay init: {e}");
     }
+    register(
+        HK_CAPTURE_REGION,
+        "capture_region",
+        &cfg.hotkeys.capture_region,
+    );
+    register(
+        HK_CAPTURE_SCREEN,
+        "capture_screen",
+        &cfg.hotkeys.capture_screen,
+    );
 
-    let capture = MenuItem::new("Снимок экрана", true, None);
+    let region = MenuItem::new("Выделить область", true, None);
+    let screen = MenuItem::new("Весь экран", true, None);
     let open_cfg = MenuItem::new("Папка настроек", true, None);
     let quit = MenuItem::new("Выход", true, None);
     let menu = Menu::new();
-    let _ = menu.append_items(&[&capture, &open_cfg, &PredefinedMenuItem::separator(), &quit]);
+    let _ = menu.append_items(&[
+        &region,
+        &screen,
+        &PredefinedMenuItem::separator(),
+        &open_cfg,
+        &PredefinedMenuItem::separator(),
+        &quit,
+    ]);
     let _tray = match TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip(snapling_core::APP_NAME)
@@ -127,15 +169,21 @@ fn main() {
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
-        if msg.message == WM_HOTKEY && msg.wParam.0 == HK_CAPTURE_SCREEN as usize {
-            capture_screen();
+        if msg.message == WM_HOTKEY {
+            match msg.wParam.0 as i32 {
+                HK_CAPTURE_REGION => capture_region(),
+                HK_CAPTURE_SCREEN => capture_screen(),
+                _ => {}
+            }
         }
         unsafe {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            if ev.id == capture.id() {
+            if ev.id == region.id() {
+                capture_region();
+            } else if ev.id == screen.id() {
                 capture_screen();
             } else if ev.id == open_cfg.id() {
                 let _ = std::process::Command::new("explorer").arg(&cfg_dir).spawn();

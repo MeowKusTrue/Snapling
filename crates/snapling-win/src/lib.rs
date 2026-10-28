@@ -27,11 +27,50 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, w};
 
-/// Top-down BGRA, alpha forced to 255.
+pub mod overlay;
+
+/// Top-down BGRA, alpha forced to 255. `x`/`y`: screen position of the top-left pixel.
 pub struct Image {
+    pub x: i32,
+    pub y: i32,
     pub width: u32,
     pub height: u32,
     pub bgra: Vec<u8>,
+}
+
+impl Image {
+    /// Copy of `r` (image coordinates), clipped to the image.
+    pub fn crop(&self, r: snapling_core::selection::Rect) -> Option<Image> {
+        crop_bgra(&self.bgra, self.width, self.height, (self.x, self.y), r)
+    }
+}
+
+pub(crate) fn crop_bgra(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    origin: (i32, i32),
+    r: snapling_core::selection::Rect,
+) -> Option<Image> {
+    let l = r.left.clamp(0, width as i32) as usize;
+    let t = r.top.clamp(0, height as i32) as usize;
+    let rr = r.right().clamp(0, width as i32) as usize;
+    let b = r.bottom().clamp(0, height as i32) as usize;
+    if rr <= l || b <= t {
+        return None;
+    }
+    let stride = width as usize * 4;
+    let mut bgra = Vec::with_capacity((rr - l) * (b - t) * 4);
+    for row in src.chunks_exact(stride).skip(t).take(b - t) {
+        bgra.extend_from_slice(&row[l * 4..rr * 4]);
+    }
+    Some(Image {
+        x: origin.0 + l as i32,
+        y: origin.1 + t as i32,
+        width: (rr - l) as u32,
+        height: (b - t) as u32,
+        bgra,
+    })
 }
 
 pub fn set_dpi_aware() {
@@ -104,7 +143,7 @@ fn vk_code(key: &str) -> Option<u32> {
     })
 }
 
-fn dib_header(width: u32, height: i32) -> BITMAPINFOHEADER {
+pub(crate) fn dib_header(width: u32, height: i32) -> BITMAPINFOHEADER {
     BITMAPINFOHEADER {
         biSize: size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: width as i32,
@@ -160,6 +199,8 @@ pub fn capture_virtual_screen() -> Result<Image, String> {
             px[3] = 255;
         }
         Ok(Image {
+            x,
+            y,
             width: w as u32,
             height: h as u32,
             bgra,
@@ -250,7 +291,12 @@ mod live {
         for _ in 0..5 {
             let t = std::time::Instant::now();
             let img = super::capture_virtual_screen().unwrap();
-            println!("{}x{} {} ms", img.width, img.height, t.elapsed().as_millis());
+            println!(
+                "{}x{} {} ms",
+                img.width,
+                img.height,
+                t.elapsed().as_millis()
+            );
             assert_eq!(img.bgra.len(), (img.width * img.height * 4) as usize);
         }
     }

@@ -11,6 +11,8 @@ name = "snapling"
 path = "src/main.rs"
 
 [dependencies]
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+egui-phosphor = "0.14.0"
 snapling-core = { path = "../snapling-core" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }

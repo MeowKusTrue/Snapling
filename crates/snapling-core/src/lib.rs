@@ -1,7 +1,9 @@
+pub mod annotate;
 pub mod config;
 pub mod history;
 pub mod hotkey;
 pub mod selection;
+pub mod sound;
 pub mod storage;
 
 pub const APP_NAME: &str = "Snapling";

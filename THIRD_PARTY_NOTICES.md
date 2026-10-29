@@ -6,6 +6,7 @@ https://github.com/thucne/EiSen (commit ff1128b)
 Ported to Rust:
 - `app/src/lib/overlay/geometry.ts` → `crates/snapling-core/src/selection.rs`
 - pointer/keyboard logic of `app/src/routes/overlay/+page.svelte` → `crates/snapling-core/src/selection.rs`, `crates/snapling-win/src/overlay.rs`
+- `app/src/lib/editor/elements.ts`, `store.ts`, `exportPipeline.ts` (arrow head geometry, step badge, snapshot undo/redo) → `crates/snapling-core/src/annotate.rs`
 
 ```
 MIT License
@@ -30,3 +31,8 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Ubuntu Light font
+
+Embedded via `epaint_default_fonts` and used to render annotation text.
+Licensed under the Ubuntu Font Licence 1.0: https://ubuntu.com/legal/font-licence

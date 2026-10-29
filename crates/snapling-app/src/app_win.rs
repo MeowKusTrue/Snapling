@@ -1,7 +1,8 @@
-use snapling_core::config::{Action, Config, Save};
+use snapling_core::config::{Action, Config, Save, SoundCfg};
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::selection::Rect;
-use snapling_core::{history, storage};
+use snapling_core::sound::{self, Sound};
+use snapling_core::{annotate, history, storage};
 use snapling_win::overlay::Outcome;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,45 @@ thread_local! {
 
 /// Set by the background saver.
 static LAST_SAVED: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Sound settings and pre-rendered WAVs; read from the saver thread too.
+type Wavs = [&'static [u8]; 3];
+static SOUND: Mutex<Option<(SoundCfg, Wavs)>> = Mutex::new(None);
+
+thread_local! {
+    /// `[capture] copy`: clipboard for hotkey captures (Enter in the overlay always copies).
+    static COPY_ON_CAPTURE: Cell<bool> = const { Cell::new(true) };
+}
+
+fn play(s: Sound) {
+    let Some((cfg, wavs)) = SOUND.lock().ok().and_then(|g| g.clone()) else {
+        return;
+    };
+    if !cfg.enabled || (cfg.mute_in_games && snapling_win::fullscreen_game()) {
+        return;
+    }
+    let i = match s {
+        Sound::Capture => 0,
+        Sound::Copy => 1,
+        Sound::Error => 2,
+    };
+    snapling_win::play_wav(wavs[i]);
+}
+
+fn apply_sound(cfg: &SoundCfg) {
+    let Ok(mut current) = SOUND.lock() else {
+        return;
+    };
+    let volume_changed = current.as_ref().is_none_or(|(c, _)| c.volume != cfg.volume);
+    let wavs = match current.take() {
+        Some((_, w)) if !volume_changed => w,
+        // ponytail: leaks ~40 KB per volume change (PlaySound reads the buffer after returning);
+        // free old buffers after PlaySound(NULL) if volume becomes a live slider.
+        _ => [Sound::Capture, Sound::Copy, Sound::Error]
+            .map(|s| &*Box::leak(sound::wav(s, cfg.volume).into_boxed_slice())),
+    };
+    *current = Some((cfg.clone(), wavs));
+}
 
 fn app_dir(env: &str) -> PathBuf {
     std::env::var_os(env)
@@ -68,7 +108,10 @@ fn copy(img: &snapling_win::Image, t0: Instant) {
             img.height,
             t0.elapsed().as_millis()
         ),
-        Err(e) => error!("clipboard: {e}"),
+        Err(e) => {
+            error!("clipboard: {e}");
+            play(Sound::Error);
+        }
     }
 }
 
@@ -121,18 +164,98 @@ fn save_async(img: snapling_win::Image, app: String, kind: &'static str) {
             }
             Err(e) => {
                 error!("save: {e}");
+                play(Sound::Error);
                 snapling_win::warn(&format!("Не удалось сохранить снимок.\n{e}"));
             }
         }
     });
 }
 
-/// Copy, then save too when `auto_save` is on.
-fn deliver(img: snapling_win::Image, t0: Instant, app: String, kind: &'static str) {
-    copy(&img, t0);
+/// Shutter sound, copy (if enabled or `force_copy`), then save when `auto_save` is on.
+fn deliver(
+    img: snapling_win::Image,
+    t0: Instant,
+    app: String,
+    kind: &'static str,
+    force_copy: bool,
+) {
+    play(Sound::Capture);
+    if force_copy || COPY_ON_CAPTURE.get() {
+        copy(&img, t0);
+    }
     if SAVE.with(|s| s.borrow().as_ref().is_some_and(|(_, c)| c.auto_save)) {
         save_async(img, app, kind);
     }
+}
+
+fn edit_dir() -> PathBuf {
+    app_dir("LOCALAPPDATA").join("edit")
+}
+
+/// Hands the shot to a separate editor process through a raw file it deletes after reading.
+fn open_editor(img: snapling_win::Image, app: String) {
+    std::thread::spawn(move || {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = edit_dir().join(format!("{nanos}.raw"));
+        let started = std::fs::create_dir_all(edit_dir())
+            .and_then(|()| annotate::write_raw(&path, &img.bgra, img.width, img.height, &app))
+            .and_then(|()| std::env::current_exe())
+            .and_then(|exe| {
+                std::process::Command::new(exe)
+                    .arg("--edit")
+                    .arg(&path)
+                    .spawn()
+            });
+        match started {
+            Ok(_) => info!("editor: {}x{}", img.width, img.height),
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                error!("editor: {e}");
+                play(Sound::Error);
+                snapling_win::warn(&format!("Не удалось открыть редактор.\n{e}"));
+            }
+        }
+    });
+}
+
+/// Clipboard and save folder for the editor process (reads config.toml itself).
+pub fn editor_hooks() -> crate::editor::Hooks {
+    crate::editor::Hooks {
+        copy: |bgra, w, h| {
+            snapling_win::copy_image(&snapling_win::Image {
+                x: 0,
+                y: 0,
+                width: w,
+                height: h,
+                bgra: bgra.to_vec(),
+            })
+        },
+        save: |bgra, w, h, app| {
+            let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"))?.save;
+            let stamp = snapling_win::local_stamp();
+            let dir = storage::prepare_dir(&save_dir(&cfg)?)?;
+            let name = storage::render_name(&cfg.name, stamp, app);
+            let path = storage::save_bgra(bgra, w, h, &dir, &name, cfg.format, cfg.jpeg_quality)?;
+            let entry = history::Entry {
+                time: history::time_string(stamp),
+                path: path.to_string_lossy().to_string(),
+                width: w,
+                height: h,
+                app: app.into(),
+                kind: "edit".into(),
+            };
+            let _ = history::append(&history_file(), &entry);
+            Ok(path)
+        },
+        warn: snapling_win::warn,
+    }
+}
+
+fn capture_failed(e: String) {
+    error!("capture: {e}");
+    play(Sound::Error);
 }
 
 /// Grabs all monitors and delivers `screen_rect` of it, or everything when `None`.
@@ -141,10 +264,10 @@ fn capture_rect(screen_rect: Option<Rect>, kind: &'static str) {
     let t0 = Instant::now();
     let img = match snapling_win::capture_virtual_screen() {
         Ok(img) => img,
-        Err(e) => return error!("capture: {e}"),
+        Err(e) => return capture_failed(e),
     };
     let Some(r) = screen_rect else {
-        return deliver(img, t0, app, kind);
+        return deliver(img, t0, app, kind, false);
     };
     let local = Rect {
         left: r.left - img.x,
@@ -152,7 +275,7 @@ fn capture_rect(screen_rect: Option<Rect>, kind: &'static str) {
         ..r
     };
     match img.crop(local) {
-        Some(part) => deliver(part, t0, app, kind),
+        Some(part) => deliver(part, t0, app, kind, false),
         None => warn!("region {r:?} is off screen"),
     }
 }
@@ -169,7 +292,7 @@ fn capture_region() {
     let t0 = Instant::now();
     let img = match snapling_win::capture_virtual_screen() {
         Ok(img) => img,
-        Err(e) => return error!("capture: {e}"),
+        Err(e) => return capture_failed(e),
     };
     let grab = t0.elapsed().as_millis();
     let shown = snapling_win::overlay::show(img, move |res| {
@@ -181,8 +304,15 @@ fn capture_region() {
             height: img.height as i32,
         }));
         match outcome {
-            Outcome::Copy => deliver(img, Instant::now(), app, "region"),
-            Outcome::Save => save_async(img, app, "region"),
+            Outcome::Copy => deliver(img, Instant::now(), app, "region", true),
+            Outcome::Save => {
+                play(Sound::Capture);
+                save_async(img, app, "region");
+            }
+            Outcome::Edit => {
+                play(Sound::Capture);
+                open_editor(img, app);
+            }
         }
     });
     match shown {
@@ -215,19 +345,22 @@ fn run_action(a: Action) {
 }
 
 /// Resolves the save folder (shape check only; created on first save).
-fn apply_save(cfg: &Config) -> Vec<String> {
-    let dir = match cfg.save.dir.trim() {
+fn save_dir(save: &Save) -> Result<PathBuf, String> {
+    let dir = match save.dir.trim() {
         "" => snapling_win::pictures_dir().map(|p| p.join("Snapling")),
         d => Some(PathBuf::from(d)),
     };
-    let checked = match dir {
+    match dir {
         None => Err("папка «Изображения» не найдена — укажи [save] dir".to_string()),
         Some(d) => match storage::shape_error(&d) {
             Some(e) => Err(e),
             None => Ok(d),
         },
-    };
-    match checked {
+    }
+}
+
+fn apply_save(cfg: &Config) -> Vec<String> {
+    match save_dir(&cfg.save) {
         Ok(d) => {
             info!(
                 "save dir {} ({:?}, auto_save {})",
@@ -248,6 +381,16 @@ fn apply_save(cfg: &Config) -> Vec<String> {
 fn apply_config(cfg: &Config) {
     let mut problems = apply_hotkeys(cfg);
     problems.extend(apply_save(cfg));
+    apply_sound(&cfg.sound);
+    COPY_ON_CAPTURE.set(cfg.capture.copy);
+    let hide = cfg.privacy.hide_from_capture;
+    match snapling_win::overlay::set_hidden_from_capture(hide) {
+        Ok(()) => info!("overlay hidden from capture: {hide}"),
+        Err(e) if hide => problems.push(format!(
+            "Скрыть выделение от демонстрации экрана не удалось (нужна Windows 10 2004+): {e}"
+        )),
+        Err(e) => warn!("display affinity: {e}"),
+    }
     report(&problems);
 }
 
@@ -304,6 +447,7 @@ pub fn run() {
         warn!("already running, exit");
         return;
     }
+    let _ = std::fs::remove_dir_all(edit_dir());
     info!(
         "{} {} start",
         snapling_core::APP_NAME,

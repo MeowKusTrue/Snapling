@@ -220,7 +220,7 @@ pub fn capture_virtual_screen() -> Result<Image, String> {
         if lines != h {
             return Err(format!("GetDIBits: {lines} из {h} строк"));
         }
-        for px in bgra.chunks_exact_mut(4) {
+        for px in bgra.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         Ok(Image {
@@ -389,4 +389,17 @@ pub fn foreground_app_name() -> String {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default()
     }
+}
+
+/// Plays an in-memory WAV without blocking. `'static`: PlaySound keeps reading the buffer
+/// after returning, so it must outlive playback.
+pub fn play_wav(wav: &'static [u8]) {
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+    let _ = unsafe {
+        PlaySoundW(
+            windows::core::PCWSTR(wav.as_ptr().cast()),
+            None,
+            SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+        )
+    };
 }

@@ -32,6 +32,21 @@ jpeg_quality = 90
 name = "{yyyy}-{MM}/Snapling_{yyyy}-{MM}-{dd}_{HH}-{mm}-{ss}_{app}"
 # Сохранять каждый скопированный снимок в папку автоматически.
 auto_save = true
+
+[capture]
+# Копировать снимок в буфер после Shift/Alt/Ctrl+PrtScn. Enter в выделении копирует всегда.
+copy = true
+
+[sound]
+enabled = true
+# Громкость 0–100.
+volume = 60
+# Без звуков, пока запущена игра на весь экран.
+mute_in_games = true
+
+[privacy]
+# Прятать выделение от демонстрации экрана и записи (Discord, OBS, Teams). Windows 10 2004+.
+hide_from_capture = true
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -39,6 +54,53 @@ auto_save = true
 pub struct Config {
     pub hotkeys: Hotkeys,
     pub save: Save,
+    pub capture: Capture,
+    pub sound: SoundCfg,
+    pub privacy: Privacy,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Capture {
+    pub copy: bool,
+}
+
+impl Default for Capture {
+    fn default() -> Self {
+        Self { copy: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SoundCfg {
+    pub enabled: bool,
+    pub volume: u8,
+    pub mute_in_games: bool,
+}
+
+impl Default for SoundCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            volume: 60,
+            mute_in_games: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Privacy {
+    pub hide_from_capture: bool,
+}
+
+impl Default for Privacy {
+    fn default() -> Self {
+        Self {
+            hide_from_capture: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]

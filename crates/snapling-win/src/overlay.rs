@@ -1,7 +1,7 @@
 //! Fullscreen region-selection overlay over the virtual screen (Win32 + GDI).
 //! Interaction follows EiSen's overlay (MIT, © 2026 Tran Trong Thuc):
 //! drag to select, Shift = square, Space = pan, corners resize, drag inside moves,
-//! arrows nudge (Shift ×10), Enter/C/double-click copy, Esc/right click cancel.
+//! arrows nudge (Shift ×10), Enter/C/double-click copy, S save, E editor, Esc/right click cancel.
 //! Snapling additions: hover highlights the window/element under the cursor, click picks it,
 //! the wheel walks element levels (up = outer).
 
@@ -52,12 +52,14 @@ type Done = Box<dyn FnOnce(Option<(Image, Outcome)>)>;
 pub enum Outcome {
     Copy,
     Save,
+    Edit,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Action {
     Save,
     Copy,
+    Edit,
     Cancel,
 }
 
@@ -649,6 +651,7 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
                 let items = [
                     ("Копировать", Action::Copy),
                     ("Сохранить", Action::Save),
+                    ("Редактор", Action::Edit),
                     ("Отмена", Action::Cancel),
                 ];
                 let (bp, bhh, bgap, pad) = (
@@ -725,6 +728,7 @@ fn act(hwnd: HWND, a: Action) {
     let out = match a {
         Action::Copy => Some(Outcome::Copy),
         Action::Save => Some(Outcome::Save),
+        Action::Edit => Some(Outcome::Edit),
         Action::Cancel => None,
     };
     finish(hwnd, out);
@@ -860,6 +864,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         finish(hwnd, Some(Outcome::Save));
                     }
                 }
+                v if v == b'E' as u16 && down => {
+                    if with(|s| s.sel.confirmed()) == Some(true) {
+                        finish(hwnd, Some(Outcome::Edit));
+                    }
+                }
                 v if v == VK_SPACE.0 => {
                     with(|s| s.sel.set_pan(down));
                 }
@@ -891,4 +900,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
     LRESULT(0)
+}
+
+/// Hides the overlay from screen sharing and recording (Discord, OBS, Teams) while it stays
+/// visible to the user. Windows 10 2004+; older systems return an error.
+pub fn set_hidden_from_capture(hide: bool) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
+    let hwnd = HWND_OVERLAY.get();
+    if hwnd.is_invalid() {
+        return Err("overlay не создан".into());
+    }
+    let mode = if hide {
+        WDA_EXCLUDEFROMCAPTURE
+    } else {
+        WDA_NONE
+    };
+    unsafe { SetWindowDisplayAffinity(hwnd, mode) }.map_err(|e| e.to_string())
 }

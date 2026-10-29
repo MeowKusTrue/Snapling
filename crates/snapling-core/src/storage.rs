@@ -255,7 +255,9 @@ pub fn save_bgra(
     use image::ImageEncoder;
 
     let rgb: Vec<u8> = bgra
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[2], p[1], p[0]])
         .collect();
     let path = unique(dir.join(name).with_extension(format.ext()));

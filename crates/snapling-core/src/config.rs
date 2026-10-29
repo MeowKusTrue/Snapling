@@ -18,12 +18,69 @@ capture_screen = "Shift+PrintScreen"
 capture_window = "Alt+PrintScreen"
 # Повторить последнюю выделенную область
 repeat_region = "Ctrl+PrintScreen"
+
+[save]
+# Папка для снимков. Пусто — «Изображения\Snapling».
+# Путь в одинарных кавычках: dir = 'E:\Photos' (или с прямыми слешами: "E:/Photos").
+dir = ''
+# Формат: "png" (без потерь), "webp" (без потерь, меньше), "jpeg" (с потерями).
+format = "png"
+# Качество JPEG, 1–100.
+jpeg_quality = 90
+# Имя файла без расширения. {yyyy} {MM} {dd} {HH} {mm} {ss} — дата и время, {app} — программа.
+# «/» создаёт подпапки.
+name = "{yyyy}-{MM}/Snapling_{yyyy}-{MM}-{dd}_{HH}-{mm}-{ss}_{app}"
+# Сохранять каждый скопированный снимок в папку автоматически.
+auto_save = true
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub hotkeys: Hotkeys,
+    pub save: Save,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    #[default]
+    Png,
+    Webp,
+    Jpeg,
+}
+
+impl Format {
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Webp => "webp",
+            Format::Jpeg => "jpg",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Save {
+    /// Empty: the platform's Pictures folder + `Snapling`.
+    pub dir: String,
+    pub format: Format,
+    pub jpeg_quality: u8,
+    pub name: String,
+    pub auto_save: bool,
+}
+
+impl Default for Save {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            format: Format::Png,
+            jpeg_quality: 90,
+            name: "{yyyy}-{MM}/Snapling_{yyyy}-{MM}-{dd}_{HH}-{mm}-{ss}_{app}".into(),
+            auto_save: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

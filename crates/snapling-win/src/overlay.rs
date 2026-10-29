@@ -45,10 +45,18 @@ const SURFACE_ALT: u32 = 0x222B3C;
 const BORDER: u32 = 0x354158;
 const TEXT: u32 = 0xF3F6FC;
 
-type Done = Box<dyn FnOnce(Option<Image>)>;
+type Done = Box<dyn FnOnce(Option<(Image, Outcome)>)>;
+
+/// What the user did with a confirmed selection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    Copy,
+    Save,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Action {
+    Save,
     Copy,
     Cancel,
 }
@@ -230,7 +238,10 @@ fn dib(width: u32, height: u32) -> Result<(HBITMAP, *mut u8), String> {
 }
 
 /// Shows the frozen frame; `on_done` gets the cropped region, or `None` on cancel.
-pub fn show(img: Image, on_done: impl FnOnce(Option<Image>) + 'static) -> Result<(), String> {
+pub fn show(
+    img: Image,
+    on_done: impl FnOnce(Option<(Image, Outcome)>) + 'static,
+) -> Result<(), String> {
     let hwnd = HWND_OVERLAY.get();
     if hwnd.is_invalid() || is_open() {
         return Err("overlay недоступен".into());
@@ -300,15 +311,15 @@ pub fn show(img: Image, on_done: impl FnOnce(Option<Image>) + 'static) -> Result
     Ok(())
 }
 
-fn finish(hwnd: HWND, copy: bool) {
+fn finish(hwnd: HWND, out: Option<Outcome>) {
     let Some(s) = STATE.with(|st| st.borrow_mut().take()) else {
         return;
     };
-    let result = if copy {
+    let result = if let Some(out) = out {
         s.sel.rect().filter(|_| s.sel.confirmed()).and_then(|r| {
             let len = s.width as usize * s.height as usize * 4;
             let src = unsafe { std::slice::from_raw_parts(s.orig_bits, len) };
-            crop_bgra(src, s.width, s.height, s.origin, r)
+            crop_bgra(src, s.width, s.height, s.origin, r).map(|img| (img, out))
         })
     } else {
         None
@@ -635,7 +646,11 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
             decor = union(decor, lr);
 
             if idle {
-                let items = [("Копировать", Action::Copy), ("Отмена", Action::Cancel)];
+                let items = [
+                    ("Копировать", Action::Copy),
+                    ("Сохранить", Action::Save),
+                    ("Отмена", Action::Cancel),
+                ];
                 let (bp, bhh, bgap, pad) = (
                     px(14.0, scale),
                     px(32.0, scale),
@@ -707,7 +722,12 @@ fn button_at(s: &State, p: Point) -> Option<usize> {
 }
 
 fn act(hwnd: HWND, a: Action) {
-    finish(hwnd, a == Action::Copy);
+    let out = match a {
+        Action::Copy => Some(Outcome::Copy),
+        Action::Save => Some(Outcome::Save),
+        Action::Cancel => None,
+    };
+    finish(hwnd, out);
 }
 
 fn set_cursor() {
@@ -807,10 +827,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         WM_LBUTTONDBLCLK => {
             let p = lparam_point(lp);
             if with(|s| s.sel.hit(p, 0) == Hit::Inside) == Some(true) {
-                finish(hwnd, true);
+                finish(hwnd, Some(Outcome::Copy));
             }
         }
-        WM_RBUTTONDOWN | WM_MBUTTONDOWN => finish(hwnd, false),
+        WM_RBUTTONDOWN | WM_MBUTTONDOWN => finish(hwnd, None),
         WM_MOUSEWHEEL => {
             let outward = ((wp.0 >> 16) & 0xFFFF) as u16 as i16 > 0;
             let changed = with(|s| !s.sel.confirmed() && s.chain.step(outward));
@@ -823,15 +843,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 invalidate(hwnd, false);
             }
         }
-        WM_ACTIVATE if wp.0 & 0xFFFF == 0 => finish(hwnd, false),
+        WM_ACTIVATE if wp.0 & 0xFFFF == 0 => finish(hwnd, None),
         WM_KEYDOWN | WM_KEYUP => {
             let down = msg == WM_KEYDOWN;
             let vk = wp.0 as u16;
             match vk {
-                v if v == VK_ESCAPE.0 && down => finish(hwnd, false),
+                v if v == VK_ESCAPE.0 && down => finish(hwnd, None),
                 v if (v == VK_RETURN.0 || v == b'C' as u16) && down => {
                     if with(|s| s.sel.confirmed()) == Some(true) {
-                        finish(hwnd, true);
+                        finish(hwnd, Some(Outcome::Copy));
+                    }
+                }
+                // S and Ctrl+S both save, as EiSen's S.
+                v if v == b'S' as u16 && down => {
+                    if with(|s| s.sel.confirmed()) == Some(true) {
+                        finish(hwnd, Some(Outcome::Save));
                     }
                 }
                 v if v == VK_SPACE.0 => {

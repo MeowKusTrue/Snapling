@@ -1,8 +1,11 @@
-use snapling_core::config::{Action, Config};
+use snapling_core::config::{Action, Config, Save};
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::selection::Rect;
-use std::cell::Cell;
+use snapling_core::{history, storage};
+use snapling_win::overlay::Outcome;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 use tracing::{error, info, warn};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -18,7 +21,12 @@ const CONFIG_POLL_MS: u32 = 1500;
 thread_local! {
     /// Last confirmed region in screen coordinates, for "repeat region".
     static LAST_REGION: Cell<Option<Rect>> = const { Cell::new(None) };
+    /// Validated save folder (created lazily on first save) and its settings; `None` = saving off.
+    static SAVE: RefCell<Option<(PathBuf, Save)>> = const { RefCell::new(None) };
 }
+
+/// Set by the background saver.
+static LAST_SAVED: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 fn app_dir(env: &str) -> PathBuf {
     std::env::var_os(env)
@@ -64,15 +72,79 @@ fn copy(img: &snapling_win::Image, t0: Instant) {
     }
 }
 
-/// Grabs all monitors and copies `screen_rect` of it, or everything when `None`.
-fn capture_rect(screen_rect: Option<Rect>) {
+fn history_file() -> PathBuf {
+    app_dir("LOCALAPPDATA").join("history.jsonl")
+}
+
+/// Encodes and writes on a worker thread so PNG of a 4K screen never blocks the UI.
+fn save_async(img: snapling_win::Image, app: String, kind: &'static str) {
+    let Some((dir, cfg)) = SAVE.with(|s| s.borrow().clone()) else {
+        warn!("save skipped: no valid folder");
+        return;
+    };
+    let stamp = snapling_win::local_stamp();
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        let name = storage::render_name(&cfg.name, stamp, &app);
+        let saved = storage::prepare_dir(&dir).and_then(|d| {
+            storage::save_bgra(
+                &img.bgra,
+                img.width,
+                img.height,
+                &d,
+                &name,
+                cfg.format,
+                cfg.jpeg_quality,
+            )
+        });
+        match saved {
+            Ok(path) => {
+                info!(
+                    "saved {} in {} ms",
+                    path.display(),
+                    t0.elapsed().as_millis()
+                );
+                let entry = history::Entry {
+                    time: history::time_string(stamp),
+                    path: path.to_string_lossy().to_string(),
+                    width: img.width,
+                    height: img.height,
+                    app,
+                    kind: kind.into(),
+                };
+                if let Err(e) = history::append(&history_file(), &entry) {
+                    warn!("history: {e}");
+                }
+                if let Ok(mut last) = LAST_SAVED.lock() {
+                    *last = Some(path);
+                }
+            }
+            Err(e) => {
+                error!("save: {e}");
+                snapling_win::warn(&format!("Не удалось сохранить снимок.\n{e}"));
+            }
+        }
+    });
+}
+
+/// Copy, then save too when `auto_save` is on.
+fn deliver(img: snapling_win::Image, t0: Instant, app: String, kind: &'static str) {
+    copy(&img, t0);
+    if SAVE.with(|s| s.borrow().as_ref().is_some_and(|(_, c)| c.auto_save)) {
+        save_async(img, app, kind);
+    }
+}
+
+/// Grabs all monitors and delivers `screen_rect` of it, or everything when `None`.
+fn capture_rect(screen_rect: Option<Rect>, kind: &'static str) {
+    let app = snapling_win::foreground_app_name();
     let t0 = Instant::now();
     let img = match snapling_win::capture_virtual_screen() {
         Ok(img) => img,
         Err(e) => return error!("capture: {e}"),
     };
     let Some(r) = screen_rect else {
-        return copy(&img, t0);
+        return deliver(img, t0, app, kind);
     };
     let local = Rect {
         left: r.left - img.x,
@@ -80,7 +152,7 @@ fn capture_rect(screen_rect: Option<Rect>) {
         ..r
     };
     match img.crop(local) {
-        Some(part) => copy(&part, t0),
+        Some(part) => deliver(part, t0, app, kind),
         None => warn!("region {r:?} is off screen"),
     }
 }
@@ -91,23 +163,26 @@ fn capture_region() {
     }
     if snapling_win::fullscreen_game() {
         info!("game mode: fullscreen app, capture without overlay");
-        return capture_rect(None);
+        return capture_rect(None, "screen");
     }
+    let app = snapling_win::foreground_app_name();
     let t0 = Instant::now();
     let img = match snapling_win::capture_virtual_screen() {
         Ok(img) => img,
         Err(e) => return error!("capture: {e}"),
     };
     let grab = t0.elapsed().as_millis();
-    let shown = snapling_win::overlay::show(img, |res| {
-        if let Some(img) = res {
-            LAST_REGION.set(Some(Rect {
-                left: img.x,
-                top: img.y,
-                width: img.width as i32,
-                height: img.height as i32,
-            }));
-            copy(&img, Instant::now());
+    let shown = snapling_win::overlay::show(img, move |res| {
+        let Some((img, outcome)) = res else { return };
+        LAST_REGION.set(Some(Rect {
+            left: img.x,
+            top: img.y,
+            width: img.width as i32,
+            height: img.height as i32,
+        }));
+        match outcome {
+            Outcome::Copy => deliver(img, Instant::now(), app, "region"),
+            Outcome::Save => save_async(img, app, "region"),
         }
     });
     match shown {
@@ -122,7 +197,7 @@ fn capture_region() {
 fn run_action(a: Action) {
     match a {
         Action::CaptureRegion => capture_region(),
-        Action::CaptureScreen => capture_rect(None),
+        Action::CaptureScreen => capture_rect(None, "screen"),
         Action::CaptureWindow => {
             let r = snapling_win::targets::foreground_window().map(|r| Rect {
                 left: r.left,
@@ -130,13 +205,50 @@ fn run_action(a: Action) {
                 width: r.right - r.left,
                 height: r.bottom - r.top,
             });
-            capture_rect(r);
+            capture_rect(r, "window");
         }
         Action::RepeatRegion => match LAST_REGION.get() {
-            Some(r) => capture_rect(Some(r)),
+            Some(r) => capture_rect(Some(r), "repeat"),
             None => capture_region(),
         },
     }
+}
+
+/// Resolves the save folder (shape check only; created on first save).
+fn apply_save(cfg: &Config) -> Vec<String> {
+    let dir = match cfg.save.dir.trim() {
+        "" => snapling_win::pictures_dir().map(|p| p.join("Snapling")),
+        d => Some(PathBuf::from(d)),
+    };
+    let checked = match dir {
+        None => Err("папка «Изображения» не найдена — укажи [save] dir".to_string()),
+        Some(d) => match storage::shape_error(&d) {
+            Some(e) => Err(e),
+            None => Ok(d),
+        },
+    };
+    match checked {
+        Ok(d) => {
+            info!(
+                "save dir {} ({:?}, auto_save {})",
+                d.display(),
+                cfg.save.format,
+                cfg.save.auto_save
+            );
+            SAVE.with(|s| *s.borrow_mut() = Some((d, cfg.save.clone())));
+            Vec::new()
+        }
+        Err(e) => {
+            SAVE.with(|s| *s.borrow_mut() = None);
+            vec![format!("Сохранение отключено: {e}")]
+        }
+    }
+}
+
+fn apply_config(cfg: &Config) {
+    let mut problems = apply_hotkeys(cfg);
+    problems.extend(apply_save(cfg));
+    report(&problems);
 }
 
 fn hotkey_id(a: Action) -> i32 {
@@ -172,7 +284,7 @@ fn report(problems: &[String]) {
         return;
     }
     for p in problems {
-        warn!("hotkeys: {p}");
+        warn!("config: {p}");
     }
     let list: Vec<String> = problems.iter().map(|p| format!("• {p}")).collect();
     snapling_win::warn(&format!(
@@ -210,10 +322,12 @@ pub fn run() {
     if let Err(e) = snapling_win::overlay::init() {
         error!("overlay init: {e}");
     }
-    report(&apply_hotkeys(&cfg));
+    apply_config(&cfg);
 
     let region = MenuItem::new("Выделить область", true, None);
     let screen = MenuItem::new("Весь экран", true, None);
+    let last = MenuItem::new("Последний снимок", true, None);
+    let folder = MenuItem::new("Папка снимков", true, None);
     let open_cfg = MenuItem::new("Настройки (config.toml)", true, None);
     let quit = MenuItem::new("Выход", true, None);
     let menu = Menu::new();
@@ -221,6 +335,8 @@ pub fn run() {
         &region,
         &screen,
         &PredefinedMenuItem::separator(),
+        &last,
+        &folder,
         &open_cfg,
         &PredefinedMenuItem::separator(),
         &quit,
@@ -259,7 +375,7 @@ pub fn run() {
                     match Config::load_or_create(&cfg_path) {
                         Ok(cfg) => {
                             info!("config reloaded");
-                            report(&apply_hotkeys(&cfg));
+                            apply_config(&cfg);
                         }
                         Err(e) => {
                             warn!("config: {e}");
@@ -280,7 +396,27 @@ pub fn run() {
             if ev.id == region.id() {
                 capture_region();
             } else if ev.id == screen.id() {
-                capture_rect(None);
+                capture_rect(None, "screen");
+            } else if ev.id == last.id() {
+                match LAST_SAVED.lock().ok().and_then(|l| l.clone()) {
+                    Some(p) => {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(format!("/select,{}", p.display()))
+                            .spawn();
+                    }
+                    None => snapling_win::warn("В этом сеансе снимков ещё не сохранено."),
+                }
+            } else if ev.id == folder.id() {
+                let dir = SAVE.with(|s| s.borrow().as_ref().map(|(d, _)| d.clone()));
+                match dir.map(|d| storage::prepare_dir(&d)) {
+                    Some(Ok(d)) => {
+                        let _ = std::process::Command::new("explorer").arg(d).spawn();
+                    }
+                    Some(Err(e)) => snapling_win::warn(&e),
+                    None => snapling_win::warn(
+                        "Сохранение отключено — проверь [save] dir в config.toml.",
+                    ),
+                }
             } else if ev.id == open_cfg.id() {
                 let _ = std::process::Command::new("notepad").arg(&cfg_path).spawn();
             } else if ev.id == quit.id() {

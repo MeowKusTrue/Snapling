@@ -42,7 +42,7 @@ extern "system" fn on_window(hwnd: HWND, out: LPARAM) -> BOOL {
 }
 
 /// Bounds without the invisible resize border; `None` for windows the user cannot see.
-fn target_rect(hwnd: HWND) -> Option<RECT> {
+pub(crate) fn target_rect(hwnd: HWND) -> Option<RECT> {
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             return None;
@@ -81,4 +81,10 @@ fn target_rect(hwnd: HWND) -> Option<RECT> {
         }
         (r.right > r.left && r.bottom > r.top).then_some(r)
     }
+}
+
+/// Foreground window bounds (screen coordinates); `None` for the desktop or hidden windows.
+pub fn foreground_window() -> Option<RECT> {
+    let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    (!hwnd.is_invalid()).then(|| target_rect(hwnd)).flatten()
 }

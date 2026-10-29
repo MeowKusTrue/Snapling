@@ -106,13 +106,36 @@ pub fn register_hotkey(id: i32, hk: &Hotkey) -> Result<(), String> {
     unsafe { RegisterHotKey(None, id, HOT_KEY_MODIFIERS(mods.0), vk) }.map_err(|e| {
         if e.code() == ERROR_HOTKEY_ALREADY_REGISTERED.to_hresult() {
             format!(
-                "Сочетание {hk} уже занято Windows или другим приложением.\n\
-                 Windows не сообщает, каким именно. Выберите другое сочетание в config.toml."
+                "{hk} занято другой программой или Windows (какой именно — Windows не сообщает)"
             )
         } else {
-            format!("Не удалось зарегистрировать {hk}: {e}")
+            format!("{hk} не зарегистрировано: {e}")
         }
     })
+}
+
+pub fn unregister_hotkey(id: i32) {
+    let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(None, id) };
+}
+
+/// Windows 11 «Use the Print screen key to open screen capture»: on unless explicitly 0.
+/// Read-only; Snapling never changes this setting.
+pub fn snipping_owns_printscreen() -> bool {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let mut value = 0u32;
+    let mut size = 4u32;
+    let res = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Control Panel\\Keyboard"),
+            w!("PrintScreenKeyForSnippingEnabled"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut value).cast()),
+            Some(&mut size),
+        )
+    };
+    res.is_err() || value != 0
 }
 
 fn vk_code(key: &str) -> Option<u32> {

@@ -1,3 +1,4 @@
+use crate::config::{Action, Hotkeys};
 use std::fmt;
 
 const NAMED: &[&str] = &[
@@ -100,9 +101,132 @@ impl fmt::Display for Hotkey {
     }
 }
 
+/// Parsed bindings plus readable problems. Syntax errors and duplicates are dropped;
+/// OS-reserved combos are kept (registration may still work) but warned about.
+pub fn check(
+    hotkeys: &Hotkeys,
+    reserved: fn(&Hotkey) -> Option<&'static str>,
+) -> (Vec<(Action, Hotkey)>, Vec<String>) {
+    let mut ok: Vec<(Action, Hotkey)> = Vec::new();
+    let mut problems = Vec::new();
+    for a in Action::ALL {
+        let combo = hotkeys.combo(a).trim();
+        if combo.is_empty() {
+            continue;
+        }
+        let hk = match Hotkey::parse(combo) {
+            Ok(hk) => hk,
+            Err(e) => {
+                problems.push(format!("«{}»: {e}", a.title()));
+                continue;
+            }
+        };
+        if let Some((other, _)) = ok.iter().find(|(_, h)| *h == hk) {
+            problems.push(format!(
+                "«{}»: {hk} уже назначено на «{}»",
+                a.title(),
+                other.title()
+            ));
+            continue;
+        }
+        if let Some(why) = reserved(&hk) {
+            problems.push(format!("«{}»: {hk} — {why}", a.title()));
+        }
+        ok.push((a, hk));
+    }
+    (ok, problems)
+}
+
+/// Combos Windows or every app already uses. Alt+PrintScreen is left out on purpose:
+/// Snapling replaces Windows' "copy active window" with the same action.
+pub fn reserved_on_windows(hk: &Hotkey) -> Option<&'static str> {
+    let k = hk.key.as_str();
+    let fkey_high = k
+        .strip_prefix('F')
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| n >= 13);
+    Some(match (hk.ctrl, hk.alt, hk.shift, hk.win, k) {
+        (false, false, true, true, "S") => "занято «Ножницами» Windows",
+        (false, false, false, true, "PrintScreen") => "снимок экрана Windows в «Изображения»",
+        (false, true, false, true, "PrintScreen" | "R") => "занято Xbox Game Bar",
+        (_, _, _, true, _) => "сочетания с Win часто заняты Windows",
+        (true, true, false, false, "Delete") => "системное сочетание Windows",
+        (true, false, true, false, "Escape") => "открывает диспетчер задач",
+        (true, false, false, false, "Escape") => "открывает меню «Пуск»",
+        (false, true, false, false, "Tab" | "F4" | "Escape") => "системное сочетание Windows",
+        (
+            true,
+            false,
+            false,
+            false,
+            "A" | "C" | "F" | "N" | "O" | "P" | "S" | "T" | "V" | "W" | "X" | "Y" | "Z",
+        ) => "перехватит стандартное сочетание во всех программах",
+        (false, false, false, false, "PrintScreen" | "Pause" | "ScrollLock") => return None,
+        (false, false, false, false, _) if !fkey_high => {
+            "без модификаторов клавиша перестанет работать в других программах"
+        }
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_reports_bad_duplicate_and_reserved() {
+        let hk = Hotkeys {
+            capture_region: "PrintScreen".into(),
+            capture_screen: "printscreen".into(),
+            capture_window: "Ctrl+Foo".into(),
+            repeat_region: "Win+Shift+S".into(),
+        };
+        let (ok, problems) = check(&hk, reserved_on_windows);
+        let actions: Vec<Action> = ok.iter().map(|(a, _)| *a).collect();
+        assert_eq!(actions, [Action::CaptureRegion, Action::RepeatRegion]);
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].contains("уже назначено на «Выделить область»"));
+        assert!(problems[1].contains("неизвестная клавиша"));
+        assert!(problems[2].contains("Ножницами"));
+    }
+
+    #[test]
+    fn defaults_are_clean_and_empty_disables() {
+        let (ok, problems) = check(&Hotkeys::default(), reserved_on_windows);
+        assert_eq!(ok.len(), 4);
+        assert!(problems.is_empty(), "{problems:?}");
+        let off = Hotkeys {
+            capture_screen: " ".into(),
+            ..Hotkeys::default()
+        };
+        assert_eq!(check(&off, reserved_on_windows).0.len(), 3);
+    }
+
+    #[test]
+    fn reserved_table() {
+        let r = |s: &str| reserved_on_windows(&Hotkey::parse(s).unwrap()).is_some();
+        for bad in [
+            "Win+PrintScreen",
+            "Win+E",
+            "Ctrl+C",
+            "Alt+F4",
+            "A",
+            "F5",
+            "Ctrl+Shift+Escape",
+        ] {
+            assert!(r(bad), "{bad}");
+        }
+        for fine in [
+            "PrintScreen",
+            "Alt+PrintScreen",
+            "Ctrl+Shift+S",
+            "F13",
+            "Ctrl+Alt+S",
+            "Pause",
+        ] {
+            assert!(!r(fine), "{fine}");
+        }
+    }
 
     #[test]
     fn parses_and_round_trips() {

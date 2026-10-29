@@ -1,18 +1,38 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// Written on first start; the comments are the hotkey documentation for now.
+pub const TEMPLATE: &str = r#"# Snapling — настройки. Изменения применяются сразу после сохранения файла.
+
+[hotkeys]
+# Формат: модификаторы + клавиша через «+». Модификаторы: Ctrl, Alt, Shift, Win.
+# Клавиши: A–Z, 0–9, F1–F24, PrintScreen, Space, Tab, Enter, Escape, Insert, Delete,
+#          Home, End, PageUp, PageDown, Up, Down, Left, Right, Pause, ScrollLock.
+# Пустая строка "" — действие без горячей клавиши.
+
+# Выделить область (с подсветкой окон и элементов)
+capture_region = "PrintScreen"
+# Весь экран (все мониторы) сразу в буфер
+capture_screen = "Shift+PrintScreen"
+# Активное окно сразу в буфер
+capture_window = "Alt+PrintScreen"
+# Повторить последнюю выделенную область
+repeat_region = "Ctrl+PrintScreen"
+"#;
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub hotkeys: Hotkeys,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Hotkeys {
-    /// Empty string disables the hotkey.
     pub capture_region: String,
     pub capture_screen: String,
+    pub capture_window: String,
+    pub repeat_region: String,
 }
 
 impl Default for Hotkeys {
@@ -20,26 +40,64 @@ impl Default for Hotkeys {
         Self {
             capture_region: "PrintScreen".into(),
             capture_screen: "Shift+PrintScreen".into(),
+            capture_window: "Alt+PrintScreen".into(),
+            repeat_region: "Ctrl+PrintScreen".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    CaptureRegion,
+    CaptureScreen,
+    CaptureWindow,
+    RepeatRegion,
+}
+
+impl Action {
+    pub const ALL: [Action; 4] = [
+        Action::CaptureRegion,
+        Action::CaptureScreen,
+        Action::CaptureWindow,
+        Action::RepeatRegion,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Action::CaptureRegion => "Выделить область",
+            Action::CaptureScreen => "Весь экран",
+            Action::CaptureWindow => "Активное окно",
+            Action::RepeatRegion => "Повторить область",
+        }
+    }
+}
+
+impl Hotkeys {
+    pub fn combo(&self, a: Action) -> &str {
+        match a {
+            Action::CaptureRegion => &self.capture_region,
+            Action::CaptureScreen => &self.capture_screen,
+            Action::CaptureWindow => &self.capture_window,
+            Action::RepeatRegion => &self.repeat_region,
         }
     }
 }
 
 impl Config {
-    /// Missing file: writes defaults. Broken file: error, file left untouched.
+    /// Missing file: writes the commented template. Broken file: error, file left untouched.
     pub fn load_or_create(path: &Path) -> Result<Self, String> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let cfg = Self::default();
                 if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                 }
-                let text = toml::to_string(&cfg).map_err(|e| e.to_string())?;
-                std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
-                Ok(cfg)
+                std::fs::write(path, TEMPLATE).map_err(|e| format!("{}: {e}", path.display()))?;
+                TEMPLATE.to_string()
             }
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        }
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 
@@ -78,5 +136,18 @@ mod tests {
         assert!(Config::load_or_create(&p).is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "hotkeys = [");
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn typo_in_hotkey_name_is_reported() {
+        let err = toml::from_str::<Config>("[hotkeys]\ncapture_regoin = \"F1\"").unwrap_err();
+        assert!(err.to_string().contains("capture_regoin"), "{err}");
+    }
+
+    #[test]
+    fn missing_keys_fall_back_to_defaults() {
+        let cfg: Config = toml::from_str("[hotkeys]\ncapture_screen = \"\"").unwrap();
+        assert_eq!(cfg.hotkeys.capture_screen, "");
+        assert_eq!(cfg.hotkeys.capture_region, "PrintScreen");
     }
 }

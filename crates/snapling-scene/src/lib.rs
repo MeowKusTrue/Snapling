@@ -19,6 +19,72 @@ pub enum Button {
     Cancel,
 }
 
+/// Drawing tools of the in-overlay editor, keys 1–9 in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Arrow,
+    Line,
+    Rect,
+    Ellipse,
+    Pen,
+    Marker,
+    Text,
+    Step,
+    Blur,
+}
+
+pub const TOOLS: [Tool; 9] = [
+    Tool::Arrow,
+    Tool::Line,
+    Tool::Rect,
+    Tool::Ellipse,
+    Tool::Pen,
+    Tool::Marker,
+    Tool::Text,
+    Tool::Step,
+    Tool::Blur,
+];
+
+pub const COLORS: [[u8; 3]; 8] = [
+    [255, 59, 48],
+    [255, 138, 31],
+    [255, 204, 0],
+    [52, 199, 89],
+    [10, 132, 255],
+    [175, 82, 222],
+    [17, 17, 17],
+    [255, 255, 255],
+];
+pub const SIZES: [f32; 3] = [2.0, 4.0, 8.0];
+
+/// Anything clickable in the overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    Action(Button),
+    Tool(Tool),
+    Undo,
+    Redo,
+    Color(usize),
+    Size(usize),
+    /// Blur kind: `true` = Gaussian, `false` = cubes.
+    Gauss(bool),
+    Strength(u8),
+}
+
+/// Editor state shown after the selection is confirmed.
+pub struct Draw<'a> {
+    pub tool: Option<Tool>,
+    pub color: [u8; 3],
+    pub size: f32,
+    pub blur: annotate::BlurStyle,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// Shape being dragged, in image coordinates and RGB.
+    pub live: Option<&'a annotate::Element>,
+    /// Text being typed and where.
+    pub caret: Option<(Pt, &'a str)>,
+}
+
 /// What the cursor highlights before anything is selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -55,15 +121,19 @@ pub struct Scene<'a> {
     pub confirmed: bool,
     pub dragging: bool,
     pub hover: Option<Hover<'a>>,
-    pub hover_button: Option<Button>,
+    pub hover_button: Option<Control>,
+    pub tools: Option<Draw<'a>>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Layout {
-    pub buttons: Vec<(Rect, Button)>,
+    pub buttons: Vec<(Rect, Control)>,
     /// Everything drawn outside the selection itself, inflated for blur and shadows.
     pub bounds: Option<Rect>,
     toolbar: Option<Rect>,
+    strip: Option<Rect>,
+    options: Option<Rect>,
+    dividers: Vec<Rect>,
     size_pill: Option<(Rect, String)>,
     hover_pill: Option<Rect>,
     hint_bar: Option<Rect>,
@@ -91,6 +161,14 @@ const BAR: [Option<Button>; 7] = [
     Some(Button::Translate),
     None,
     Some(Button::Cancel),
+];
+
+const HINTS_DRAW: [(&str, &str); 5] = [
+    ("1–9", "рисовать"),
+    ("Ctrl+Z", "отменить"),
+    ("Enter", "копировать"),
+    ("S", "сохранить"),
+    ("Esc", "инструмент / отмена"),
 ];
 
 const HINTS: [(&str, &str); 7] = [
@@ -211,13 +289,21 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
                     Some(_) => BTN * s,
                     None => 9.0 * s,
                 };
-                if let Some(b) = b {
-                    out.buttons.push((r(bx, by, w, BTN * s), b));
+                match b {
+                    Some(b) => out
+                        .buttons
+                        .push((r(bx, by, w, BTN * s), Control::Action(b))),
+                    None => out
+                        .dividers
+                        .push(r(bx + 4.0 * s, by + 9.0 * s, s, 22.0 * s)),
                 }
                 bx += w + GAP * s;
             }
             out.bounds = union(out.bounds, inflate(bar, (40.0 * s) as i32));
             out.toolbar = Some(bar);
+            if let Some(t) = &sc.tools {
+                editor_layout(&mut out, sc, t, sel, bar);
+            }
         }
     } else if let Some(hv) = &sc.hover {
         let tag = text_w(&f.semibold, hv.target.label(), 13.0 * s) + 18.0 * s;
@@ -240,8 +326,9 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
     }
     if !sc.dragging {
         let fs = 12.5 * s;
-        let mut w = 32.0 * s + 18.0 * s * (HINTS.len() - 1) as f32;
-        for (k, v) in HINTS {
+        let hints = hints(sc);
+        let mut w = 32.0 * s + 18.0 * s * (hints.len() - 1) as f32;
+        for &(k, v) in hints {
             w += text_w(&f.semibold, k, fs) + text_w(&f.regular, &format!(" {v}"), fs);
         }
         let h = 34.0 * s;
@@ -256,6 +343,118 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
         out.hint_bar = Some(bar);
     }
     out
+}
+
+fn hints(sc: &Scene<'_>) -> &'static [(&'static str, &'static str)] {
+    if sc.confirmed { &HINTS_DRAW } else { &HINTS }
+}
+
+/// Vertical tool strip beside the selection and the options bar after the action toolbar.
+fn editor_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>, sel: Rect, bar: Rect) {
+    let s = sc.scale;
+    let mon = sc.monitor;
+    let gap = 14.0 * s;
+    let n = TOOLS.len() as f32;
+    let sw = (BTN + 2.0 * BAR_PAD) * s;
+    let sh = 2.0 * BAR_PAD * s + (n + 2.0) * BTN * s + 9.0 * s + (n + 2.0) * GAP * s;
+    let (ml, mr) = (mon.left as f32, mon.right() as f32);
+    let x = if sel.right() as f32 + gap + sw <= mr {
+        sel.right() as f32 + gap
+    } else if sel.left as f32 - gap - sw >= ml {
+        sel.left as f32 - gap - sw
+    } else {
+        sel.right() as f32 - sw - gap
+    };
+    let y = (sel.top as f32)
+        .min(mon.bottom() as f32 - sh - gap)
+        .max(mon.top as f32 + gap);
+    // Narrow selections: the strip would run through the action toolbar; step past it.
+    let x = if y < bar.bottom() as f32
+        && y + sh > bar.top as f32
+        && x < bar.right() as f32 + gap
+        && x + sw > bar.left as f32
+    {
+        bar.right() as f32 + gap
+    } else {
+        x
+    };
+    let strip = r(x, y, sw, sh);
+    let mut by = y + BAR_PAD * s;
+    let bx = x + BAR_PAD * s;
+    let items = TOOLS.iter().map(|&t| Some(Control::Tool(t))).chain([
+        None,
+        Some(Control::Undo),
+        Some(Control::Redo),
+    ]);
+    for c in items {
+        let h = if c.is_some() { BTN } else { 9.0 } * s;
+        match c {
+            Some(c) => out.buttons.push((r(bx, by, BTN * s, h), c)),
+            None => out
+                .dividers
+                .push(r(bx + 9.0 * s, by + 4.0 * s, 22.0 * s, s)),
+        }
+        by += h + GAP * s;
+    }
+    out.bounds = union(out.bounds, inflate(strip, (40.0 * s) as i32));
+    out.strip = Some(strip);
+
+    let Some(tool) = t.tool else { return };
+    let items: Vec<Option<Control>> = if tool == Tool::Blur {
+        [
+            Some(Control::Gauss(false)),
+            Some(Control::Gauss(true)),
+            None,
+        ]
+        .into_iter()
+        .chain((0..3).map(|i| Some(Control::Strength(i))))
+        .chain([None])
+        .chain((0..3).map(|i| Some(Control::Size(i))))
+        .collect()
+    } else {
+        (0..COLORS.len())
+            .map(|i| Some(Control::Color(i)))
+            .chain([None])
+            .chain((0..3).map(|i| Some(Control::Size(i))))
+            .collect()
+    };
+    let width = |c: &Option<Control>| match c {
+        Some(Control::Gauss(_)) => BTN,
+        Some(_) => 32.0,
+        None => 9.0,
+    } * s;
+    let ow = 2.0 * BAR_PAD * s
+        + items.iter().map(width).sum::<f32>()
+        + (items.len() - 1) as f32 * GAP * s;
+    let oh = bar.height as f32;
+    let mut ox = bar.left as f32;
+    let mut oy = bar.bottom() as f32 + 8.0 * s;
+    if oy + oh > mon.bottom() as f32 - gap {
+        oy = bar.top as f32 - 8.0 * s - oh;
+    }
+    if oy < strip.bottom() as f32
+        && oy + oh > strip.top as f32
+        && ox + ow > strip.left as f32
+        && ox < strip.right() as f32
+    {
+        ox = strip.right() as f32 + 8.0 * s;
+    }
+    let ox = ox.min(mr - ow).max(ml);
+    let opts = r(ox, oy, ow, oh);
+    let mut cx = ox + BAR_PAD * s;
+    let cy = oy + BAR_PAD * s;
+    for c in &items {
+        let w = width(c);
+        match c {
+            Some(c) => out.buttons.push((r(cx, cy, w, BTN * s), *c)),
+            None => out
+                .dividers
+                .push(r(cx + 4.0 * s, cy + 9.0 * s, s, 22.0 * s)),
+        }
+        cx += w + GAP * s;
+    }
+    out.bounds = union(out.bounds, inflate(opts, (40.0 * s) as i32));
+    out.options = Some(opts);
 }
 
 fn hover_text(hv: &Hover<'_>) -> String {
@@ -331,51 +530,6 @@ fn rr(a: Rect, rad: f32) -> Option<Path> {
 }
 
 /// Three box passes ≈ a Gaussian (CSS `blur(sigma)`), on premultiplied BGRA.
-fn box_blur(pm: &mut Pixmap, radius: usize) {
-    let (w, h) = (pm.width() as usize, pm.height() as usize);
-    if radius == 0 || w == 0 || h == 0 {
-        return;
-    }
-    let data = pm.data_mut();
-    let mut tmp = vec![0u8; data.len()];
-    for _ in 0..3 {
-        blur_pass(data, &mut tmp, w, h, radius, true);
-        blur_pass(&tmp, data, w, h, radius, false);
-    }
-}
-
-fn blur_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, rad: usize, horizontal: bool) {
-    let (len, lines) = if horizontal { (w, h) } else { (h, w) };
-    let at = |line: usize, i: usize| {
-        if horizontal {
-            (line * w + i) * 4
-        } else {
-            (i * w + line) * 4
-        }
-    };
-    let win = (2 * rad + 1) as u32;
-    for line in 0..lines {
-        let mut sum = [0u32; 4];
-        for k in 0..win as usize {
-            let i = at(line, k.saturating_sub(rad).min(len - 1));
-            for c in 0..4 {
-                sum[c] += u32::from(src[i + c]);
-            }
-        }
-        for i in 0..len {
-            let o = at(line, i);
-            for c in 0..4 {
-                dst[o + c] = (sum[c] / win) as u8;
-            }
-            let add = at(line, (i + rad + 1).min(len - 1));
-            let sub = at(line, i.saturating_sub(rad));
-            for c in 0..4 {
-                sum[c] = sum[c] + u32::from(src[add + c]) - u32::from(src[sub + c]);
-            }
-        }
-    }
-}
-
 /// Copy of `area` (clamped) from the buffer.
 fn grab(pm: &PixmapMut<'_>, area: Rect) -> Option<(Pixmap, i32, i32)> {
     let (w, h) = (pm.width() as i32, pm.height() as i32);
@@ -416,7 +570,7 @@ fn glass(pm: &mut PixmapMut<'_>, at: Rect, rad: f32, tint: [u8; 4], blur: f32, s
             ) {
                 layer.fill_path(&p, &paint([0, 0, 0, 153]), FillRule::Winding, id, None);
             }
-            box_blur(&mut layer, (pad / 3).max(1) as usize);
+            annotate::box_blur(&mut layer, (pad / 3).max(1) as usize);
             pm.draw_pixmap(
                 sh.left - pad,
                 sh.top - pad,
@@ -430,7 +584,7 @@ fn glass(pm: &mut PixmapMut<'_>, at: Rect, rad: f32, tint: [u8; 4], blur: f32, s
     let Some(path) = rr(at, rad) else { return };
     let b = (blur / 2.0).round() as i32;
     if let Some((mut back, x0, y0)) = grab(pm, inflate(at, b * 3)) {
-        box_blur(&mut back, b.max(1) as usize);
+        annotate::box_blur(&mut back, b.max(1) as usize);
         let shader = tiny_skia::Pattern::new(
             back.as_ref(),
             tiny_skia::SpreadMode::Pad,
@@ -474,6 +628,45 @@ fn text(
 }
 
 /// Mockup icons (24-unit grid, 2-unit round strokes) as SVG path data.
+const UNDO: [&str; 2] = [
+    "M 9 14 L 4 9 L 9 4",
+    "M 4 9 H 15 C 18 9 20 11 20 14 C 20 17 18 19 15 19 H 12",
+];
+const REDO: [&str; 2] = [
+    "M 15 14 L 20 9 L 15 4",
+    "M 20 9 H 9 C 6 9 4 11 4 14 C 4 17 6 19 9 19 H 12",
+];
+const CUBES: [&str; 5] = [
+    "M 5 5 H 9 V 9 H 5 Z",
+    "M 15 5 H 19 V 9 H 15 Z",
+    "M 10 10 H 14 V 14 H 10 Z",
+    "M 5 15 H 9 V 19 H 5 Z",
+    "M 15 15 H 19 V 19 H 15 Z",
+];
+const DROP: [&str; 1] =
+    ["M 12 4 C 12 4 6 11 6 15 C 6 18.3 8.7 21 12 21 C 15.3 21 18 18.3 18 15 C 18 11 12 4 12 4 Z"];
+
+fn tool_icon(t: Tool) -> &'static [&'static str] {
+    match t {
+        Tool::Arrow => &["M 5 19 L 19 5", "M 10 5 H 19 V 14"],
+        Tool::Line => &["M 5 19 L 19 5"],
+        Tool::Rect => {
+            &["M 7 5 H 17 Q 19 5 19 7 V 17 Q 19 19 17 19 H 7 Q 5 19 5 17 V 7 Q 5 5 7 5 Z"]
+        }
+        Tool::Ellipse => &[
+            "M 12 5 C 15.9 5 19 8.1 19 12 C 19 15.9 15.9 19 12 19 C 8.1 19 5 15.9 5 12 C 5 8.1 8.1 5 12 5 Z",
+        ],
+        Tool::Pen => &["M 4 20 L 8 19 L 19 8 L 16 5 L 5 16 L 4 20 Z"],
+        Tool::Marker => &["M 4 20 H 9", "M 7 17 L 16 8 L 19 11 L 10 20 Z"],
+        Tool::Text => &["M 6 6 H 18", "M 12 6 V 19", "M 9 19 H 15"],
+        Tool::Step => &[
+            "M 12 4 C 16.4 4 20 7.6 20 12 C 20 16.4 16.4 20 12 20 C 7.6 20 4 16.4 4 12 C 4 7.6 7.6 4 12 4 Z",
+            "M 10.5 9.5 L 12.5 8 V 16",
+        ],
+        Tool::Blur => &CUBES,
+    }
+}
+
 fn icon_data(b: Button) -> &'static [&'static str] {
     match b {
         Button::Copy => &[
@@ -572,10 +765,10 @@ fn svg_path(d: &str, x: f32, y: f32, k: f32) -> Option<Path> {
     pb.finish()
 }
 
-fn icon(pm: &mut PixmapMut<'_>, b: Button, cx: f32, cy: f32, size: f32, c: [u8; 4]) {
+fn icon(pm: &mut PixmapMut<'_>, paths: &[&str], cx: f32, cy: f32, size: f32, c: [u8; 4]) {
     let k = size / 24.0;
     let (x, y) = (cx - size / 2.0, cy - size / 2.0);
-    for d in icon_data(b) {
+    for d in paths {
         if let Some(p) = svg_path(d, x, y, k) {
             pm.stroke_path(&p, &paint(c), &stroke(2.0 * k), Transform::identity(), None);
         }
@@ -587,6 +780,19 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
     let s = sc.scale;
     let f = fonts();
     let id = Transform::identity();
+    if let Some(t) = &sc.tools {
+        if let Some(el) = t.live {
+            draw_element(pm, el);
+        }
+        if let Some((at, typed)) = t.caret {
+            let el = annotate::Element {
+                kind: annotate::Kind::Text(at, format!("{typed}|")),
+                color: t.color,
+                size: t.size,
+            };
+            draw_element(pm, &el);
+        }
+    }
     if let Some(hv) = &sc.hover
         && sc.selection.is_none()
     {
@@ -697,87 +903,143 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             [0xC9, 0xD2, 0xE3, 255],
         );
     }
-    if let Some(bar) = lay.toolbar {
-        glass(pm, bar, 16.0 * s, GLASS, 24.0 * s, true);
-        {
-            // Top highlight of the mockup's inset shadow.
-            let mut pb = PathBuilder::new();
-            pb.move_to(bar.left as f32 + 16.0 * s, bar.top as f32 + 1.0);
-            pb.line_to(bar.right() as f32 - 16.0 * s, bar.top as f32 + 1.0);
-            if let Some(top) = pb.finish() {
-                pm.stroke_path(&top, &paint([255, 255, 255, 20]), &stroke(1.0), id, None);
-            }
+    for (panel, rad) in [(lay.toolbar, 16.0), (lay.strip, 16.0), (lay.options, 16.0)] {
+        let Some(bar) = panel else { continue };
+        glass(pm, bar, rad * s, GLASS, 24.0 * s, true);
+        // Top highlight of the mockup's inset shadow.
+        let mut pb = PathBuilder::new();
+        pb.move_to(bar.left as f32 + 16.0 * s, bar.top as f32 + 1.0);
+        pb.line_to(bar.right() as f32 - 16.0 * s, bar.top as f32 + 1.0);
+        if let Some(top) = pb.finish() {
+            pm.stroke_path(&top, &paint([255, 255, 255, 20]), &stroke(1.0), id, None);
         }
-        for &(b_rect, b) in &lay.buttons {
-            let hovered = sc.hover_button == Some(b);
-            let (bx, by, bw, bh) = (
-                b_rect.left as f32,
-                b_rect.top as f32,
-                b_rect.width as f32,
-                b_rect.height as f32,
-            );
-            let cy = by + bh / 2.0;
-            if b == Button::Copy {
-                let fill = if hovered {
-                    [0x37, 0x67, 0xEE, 255]
-                } else {
-                    BLUE
-                };
-                if let Some(p) = rr(b_rect, 11.0 * s) {
-                    pm.fill_path(&p, &paint(fill), FillRule::Winding, id, None);
-                }
-                let mut pb = PathBuilder::new();
-                pb.move_to(bx + 11.0 * s, by + 1.0);
-                pb.line_to(bx + bw - 11.0 * s, by + 1.0);
-                if let Some(top) = pb.finish() {
-                    pm.stroke_path(&top, &paint([255, 255, 255, 46]), &stroke(1.0), id, None);
-                }
-                icon(
-                    pm,
-                    b,
-                    bx + 12.0 * s + 9.0 * s,
-                    cy,
-                    18.0 * s,
-                    [255, 255, 255, 255],
-                );
-                text(
-                    pm,
-                    &f.semibold,
-                    "Копировать",
-                    bx + 38.0 * s,
-                    cy,
-                    14.0 * s,
-                    [255, 255, 255, 255],
-                );
+    }
+    for d in &lay.dividers {
+        if let Some(p) = rr(*d, 0.0) {
+            pm.fill_path(&p, &paint([255, 255, 255, 31]), FillRule::Winding, id, None);
+        }
+    }
+    let tools = sc.tools.as_ref();
+    for &(b_rect, c) in &lay.buttons {
+        let hovered = sc.hover_button == Some(c);
+        let (bx, by, bw, bh) = (
+            b_rect.left as f32,
+            b_rect.top as f32,
+            b_rect.width as f32,
+            b_rect.height as f32,
+        );
+        let (cx, cy) = (bx + bw / 2.0, by + bh / 2.0);
+        let selected = tools.is_some_and(|t| match c {
+            Control::Tool(x) => t.tool == Some(x),
+            Control::Color(i) => t.color == COLORS[i],
+            Control::Size(i) => t.size == SIZES[i],
+            Control::Gauss(g) => t.blur.gauss == g,
+            Control::Strength(i) => t.blur.strength == i,
+            _ => false,
+        });
+        let disabled = tools.is_some_and(|t| {
+            (c == Control::Undo && !t.can_undo) || (c == Control::Redo && !t.can_redo)
+        });
+        if c == Control::Action(Button::Copy) {
+            let fill = if hovered {
+                [0x37, 0x67, 0xEE, 255]
             } else {
-                if hovered && let Some(p) = rr(b_rect, 11.0 * s) {
-                    pm.fill_path(&p, &paint([255, 255, 255, 20]), FillRule::Winding, id, None);
-                }
-                let (size, c) = if b == Button::Cancel {
+                BLUE
+            };
+            if let Some(p) = rr(b_rect, 11.0 * s) {
+                pm.fill_path(&p, &paint(fill), FillRule::Winding, id, None);
+            }
+            let mut pb = PathBuilder::new();
+            pb.move_to(bx + 11.0 * s, by + 1.0);
+            pb.line_to(bx + bw - 11.0 * s, by + 1.0);
+            if let Some(top) = pb.finish() {
+                pm.stroke_path(&top, &paint([255, 255, 255, 46]), &stroke(1.0), id, None);
+            }
+            icon(
+                pm,
+                icon_data(Button::Copy),
+                bx + 21.0 * s,
+                cy,
+                18.0 * s,
+                [255; 4],
+            );
+            text(
+                pm,
+                &f.semibold,
+                "Копировать",
+                bx + 38.0 * s,
+                cy,
+                14.0 * s,
+                [255; 4],
+            );
+            continue;
+        }
+        let fill = if selected && matches!(c, Control::Tool(_) | Control::Gauss(_)) {
+            Some(BLUE)
+        } else if hovered && !disabled {
+            Some([255, 255, 255, 20])
+        } else {
+            None
+        };
+        if let Some(fill) = fill
+            && let Some(p) = rr(b_rect, 11.0 * s)
+        {
+            pm.fill_path(&p, &paint(fill), FillRule::Winding, id, None);
+        }
+        let on = if selected { [255; 4] } else { ICON_MUTED };
+        match c {
+            Control::Action(b) => {
+                let (size, col) = if b == Button::Cancel {
                     (18.0, ICON_MUTED)
                 } else {
                     (19.0, ICON)
                 };
-                icon(pm, b, bx + bw / 2.0, cy, size * s, c);
+                icon(pm, icon_data(b), cx, cy, size * s, col);
             }
-        }
-        if let Some(&(cancel, _)) = lay.buttons.iter().find(|(_, b)| *b == Button::Cancel) {
-            let dx = cancel.left as f32 - (GAP + 4.5) * s;
-            let cy = cancel.top as f32 + cancel.height as f32 / 2.0;
-            let mut pb = PathBuilder::new();
-            pb.move_to(dx, cy - 11.0 * s);
-            pb.line_to(dx, cy + 11.0 * s);
-            if let Some(p) = pb.finish() {
-                pm.stroke_path(
-                    &p,
-                    &paint([255, 255, 255, 31]),
-                    &Stroke {
-                        width: s,
-                        ..Stroke::default()
-                    },
-                    id,
-                    None,
-                );
+            Control::Tool(t) => {
+                let col = if selected { [255; 4] } else { ICON };
+                icon(pm, tool_icon(t), cx, cy, 19.0 * s, col);
+            }
+            Control::Undo | Control::Redo => {
+                let col = if disabled {
+                    [0xE6, 0xEB, 0xF5, 70]
+                } else {
+                    ICON
+                };
+                let d: &[&str] = if c == Control::Undo { &UNDO } else { &REDO };
+                icon(pm, d, cx, cy, 19.0 * s, col);
+            }
+            Control::Color(i) => {
+                let [r0, g0, b0] = COLORS[i];
+                if let Some(p) = PathBuilder::from_circle(cx, cy, 8.0 * s) {
+                    pm.fill_path(&p, &paint([r0, g0, b0, 255]), FillRule::Winding, id, None);
+                    pm.stroke_path(&p, &paint([255, 255, 255, 40]), &stroke(1.0), id, None);
+                }
+                if (selected || hovered)
+                    && let Some(p) = PathBuilder::from_circle(cx, cy, 11.5 * s)
+                {
+                    let a = if selected { 255 } else { 110 };
+                    pm.stroke_path(&p, &paint([255, 255, 255, a]), &stroke(1.5 * s), id, None);
+                }
+            }
+            Control::Size(i) => {
+                if let Some(p) = PathBuilder::from_circle(cx, cy, (2.5 + i as f32 * 2.0) * s) {
+                    pm.fill_path(&p, &paint(on), FillRule::Winding, id, None);
+                }
+            }
+            Control::Strength(i) => {
+                for k in 0..=i {
+                    let h = (6.0 + 4.0 * f32::from(k)) * s;
+                    let x = cx - f32::from(i) * 3.0 * s + f32::from(k) * 6.0 * s;
+                    if let Some(p) = rrect(x - 1.5 * s, cy + 7.0 * s - h, 3.0 * s, h, 1.5 * s) {
+                        pm.fill_path(&p, &paint(on), FillRule::Winding, id, None);
+                    }
+                }
+            }
+            Control::Gauss(g) => {
+                let col = if selected { [255; 4] } else { ICON };
+                let d: &[&str] = if g { &DROP } else { &CUBES };
+                icon(pm, d, cx, cy, 19.0 * s, col);
             }
         }
     }
@@ -793,7 +1055,7 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
         let fs = 12.5 * s;
         let cy = bar.top as f32 + bar.height as f32 / 2.0;
         let mut x = bar.left as f32 + 16.0 * s;
-        for (k, v) in HINTS {
+        for &(k, v) in hints(sc) {
             x += text(pm, &f.semibold, k, x, cy, fs, TEXT);
             x += text(pm, &f.regular, &format!(" {v}"), x, cy, fs, ICON_MUTED);
             x += 18.0 * s;
@@ -801,11 +1063,21 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
     }
 }
 
-pub fn button_at(lay: &Layout, p: Point) -> Option<Button> {
+pub fn button_at(lay: &Layout, p: Point) -> Option<Control> {
     lay.buttons
         .iter()
         .find(|(r, _)| r.contains(p))
-        .map(|(_, b)| *b)
+        .map(|(_, c)| *c)
+}
+
+/// An annotation in the BGRA buffer: same element with its color channels swapped.
+pub fn draw_element(pm: &mut PixmapMut<'_>, e: &annotate::Element) {
+    let [r0, g0, b0] = e.color;
+    let swapped = annotate::Element {
+        color: [b0, g0, r0],
+        ..e.clone()
+    };
+    annotate::draw(pm, &swapped);
 }
 
 #[cfg(test)]
@@ -828,6 +1100,7 @@ mod tests {
             dragging: false,
             hover: None,
             hover_button: None,
+            tools: None,
         }
     }
 
@@ -843,7 +1116,7 @@ mod tests {
         let bar = lay.toolbar.unwrap();
         assert_eq!((bar.left, bar.top, bar.height), (368, 442, 52));
         assert_eq!(lay.buttons.len(), 6);
-        assert_eq!(lay.buttons[0].1, Button::Copy);
+        assert_eq!(lay.buttons[0].1, Control::Action(Button::Copy));
         let pill = lay.size_pill.as_ref().unwrap();
         assert_eq!((pill.0.left, pill.0.top), (368, 172));
         assert_eq!(pill.1, "488 × 214");
@@ -851,7 +1124,7 @@ mod tests {
             x: lay.buttons[1].0.left + 5,
             y: lay.buttons[1].0.top + 5,
         };
-        assert_eq!(button_at(&lay, p), Some(Button::Save));
+        assert_eq!(button_at(&lay, p), Some(Control::Action(Button::Save)));
     }
 
     #[test]
@@ -911,6 +1184,11 @@ mod tests {
                 assert!(svg_path(d, 0.0, 0.0, 1.0).is_some(), "{b:?}: {d}");
             }
         }
+        for t in TOOLS {
+            for d in tool_icon(t).iter().chain(&UNDO).chain(&REDO).chain(&DROP) {
+                assert!(svg_path(d, 0.0, 0.0, 1.0).is_some(), "{t:?}: {d}");
+            }
+        }
     }
 }
 
@@ -964,6 +1242,11 @@ mod preview {
             width: 1440,
             height: 900,
         };
+        let live = annotate::Element {
+            kind: annotate::Kind::Arrow(Pt { x: 420.0, y: 380.0 }, Pt { x: 700.0, y: 280.0 }),
+            color: COLORS[0],
+            size: SIZES[1],
+        };
         for (name, sc) in [
             (
                 "selection",
@@ -975,7 +1258,20 @@ mod preview {
                     confirmed: true,
                     dragging: false,
                     hover: None,
-                    hover_button: Some(Button::Edit),
+                    hover_button: Some(Control::Action(Button::Edit)),
+                    tools: Some(Draw {
+                        tool: Some(Tool::Blur),
+                        color: COLORS[0],
+                        size: SIZES[1],
+                        blur: annotate::BlurStyle {
+                            gauss: true,
+                            strength: 1,
+                        },
+                        can_undo: true,
+                        can_redo: false,
+                        live: Some(&live),
+                        caret: Some((Pt { x: 400.0, y: 230.0 }, "Привет")),
+                    }),
                 },
             ),
             (
@@ -998,6 +1294,7 @@ mod preview {
                         app: "Firefox",
                     }),
                     hover_button: None,
+                    tools: None,
                 },
             ),
         ] {
@@ -1047,6 +1344,7 @@ mod fullscreen {
                 app: "Valorant",
             }),
             hover_button: None,
+            tools: None,
         };
         let lay = layout(&sc);
         let mut pm = PixmapMut::from_bytes(&mut buf, w, h).unwrap();

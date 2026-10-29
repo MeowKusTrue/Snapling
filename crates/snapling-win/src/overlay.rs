@@ -4,11 +4,15 @@
 //! drag to select, Shift = square, Space = pan, corners resize, drag inside moves,
 //! arrows nudge (Shift ×10), Enter/C/double-click copy, S save, E editor, O text (OCR), R translate, Esc/right click cancel.
 //! Snapling additions: hover highlights the window/element under the cursor, click picks it,
-//! the wheel walks element levels (up = outer).
+//! the wheel walks element levels (up = outer), and the selection can be annotated in place
+//! (tools 1–9, Ctrl+Z/Y) before it is copied: committed shapes are baked into `annot`.
 
 use crate::{Image, crop_bgra, dib_header, targets, uia};
+use snapling_core::annotate::{self, BlurStyle, Element, History, Kind, Pt};
 use snapling_core::selection::{Corner, Hit, HoverChain, Point, Rect, Selection};
-use snapling_scene::{Button, Hover, Layout, Scene, Target};
+use snapling_scene::{
+    Button, COLORS, Control, Draw, Hover, Layout, SIZES, Scene, TOOLS, Target, Tool,
+};
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc::Sender;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -20,14 +24,14 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE,
+    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, GetCursorPos, HWND_TOPMOST, IDC_CROSS, IDC_HAND,
-    IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENWSE, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, WM_ACTIVATE,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    IDC_IBEAM, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENWSE, LoadCursorW, RegisterClassW, SW_HIDE,
+    SW_SHOW, SWP_NOACTIVATE, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, WM_ACTIVATE,
+    WM_CHAR, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_SETCURSOR, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -55,6 +59,9 @@ struct State {
     orig: HBITMAP,
     orig_bits: *const u8,
     dim: HBITMAP,
+    /// The frame with committed annotations: what the selection shows and what is copied.
+    annot: HBITMAP,
+    annot_bits: *mut u8,
     back: HBITMAP,
     back_bits: *mut u8,
     sel: Selection,
@@ -62,15 +69,43 @@ struct State {
     /// Area of the last drawn decorations, to clear them on the next frame.
     decor: Option<Rect>,
     layout: Layout,
-    hover_btn: Option<Button>,
+    hover_btn: Option<Control>,
     /// Exe name of the hovered window, for the hover pill.
     app: String,
+    pen: Pen,
     windows: Vec<(isize, Rect)>,
     monitors: Vec<Rect>,
     chain: HoverChain,
     chain_win: Option<isize>,
     chain_seq: u64,
     on_done: Option<Done>,
+}
+
+/// In-overlay editor state.
+struct Pen {
+    tool: Option<Tool>,
+    color: [u8; 3],
+    size: f32,
+    blur: BlurStyle,
+    history: History,
+    /// Shape being dragged.
+    live: Option<Element>,
+    /// Text being typed and where.
+    typing: Option<(Pt, String)>,
+}
+
+impl Default for Pen {
+    fn default() -> Self {
+        Self {
+            tool: None,
+            color: COLORS[0],
+            size: SIZES[1],
+            blur: BlurStyle::default(),
+            history: History::default(),
+            live: None,
+            typing: None,
+        }
+    }
 }
 
 const WM_UIA: u32 = 0x8000 + 1;
@@ -238,8 +273,10 @@ pub fn show(
     let (orig, orig_bits) = dib(img.width, img.height)?;
     let (dim, dim_bits) = dib(img.width, img.height)?;
     let (back, back_bits) = dib(img.width, img.height)?;
+    let (annot, annot_bits) = dib(img.width, img.height)?;
     unsafe {
         std::ptr::copy_nonoverlapping(img.bgra.as_ptr(), orig_bits, len);
+        std::ptr::copy_nonoverlapping(img.bgra.as_ptr(), annot_bits, len);
         let dim = std::slice::from_raw_parts_mut(dim_bits, len);
         for (i, (d, s)) in dim.iter_mut().zip(&img.bgra).enumerate() {
             *d = match i % 4 {
@@ -266,6 +303,8 @@ pub fn show(
             orig_bits,
             dim,
             back,
+            annot,
+            annot_bits,
             back_bits,
             sel: Selection::new(w, h),
             mouse: Point::default(),
@@ -273,6 +312,7 @@ pub fn show(
             layout: Layout::default(),
             hover_btn: None,
             app: String::new(),
+            pen: Pen::default(),
             windows,
             monitors,
             chain: HoverChain::default(),
@@ -305,13 +345,21 @@ pub fn show(
 }
 
 fn finish(hwnd: HWND, out: Option<Outcome>) {
+    if out.is_some() {
+        with(|s| {
+            if let Some(el) = s.pen.live.take() {
+                commit(s, el);
+            }
+            commit_text(s);
+        });
+    }
     let Some(s) = STATE.with(|st| st.borrow_mut().take()) else {
         return;
     };
     let result = if let Some(out) = out {
         s.sel.rect().filter(|_| s.sel.confirmed()).and_then(|r| {
             let len = s.width as usize * s.height as usize * 4;
-            let src = unsafe { std::slice::from_raw_parts(s.orig_bits, len) };
+            let src = unsafe { std::slice::from_raw_parts(s.annot_bits, len) };
             crop_bgra(src, s.width, s.height, s.origin, r).map(|img| (img, out))
         })
     } else {
@@ -320,7 +368,7 @@ fn finish(hwnd: HWND, out: Option<Outcome>) {
     unsafe {
         let _ = ReleaseCapture();
         let _ = ShowWindow(hwnd, SW_HIDE);
-        for b in [s.orig, s.dim, s.back] {
+        for b in [s.orig, s.dim, s.annot, s.back] {
             let _ = DeleteObject(b.into());
         }
     }
@@ -419,6 +467,16 @@ fn scene(s: &State) -> Scene<'_> {
         dragging: s.sel.is_dragging(),
         hover,
         hover_button: s.hover_btn,
+        tools: s.sel.confirmed().then(|| Draw {
+            tool: s.pen.tool,
+            color: s.pen.color,
+            size: s.pen.size,
+            blur: s.pen.blur,
+            can_undo: s.pen.history.can_undo(),
+            can_redo: s.pen.history.can_redo(),
+            live: s.pen.live.as_ref(),
+            caret: s.pen.typing.as_ref().map(|(p, t)| (*p, t.as_str())),
+        }),
     }
 }
 
@@ -500,7 +558,7 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
         let old_src = SelectObject(src, s.dim.into());
         blit(back, src, area);
         if let Some(inter) = sc.selection.and_then(|r| intersect(to_rect(r), area)) {
-            SelectObject(src, s.orig.into());
+            SelectObject(src, s.annot.into());
             blit(back, src, inter);
         }
         let _ = GdiFlush();
@@ -530,7 +588,7 @@ fn shift_down() -> bool {
     unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 }
 }
 
-fn button_at(s: &State, p: Point) -> Option<Button> {
+fn button_at(s: &State, p: Point) -> Option<Control> {
     snapling_scene::button_at(&s.layout, p)
 }
 
@@ -546,6 +604,106 @@ fn act(hwnd: HWND, b: Button) {
     finish(hwnd, out);
 }
 
+/// Re-renders `annot` = frame + committed shapes (on commit and undo only).
+fn bake(s: &mut State) {
+    let len = s.width as usize * s.height as usize * 4;
+    unsafe {
+        let _ = GdiFlush();
+        std::ptr::copy_nonoverlapping(s.orig_bits, s.annot_bits, len);
+        let bits = std::slice::from_raw_parts_mut(s.annot_bits, len);
+        if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(bits, s.width, s.height) {
+            for e in &s.pen.history.doc.elements {
+                snapling_scene::draw_element(&mut pm, e);
+            }
+        }
+    }
+}
+
+fn commit(s: &mut State, el: Element) {
+    s.pen.history.push(el);
+    bake(s);
+}
+
+fn commit_text(s: &mut State) {
+    if let Some((at, text)) = s.pen.typing.take() {
+        let el = Element {
+            kind: Kind::Text(at, text.trim_end().to_string()),
+            color: s.pen.color,
+            size: s.pen.size,
+        };
+        commit(s, el);
+    }
+}
+
+/// Pointer in image coordinates, kept inside the selection: shapes outside it would be cut.
+fn pen_point(s: &State, p: Point) -> Pt {
+    let r = s.sel.rect().unwrap_or_default();
+    Pt {
+        x: p.x.clamp(r.left, r.right()) as f32,
+        y: p.y.clamp(r.top, r.bottom()) as f32,
+    }
+}
+
+/// Press with a drawing tool: starts a shape, places a number or opens the text caret.
+fn pen_down(s: &mut State, tool: Tool, p: Point) {
+    commit_text(s);
+    let at = pen_point(s, p);
+    let pen = &s.pen;
+    let kind = match tool {
+        Tool::Arrow => Kind::Arrow(at, at),
+        Tool::Line => Kind::Line(at, at),
+        Tool::Rect => Kind::Rect(at, at),
+        Tool::Ellipse => Kind::Ellipse(at, at),
+        Tool::Pen => Kind::Pen(vec![at]),
+        Tool::Marker => Kind::Marker(vec![at]),
+        Tool::Blur => Kind::Blur(vec![at], pen.blur),
+        Tool::Step => Kind::Step(at, pen.history.next_step()),
+        Tool::Text => {
+            s.pen.typing = Some((at, String::new()));
+            return;
+        }
+    };
+    let el = Element {
+        kind,
+        color: pen.color,
+        size: pen.size,
+    };
+    if tool == Tool::Step {
+        commit(s, el);
+    } else {
+        s.pen.live = Some(el);
+    }
+}
+
+fn control(hwnd: HWND, c: Control) {
+    if let Control::Action(b) = c {
+        return act(hwnd, b);
+    }
+    with(|s| {
+        let pen = &mut s.pen;
+        match c {
+            Control::Tool(t) => pen.tool = (pen.tool != Some(t)).then_some(t),
+            Control::Color(i) => pen.color = COLORS[i],
+            Control::Size(i) => pen.size = SIZES[i],
+            Control::Gauss(g) => pen.blur.gauss = g,
+            Control::Strength(i) => pen.blur.strength = i,
+            Control::Undo | Control::Redo => {
+                pen.typing = None;
+                let changed = if c == Control::Undo {
+                    pen.history.undo()
+                } else {
+                    pen.history.redo()
+                };
+                if changed {
+                    bake(s);
+                }
+            }
+            Control::Action(_) => {}
+        }
+    });
+    invalidate(hwnd, false);
+}
+
 fn set_cursor() {
     let id = with(|s| {
         let mut pt = POINT::default();
@@ -559,11 +717,14 @@ fn set_cursor() {
         if button_at(s, p).is_some() {
             return IDC_HAND;
         }
-        match s.sel.hit(p, handle_size(s, p)) {
-            Hit::Corner(Corner::Nw | Corner::Se) => IDC_SIZENWSE,
-            Hit::Corner(_) => IDC_SIZENESW,
-            Hit::Inside => IDC_SIZEALL,
-            Hit::Outside => IDC_CROSS,
+        let hit = s.sel.hit(p, handle_size(s, p));
+        match (s.pen.tool.filter(|_| s.sel.confirmed()), hit) {
+            (_, Hit::Corner(Corner::Nw | Corner::Se)) => IDC_SIZENWSE,
+            (_, Hit::Corner(_)) => IDC_SIZENESW,
+            (Some(Tool::Text), _) => IDC_IBEAM,
+            (Some(_), _) => IDC_CROSS,
+            (None, Hit::Inside) => IDC_SIZEALL,
+            (None, Hit::Outside) => IDC_CROSS,
         }
     })
     .unwrap_or(IDC_CROSS);
@@ -571,6 +732,47 @@ fn set_cursor() {
         if let Ok(c) = LoadCursorW(None, PCWSTR(id.0)) {
             SetCursor(Some(c));
         }
+    }
+}
+
+fn ctrl_down() -> bool {
+    unsafe { GetKeyState(VK_CONTROL.0 as i32) < 0 }
+}
+
+/// Keys while text is being typed; `true` = consumed.
+fn typing_key(hwnd: HWND, vk: u16) -> bool {
+    let typing = with(|s| s.pen.typing.is_some()) == Some(true);
+    if !typing {
+        return false;
+    }
+    with(|s| match vk {
+        v if v == VK_RETURN.0 && shift_down() => {
+            if let Some((_, t)) = &mut s.pen.typing {
+                t.push('\n');
+            }
+        }
+        v if v == VK_RETURN.0 => commit_text(s),
+        v if v == VK_ESCAPE.0 => s.pen.typing = None,
+        v if v == VK_BACK.0 => {
+            if let Some((_, t)) = &mut s.pen.typing {
+                t.pop();
+            }
+        }
+        _ => {}
+    });
+    invalidate(hwnd, false);
+    true
+}
+
+/// Letter keys of the confirmed selection.
+fn outcome_key(vk: u16) -> Option<Outcome> {
+    match u8::try_from(vk).ok()? {
+        b'C' => Some(Outcome::Copy),
+        b'S' => Some(Outcome::Save),
+        b'E' => Some(Outcome::Edit),
+        b'O' => Some(Outcome::Text),
+        b'R' => Some(Outcome::Translate),
+        _ => None,
     }
 }
 
@@ -586,16 +788,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             let p = lparam_point(lp);
             let clicked = with(|s| {
                 s.mouse = p;
-                if let Some(b) = button_at(s, p) {
-                    return Some(b);
+                if let Some(c) = button_at(s, p) {
+                    return Some(c);
                 }
                 let hs = handle_size(s, p);
+                if let Some(tool) = s.pen.tool.filter(|_| s.sel.confirmed())
+                    && !matches!(s.sel.hit(p, hs), Hit::Corner(_))
+                {
+                    pen_down(s, tool, p);
+                    return None;
+                }
                 s.sel.press(p, shift_down(), hs);
                 None
             })
             .flatten();
             match clicked {
-                Some(a) => act(hwnd, a),
+                Some(c) => control(hwnd, c),
                 None => unsafe {
                     SetCapture(hwnd);
                     invalidate(hwnd, false);
@@ -606,6 +814,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             let p = lparam_point(lp);
             let repaint = with(|s| {
                 s.mouse = p;
+                if s.pen.live.is_some() {
+                    let at = pen_point(s, p);
+                    if let Some(el) = &mut s.pen.live {
+                        annotate::drag_to(&mut el.kind, at, shift_down(), 1.5);
+                    }
+                    return Some(false);
+                }
                 if s.sel.is_dragging() {
                     s.sel.drag(p, shift_down());
                     return Some(false);
@@ -616,7 +831,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let hover = button_at(s, p);
                 (hover != s.hover_btn).then(|| {
                     s.hover_btn = hover;
-                    true
+                    false
                 })
             })
             .flatten();
@@ -626,6 +841,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         }
         WM_LBUTTONUP => {
             with(|s| {
+                if let Some(el) = s.pen.live.take() {
+                    commit(s, el);
+                    return;
+                }
                 s.sel.release();
                 // A click without a drag picks the highlighted window/element.
                 let m = s.mouse;
@@ -642,7 +861,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         }
         WM_LBUTTONDBLCLK => {
             let p = lparam_point(lp);
-            if with(|s| s.sel.hit(p, 0) == Hit::Inside) == Some(true) {
+            if with(|s| s.pen.tool.is_none() && s.sel.hit(p, 0) == Hit::Inside) == Some(true) {
                 finish(hwnd, Some(Outcome::Copy));
             }
         }
@@ -660,36 +879,45 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
         }
         WM_ACTIVATE if wp.0 & 0xFFFF == 0 => finish(hwnd, None),
+        WM_CHAR => {
+            let ch = char::from_u32(wp.0 as u32).filter(|c| !c.is_control());
+            let typed = with(|s| match (&mut s.pen.typing, ch) {
+                (Some((_, t)), Some(c)) => {
+                    t.push(c);
+                    true
+                }
+                _ => false,
+            });
+            if typed == Some(true) {
+                invalidate(hwnd, false);
+            }
+        }
         WM_KEYDOWN | WM_KEYUP => {
             let down = msg == WM_KEYDOWN;
             let vk = wp.0 as u16;
+            if down && typing_key(hwnd, vk) {
+                return LRESULT(0);
+            }
+            let confirmed = with(|s| s.sel.confirmed()) == Some(true);
             match vk {
-                v if v == VK_ESCAPE.0 && down => finish(hwnd, None),
-                v if (v == VK_RETURN.0 || v == b'C' as u16) && down => {
-                    if with(|s| s.sel.confirmed()) == Some(true) {
-                        finish(hwnd, Some(Outcome::Copy));
+                v if v == VK_ESCAPE.0 && down => {
+                    if with(|s| s.pen.tool.take().is_some()) == Some(true) {
+                        invalidate(hwnd, false);
+                    } else {
+                        finish(hwnd, None);
                     }
                 }
-                // S and Ctrl+S both save, as EiSen's S.
-                v if v == b'S' as u16 && down => {
-                    if with(|s| s.sel.confirmed()) == Some(true) {
-                        finish(hwnd, Some(Outcome::Save));
-                    }
+                v if down && confirmed && ctrl_down() && (v == 0x5A || v == 0x59) => {
+                    let undo = v == 0x5A && !shift_down();
+                    control(hwnd, if undo { Control::Undo } else { Control::Redo });
                 }
-                v if v == b'E' as u16 && down => {
-                    if with(|s| s.sel.confirmed()) == Some(true) {
-                        finish(hwnd, Some(Outcome::Edit));
-                    }
+                v if down && confirmed && (0x31..=0x39).contains(&v) => {
+                    control(hwnd, Control::Tool(TOOLS[(v - 0x31) as usize]));
                 }
-                v if v == b'O' as u16 && down => {
-                    if with(|s| s.sel.confirmed()) == Some(true) {
-                        finish(hwnd, Some(Outcome::Text));
-                    }
-                }
-                v if v == b'R' as u16 && down => {
-                    if with(|s| s.sel.confirmed()) == Some(true) {
-                        finish(hwnd, Some(Outcome::Translate));
-                    }
+                v if down && confirmed && v == VK_RETURN.0 => finish(hwnd, Some(Outcome::Copy)),
+                // S and Ctrl+S both save, as EiSen does.
+                v if down && confirmed && outcome_key(v).is_some() => {
+                    finish(hwnd, outcome_key(v));
                 }
                 v if v == VK_SPACE.0 => {
                     with(|s| s.sel.set_pan(down));

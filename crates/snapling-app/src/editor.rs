@@ -59,7 +59,7 @@ const TOOLS: [(Tool, &str, &str, Key); 10] = [
     (
         Tool::Pixelate,
         icon::CHECKERBOARD,
-        "Скрыть пикселями (B)",
+        "Скрыть кистью (B)",
         Key::B,
     ),
     (Tool::Crop, icon::CROP, "Обрезка (C)", Key::C),
@@ -372,7 +372,8 @@ impl Editor {
                     Tool::Ellipse => Some(Kind::Ellipse(start, start)),
                     Tool::Pen => Some(Kind::Pen(vec![start])),
                     Tool::Marker => Some(Kind::Marker(vec![start])),
-                    Tool::Pixelate | Tool::Crop => Some(Kind::Pixelate(start, start)),
+                    Tool::Pixelate => Some(Kind::Blur(vec![start], annotate::BlurStyle::default())),
+                    Tool::Crop => Some(Kind::Pixelate(start, start)),
                     Tool::Text | Tool::Step => None,
                 };
                 self.drag = kind.map(|k| self.el(k));
@@ -380,20 +381,7 @@ impl Editor {
         }
         if let (Some(el), Some(p)) = (&mut self.drag, resp.interact_pointer_pos()) {
             let p = to_img(p);
-            match &mut el.kind {
-                Kind::Arrow(a, b) | Kind::Line(a, b) => *b = if shift { snap45(*a, p) } else { p },
-                Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
-                    *b = if shift { square(*a, p) } else { p }
-                }
-                Kind::Pen(pts) | Kind::Marker(pts)
-                    if pts
-                        .last()
-                        .is_none_or(|l| (l.x - p.x).hypot(l.y - p.y) > 1.5 / k) =>
-                {
-                    pts.push(p);
-                }
-                _ => {}
-            }
+            annotate::drag_to(&mut el.kind, p, shift, 1.5 / k);
         }
         if resp.drag_stopped()
             && let Some(el) = self.drag.take()
@@ -531,25 +519,6 @@ fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
 
-fn snap45(a: Pt, p: Pt) -> Pt {
-    let (dx, dy) = (p.x - a.x, p.y - a.y);
-    let step = std::f32::consts::FRAC_PI_4;
-    let ang = (dy.atan2(dx) / step).round() * step;
-    let len = dx.hypot(dy);
-    Pt {
-        x: a.x + len * ang.cos(),
-        y: a.y + len * ang.sin(),
-    }
-}
-
-fn square(a: Pt, p: Pt) -> Pt {
-    let s = (p.x - a.x).abs().max((p.y - a.y).abs());
-    Pt {
-        x: a.x + s * (p.x - a.x).signum(),
-        y: a.y + s * (p.y - a.y).signum(),
-    }
-}
-
 fn dim_outside(painter: &egui::Painter, all: Rect, keep: Rect) {
     let shade = Color32::from_black_alpha(150);
     for r in [
@@ -612,6 +581,13 @@ fn preview(painter: &egui::Painter, el: &Element, tool: Tool, k: f32, to_scr: im
                 pts.iter().map(|p| to_scr(*p)).collect(),
                 stroke,
             ));
+        }
+        Kind::Blur(pts, _) => {
+            let s = Stroke::new(
+                annotate::blur_width(el.size) * k,
+                Color32::from_white_alpha(60),
+            );
+            painter.add(Shape::line(pts.iter().map(|p| to_scr(*p)).collect(), s));
         }
         Kind::Marker(pts) => {
             let s = Stroke::new(

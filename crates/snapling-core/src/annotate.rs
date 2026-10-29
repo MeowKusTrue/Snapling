@@ -4,8 +4,8 @@
 
 pub use ab_glyph::FontRef;
 use ab_glyph::{Font, OutlineCurve, ScaleFont};
-pub use tiny_skia::Pixmap;
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Rect, Stroke, Transform};
+pub use tiny_skia::{Pixmap, PixmapMut};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pt {
@@ -27,6 +27,31 @@ pub enum Kind {
     Step(Pt, u32),
     /// Pixelated region: unlike blur it cannot be reversed.
     Pixelate(Pt, Pt),
+    /// Brush stroke that hides what is under it.
+    Blur(Vec<Pt>, BlurStyle),
+}
+
+/// Brush blur: «cubes» (pixelate, irreversible) or Gaussian; strength 0..=2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BlurStyle {
+    pub gauss: bool,
+    pub strength: u8,
+}
+
+impl BlurStyle {
+    /// Pixel block for cubes, box radius for Gaussian.
+    pub fn amount(self) -> u32 {
+        let i = usize::from(self.strength.min(2));
+        if self.gauss {
+            [4, 8, 14][i]
+        } else {
+            [8, 14, 22][i]
+        }
+    }
+}
+
+pub fn blur_width(size: f32) -> f32 {
+    size * 8.0
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,9 +138,47 @@ fn tiny(e: &Element) -> bool {
         Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
             (a.x - b.x).abs() < 3.0 || (a.y - b.y).abs() < 3.0
         }
-        Kind::Pen(p) | Kind::Marker(p) => p.is_empty(),
+        Kind::Pen(p) | Kind::Marker(p) | Kind::Blur(p, _) => p.is_empty(),
         Kind::Text(_, t) => t.trim().is_empty(),
         Kind::Step(..) => false,
+    }
+}
+
+/// Drag update of a shape being drawn. Shift: lines snap to 45°, boxes become squares.
+/// Strokes skip points closer than `min_step` (image px) to keep them light.
+pub fn drag_to(kind: &mut Kind, p: Pt, shift: bool, min_step: f32) {
+    match kind {
+        Kind::Arrow(a, b) | Kind::Line(a, b) => *b = if shift { snap45(*a, p) } else { p },
+        Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
+            *b = if shift { square(*a, p) } else { p }
+        }
+        Kind::Pen(pts) | Kind::Marker(pts) | Kind::Blur(pts, _)
+            if pts
+                .last()
+                .is_none_or(|l| (l.x - p.x).hypot(l.y - p.y) > min_step) =>
+        {
+            pts.push(p);
+        }
+        _ => {}
+    }
+}
+
+fn snap45(a: Pt, p: Pt) -> Pt {
+    let (dx, dy) = (p.x - a.x, p.y - a.y);
+    let step = std::f32::consts::FRAC_PI_4;
+    let ang = (dy.atan2(dx) / step).round() * step;
+    let len = dx.hypot(dy);
+    Pt {
+        x: a.x + len * ang.cos(),
+        y: a.y + len * ang.sin(),
+    }
+}
+
+fn square(a: Pt, p: Pt) -> Pt {
+    let s = (p.x - a.x).abs().max((p.y - a.y).abs());
+    Pt {
+        x: a.x + s * (p.x - a.x).signum(),
+        y: a.y + s * (p.y - a.y).signum(),
     }
 }
 
@@ -290,7 +353,7 @@ pub fn text_size_in(font: &FontRef<'_>, text: &str, px: f32) -> (f32, f32) {
 }
 
 /// Fills a solid text with a contrasting halo; `weight` thickens the light face.
-fn draw_text(pm: &mut Pixmap, text: &str, at: Pt, px: f32, color: [u8; 3]) {
+fn draw_text(pm: &mut PixmapMut<'_>, text: &str, at: Pt, px: f32, color: [u8; 3]) {
     let Some(path) = text_path(text, at, px) else {
         return;
     };
@@ -306,16 +369,37 @@ fn draw_text(pm: &mut Pixmap, text: &str, at: Pt, px: f32, color: [u8; 3]) {
     pm.stroke_path(&path, &paint(color, 255), &stroke(px * 0.045), id, None);
 }
 
-fn pixelate(pm: &mut Pixmap, a: Pt, b: Pt, block: u32) {
+fn pixelate(pm: &mut PixmapMut<'_>, a: Pt, b: Pt, block: u32) {
     let (w, h) = (pm.width(), pm.height());
     let x0 = (a.x.min(b.x).max(0.0) as u32).min(w);
     let y0 = (a.y.min(b.y).max(0.0) as u32).min(h);
     let x1 = (a.x.max(b.x).max(0.0).ceil() as u32).min(w);
     let y1 = (a.y.max(b.y).max(0.0).ceil() as u32).min(h);
-    let data = pm.data_mut();
-    for by in (y0..y1).step_by(block as usize) {
-        for bx in (x0..x1).step_by(block as usize) {
-            let (ex, ey) = ((bx + block).min(x1), (by + block).min(y1));
+    pixelate_area(
+        pm.data_mut(),
+        w,
+        (x0, y0, x1, y1),
+        (i64::from(x0), i64::from(y0)),
+        block,
+    );
+}
+
+/// Averages `block`-sized cells of `area`, the grid anchored at `grid`.
+fn pixelate_area(
+    data: &mut [u8],
+    w: u32,
+    area: (u32, u32, u32, u32),
+    grid: (i64, i64),
+    block: u32,
+) {
+    let (x0, y0, x1, y1) = area;
+    let b = i64::from(block);
+    // First cell start on the grid, possibly before the area.
+    let snap = |v: u32, g: i64| i64::from(v) - (i64::from(v) - g).rem_euclid(b);
+    for cy in (snap(y0, grid.1)..i64::from(y1)).step_by(block as usize) {
+        for cx in (snap(x0, grid.0)..i64::from(x1)).step_by(block as usize) {
+            let (bx, by) = (cx.max(i64::from(x0)) as u32, cy.max(i64::from(y0)) as u32);
+            let (ex, ey) = (((cx + b) as u32).min(x1), ((cy + b) as u32).min(y1));
             let mut sum = [0u32; 4];
             for y in by..ey {
                 for x in bx..ex {
@@ -337,7 +421,115 @@ fn pixelate(pm: &mut Pixmap, a: Pt, b: Pt, block: u32) {
     }
 }
 
-pub fn draw(pm: &mut Pixmap, e: &Element) {
+/// Three box passes ≈ a Gaussian of sigma ≈ `radius`, on premultiplied pixels.
+pub fn box_blur(pm: &mut Pixmap, radius: usize) {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if radius == 0 || w == 0 || h == 0 {
+        return;
+    }
+    let data = pm.data_mut();
+    let mut tmp = vec![0u8; data.len()];
+    for _ in 0..3 {
+        blur_pass(data, &mut tmp, w, h, radius, true);
+        blur_pass(&tmp, data, w, h, radius, false);
+    }
+}
+
+fn blur_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, rad: usize, horizontal: bool) {
+    let (len, lines) = if horizontal { (w, h) } else { (h, w) };
+    let at = |line: usize, i: usize| {
+        if horizontal {
+            (line * w + i) * 4
+        } else {
+            (i * w + line) * 4
+        }
+    };
+    let win = (2 * rad + 1) as u32;
+    for line in 0..lines {
+        let mut sum = [0u32; 4];
+        for k in 0..win as usize {
+            let i = at(line, k.saturating_sub(rad).min(len - 1));
+            for c in 0..4 {
+                sum[c] += u32::from(src[i + c]);
+            }
+        }
+        for i in 0..len {
+            let o = at(line, i);
+            for c in 0..4 {
+                dst[o + c] = (sum[c] / win) as u8;
+            }
+            let add = at(line, (i + rad + 1).min(len - 1));
+            let sub = at(line, i.saturating_sub(rad));
+            for c in 0..4 {
+                sum[c] = sum[c] + u32::from(src[add + c]) - u32::from(src[sub + c]);
+            }
+        }
+    }
+}
+
+/// Copy of the pixels under `(x0, y0, x1, y1)`, clamped to the buffer.
+fn grab(pm: &PixmapMut<'_>, x0: i32, y0: i32, x1: i32, y1: i32) -> Option<(Pixmap, i32, i32)> {
+    let (w, h) = (pm.width() as i32, pm.height() as i32);
+    let (x0, y0, x1, y1) = (x0.max(0), y0.max(0), x1.min(w), y1.min(h));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let mut out = Pixmap::new((x1 - x0) as u32, (y1 - y0) as u32)?;
+    let src = pm.as_ref().data();
+    let row = ((x1 - x0) * 4) as usize;
+    for y in y0..y1 {
+        let s = ((y * w + x0) * 4) as usize;
+        let d = ((y - y0) as usize) * row;
+        out.data_mut()[d..d + row].copy_from_slice(&src[s..s + row]);
+    }
+    Some((out, x0, y0))
+}
+
+/// Brush that pixelates (grid fixed to the image, so strokes join seamlessly) or blurs.
+fn blur_brush(pm: &mut PixmapMut<'_>, pts: &[Pt], width: f32, style: BlurStyle) {
+    let Some(outline) = polyline(pts).and_then(|p| p.stroke(&stroke(width), 1.0)) else {
+        return;
+    };
+    let b = outline.bounds();
+    let amount = style.amount() as i32;
+    let pad = if style.gauss { amount * 3 } else { amount };
+    let Some((mut src, x0, y0)) = grab(
+        pm,
+        b.left() as i32 - pad,
+        b.top() as i32 - pad,
+        b.right().ceil() as i32 + pad,
+        b.bottom().ceil() as i32 + pad,
+    ) else {
+        return;
+    };
+    if style.gauss {
+        box_blur(&mut src, amount as usize);
+    } else {
+        let (w, h) = (src.width(), src.height());
+        pixelate_area(
+            src.data_mut(),
+            w,
+            (0, 0, w, h),
+            (-i64::from(x0), -i64::from(y0)),
+            amount as u32,
+        );
+    }
+    let shader = tiny_skia::Pattern::new(
+        src.as_ref(),
+        tiny_skia::SpreadMode::Pad,
+        tiny_skia::FilterQuality::Nearest,
+        1.0,
+        Transform::from_translate(x0 as f32, y0 as f32),
+    );
+    let p = Paint {
+        shader,
+        anti_alias: true,
+        ..Paint::default()
+    };
+    pm.fill_path(&outline, &p, FillRule::Winding, Transform::identity(), None);
+}
+
+pub fn draw(pm: &mut PixmapMut<'_>, e: &Element) {
     let id = Transform::identity();
     let solid = paint(e.color, 255);
     match &e.kind {
@@ -418,6 +610,7 @@ pub fn draw(pm: &mut Pixmap, e: &Element) {
             }
         }
         Kind::Pixelate(a, b) => pixelate(pm, *a, *b, pixel_block(e.size)),
+        Kind::Blur(pts, style) => blur_brush(pm, pts, blur_width(e.size), *style),
     }
 }
 
@@ -434,7 +627,7 @@ pub fn pixmap_from_bgra(bgra: &[u8], w: u32, h: u32) -> Option<Pixmap> {
 pub fn compose(base: &Pixmap, doc: &Doc) -> Pixmap {
     let mut pm = base.clone();
     for e in &doc.elements {
-        draw(&mut pm, e);
+        draw(&mut pm.as_mut(), e);
     }
     pm
 }
@@ -651,6 +844,39 @@ mod tests {
         assert_eq!(&bgra[..4], &[src[2], src[1], src[0], 255]);
         doc.crop = Some((p(5.0, 5.0), p(5.0, 50.0)));
         assert_eq!(export(&b, &doc).1, W, "empty crop = whole image");
+    }
+
+    #[test]
+    fn blur_brush_changes_only_the_stroke() {
+        let b = base();
+        for gauss in [false, true] {
+            let style = BlurStyle { gauss, strength: 1 };
+            let mut doc = Doc::default();
+            doc.elements.push(Element {
+                kind: Kind::Blur(vec![p(10.0, 40.0), p(110.0, 40.0)], style),
+                color: [0, 0, 0],
+                size: 2.0,
+            });
+            let pm = compose(&b, &doc);
+            assert_ne!(
+                px(&pm, 60, 40),
+                px(&b, 60, 40),
+                "gauss={gauss}: under the stroke"
+            );
+            assert_eq!(px(&pm, 60, 5), px(&b, 60, 5), "gauss={gauss}: far from it");
+        }
+        let mut doc = Doc::default();
+        doc.elements.push(Element {
+            kind: Kind::Blur(vec![p(20.0, 40.0), p(100.0, 40.0)], BlurStyle::default()),
+            color: [0, 0, 0],
+            size: 4.0,
+        });
+        let pm = compose(&b, &doc);
+        assert_eq!(
+            px(&pm, 32, 32),
+            px(&pm, 39, 39),
+            "cubes sit on the image grid"
+        );
     }
 
     #[test]

@@ -3392,6 +3392,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "snapling-scene"
+version = "0.0.1"
+dependencies = [
+ "snapling-core",
+ "tiny-skia",
+]
+
+[[package]]
 name = "snapling-translate"
 version = "0.0.1"
 dependencies = [
@@ -3407,6 +3415,8 @@ name = "snapling-win"
 version = "0.0.1"
 dependencies = [
  "snapling-core",
+ "snapling-scene",
+ "tiny-skia",
  "windows",
  "windows-future",
 ]

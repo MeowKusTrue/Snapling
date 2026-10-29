@@ -386,13 +386,26 @@ pub fn pictures_dir() -> Option<std::path::PathBuf> {
 
 /// Executable name of the foreground window's process ("Discord", "firefox"), for `{app}`.
 pub fn foreground_app_name() -> String {
+    let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    exe_stem(hwnd)
+}
+
+/// Display name of the app owning `hwnd` (overlay hover pill): «firefox.exe» → «Firefox».
+pub fn app_name_of(hwnd: isize) -> String {
+    let stem = exe_stem(windows::Win32::Foundation::HWND(hwnd as *mut _));
+    let mut c = stem.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
+fn exe_stem(hwnd: windows::Win32::Foundation::HWND) -> String {
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
         QueryFullProcessImageNameW,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
     unsafe {
-        let hwnd = GetForegroundWindow();
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {

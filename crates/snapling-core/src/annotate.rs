@@ -2,7 +2,8 @@
 //! Shapes follow EiSen app/src/lib/editor (elements.ts, store.ts, exportPipeline.ts);
 //! rendering is tiny-skia so the export is the same on every OS.
 
-use ab_glyph::{Font, FontRef, OutlineCurve, ScaleFont};
+pub use ab_glyph::FontRef;
+use ab_glyph::{Font, OutlineCurve, ScaleFont};
 pub use tiny_skia::Pixmap;
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Rect, Stroke, Transform};
 
@@ -208,7 +209,11 @@ fn polyline(points: &[Pt]) -> Option<tiny_skia::Path> {
 
 /// Glyph outlines of `text` with its top-left at `at`.
 fn text_path(text: &str, at: Pt, px: f32) -> Option<tiny_skia::Path> {
-    let font = font();
+    text_path_in(&font(), text, at, px)
+}
+
+/// Same with any font (the overlay uses Inter).
+pub fn text_path_in(font: &FontRef<'_>, text: &str, at: Pt, px: f32) -> Option<tiny_skia::Path> {
     let sf = font.as_scaled(px);
     let (sx, sy) = (sf.h_scale_factor(), sf.v_scale_factor());
     let line = sf.ascent() - sf.descent() + sf.line_gap();
@@ -267,7 +272,10 @@ fn text_path(text: &str, at: Pt, px: f32) -> Option<tiny_skia::Path> {
 
 /// Width and height of `text` at `px`, for centering and the editor's text box.
 pub fn text_size(text: &str, px: f32) -> (f32, f32) {
-    let font = font();
+    text_size_in(&font(), text, px)
+}
+
+pub fn text_size_in(font: &FontRef<'_>, text: &str, px: f32) -> (f32, f32) {
     let sf = font.as_scaled(px);
     let line = sf.ascent() - sf.descent() + sf.line_gap();
     let w = text

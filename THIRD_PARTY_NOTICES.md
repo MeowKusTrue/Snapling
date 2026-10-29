@@ -47,3 +47,8 @@ licensed under CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
 ## ONNX Runtime
 
 Statically linked through the `ort` crate. © Microsoft Corporation, MIT License.
+
+## Inter, JetBrains Mono
+
+`assets/fonts`: Inter (© The Inter Project Authors) and JetBrains Mono (© The JetBrains Mono
+Project Authors), SIL Open Font License 1.1 — full texts in `assets/fonts/*-OFL.txt`.

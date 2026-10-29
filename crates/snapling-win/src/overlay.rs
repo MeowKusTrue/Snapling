@@ -1,7 +1,7 @@
 //! Fullscreen region-selection overlay over the virtual screen (Win32 + GDI).
 //! Interaction follows EiSen's overlay (MIT, © 2026 Tran Trong Thuc):
 //! drag to select, Shift = square, Space = pan, corners resize, drag inside moves,
-//! arrows nudge (Shift ×10), Enter/C/double-click copy, S save, E editor, Esc/right click cancel.
+//! arrows nudge (Shift ×10), Enter/C/double-click copy, S save, E editor, O text (OCR), Esc/right click cancel.
 //! Snapling additions: hover highlights the window/element under the cursor, click picks it,
 //! the wheel walks element levels (up = outer).
 
@@ -53,6 +53,7 @@ pub enum Outcome {
     Copy,
     Save,
     Edit,
+    Text,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -60,6 +61,7 @@ enum Action {
     Save,
     Copy,
     Edit,
+    Text,
     Cancel,
 }
 
@@ -652,6 +654,7 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
                     ("Копировать", Action::Copy),
                     ("Сохранить", Action::Save),
                     ("Редактор", Action::Edit),
+                    ("Текст", Action::Text),
                     ("Отмена", Action::Cancel),
                 ];
                 let (bp, bhh, bgap, pad) = (
@@ -729,6 +732,7 @@ fn act(hwnd: HWND, a: Action) {
         Action::Copy => Some(Outcome::Copy),
         Action::Save => Some(Outcome::Save),
         Action::Edit => Some(Outcome::Edit),
+        Action::Text => Some(Outcome::Text),
         Action::Cancel => None,
     };
     finish(hwnd, out);
@@ -867,6 +871,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 v if v == b'E' as u16 && down => {
                     if with(|s| s.sel.confirmed()) == Some(true) {
                         finish(hwnd, Some(Outcome::Edit));
+                    }
+                }
+                v if v == b'O' as u16 && down => {
+                    if with(|s| s.sel.confirmed()) == Some(true) {
+                        finish(hwnd, Some(Outcome::Text));
                     }
                 }
                 v if v == VK_SPACE.0 => {

@@ -13,7 +13,7 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::Win32::System::Ole::CF_DIB;
+use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -27,6 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, w};
 
+pub mod ocr;
 pub mod overlay;
 pub mod targets;
 pub mod uia;
@@ -238,26 +239,39 @@ pub fn copy_image(img: &Image) -> Result<(), String> {
     let header = dib_header(img.width, img.height as i32);
     let hsize = size_of::<BITMAPINFOHEADER>();
     let row = img.width as usize * 4;
+    put_clipboard(CF_DIB.0 as u32, hsize + img.bgra.len(), |dst| unsafe {
+        std::ptr::copy_nonoverlapping((&raw const header).cast::<u8>(), dst, hsize);
+        for (i, src) in img.bgra.chunks_exact(row).rev().enumerate() {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.add(hsize + i * row), row);
+        }
+    })
+}
+
+/// CF_UNICODETEXT.
+pub fn copy_text(text: &str) -> Result<(), String> {
+    let utf16: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    put_clipboard(CF_UNICODETEXT.0 as u32, utf16.len() * 2, |dst| unsafe {
+        std::ptr::copy_nonoverlapping(utf16.as_ptr().cast::<u8>(), dst, utf16.len() * 2);
+    })
+}
+
+/// Replaces the clipboard with one `format` block of `size` bytes written by `fill`.
+fn put_clipboard(format: u32, size: usize, fill: impl FnOnce(*mut u8)) -> Result<(), String> {
     unsafe {
-        let mem = GlobalAlloc(GMEM_MOVEABLE, hsize + img.bgra.len())
-            .map_err(|e| format!("GlobalAlloc: {e}"))?;
+        let mem = GlobalAlloc(GMEM_MOVEABLE, size).map_err(|e| format!("GlobalAlloc: {e}"))?;
         let dst = GlobalLock(mem) as *mut u8;
         if dst.is_null() {
             let _ = GlobalFree(Some(mem));
             return Err("GlobalLock: null".into());
         }
-        std::ptr::copy_nonoverlapping((&raw const header).cast::<u8>(), dst, hsize);
-        for (i, src) in img.bgra.chunks_exact(row).rev().enumerate() {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.add(hsize + i * row), row);
-        }
+        fill(dst);
         let _ = GlobalUnlock(mem);
 
         if let Err(e) = OpenClipboard(None) {
             let _ = GlobalFree(Some(mem));
             return Err(format!("OpenClipboard: {e}"));
         }
-        let res =
-            EmptyClipboard().and_then(|_| SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(mem.0))));
+        let res = EmptyClipboard().and_then(|_| SetClipboardData(format, Some(HANDLE(mem.0))));
         let _ = CloseClipboard();
         if let Err(e) = res {
             let _ = GlobalFree(Some(mem));

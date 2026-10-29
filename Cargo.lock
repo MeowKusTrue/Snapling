@@ -2716,6 +2716,7 @@ version = "0.0.1"
 dependencies = [
  "snapling-core",
  "windows",
+ "windows-future",
 ]
 
 [[package]]

@@ -47,6 +47,11 @@ mute_in_games = true
 [privacy]
 # Прятать выделение от демонстрации экрана и записи (Discord, OBS, Teams). Windows 10 2004+.
 hide_from_capture = true
+
+[ocr]
+# Язык распознавания текста (O в выделении): "auto" — по языкам Windows, или "ru", "en".
+# Распознавание работает без интернета, встроенным движком Windows.
+language = "auto"
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -57,6 +62,7 @@ pub struct Config {
     pub capture: Capture,
     pub sound: SoundCfg,
     pub privacy: Privacy,
+    pub ocr: Ocr,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -99,6 +105,20 @@ impl Default for Privacy {
     fn default() -> Self {
         Self {
             hide_from_capture: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ocr {
+    pub language: String,
+}
+
+impl Default for Ocr {
+    fn default() -> Self {
+        Self {
+            language: "auto".into(),
         }
     }
 }

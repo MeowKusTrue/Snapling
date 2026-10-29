@@ -36,6 +36,8 @@ static SOUND: Mutex<Option<(SoundCfg, Wavs)>> = Mutex::new(None);
 thread_local! {
     /// `[capture] copy`: clipboard for hotkey captures (Enter in the overlay always copies).
     static COPY_ON_CAPTURE: Cell<bool> = const { Cell::new(true) };
+    /// `[ocr] language`.
+    static OCR_LANG: RefCell<String> = RefCell::new("auto".into());
 }
 
 fn play(s: Sound) {
@@ -313,6 +315,7 @@ fn capture_region() {
                 play(Sound::Capture);
                 open_editor(img, app);
             }
+            Outcome::Text => recognize(img),
         }
     });
     match shown {
@@ -383,6 +386,7 @@ fn apply_config(cfg: &Config) {
     problems.extend(apply_save(cfg));
     apply_sound(&cfg.sound);
     COPY_ON_CAPTURE.set(cfg.capture.copy);
+    apply_ocr(&cfg.ocr.language);
     let hide = cfg.privacy.hide_from_capture;
     match snapling_win::overlay::set_hidden_from_capture(hide) {
         Ok(()) => info!("overlay hidden from capture: {hide}"),
@@ -392,6 +396,58 @@ fn apply_config(cfg: &Config) {
         Err(e) => warn!("display affinity: {e}"),
     }
     report(&problems);
+}
+
+/// Checks the language off the UI thread: WinRT must not change this thread's COM apartment.
+fn apply_ocr(lang: &str) {
+    let lang = lang.trim().to_string();
+    OCR_LANG.with(|l| *l.borrow_mut() = lang.clone());
+    std::thread::spawn(move || {
+        info!("ocr languages: {:?}", snapling_win::ocr::languages());
+        if let Some(p) = snapling_win::ocr::language_problem(&lang) {
+            warn!("{p}");
+            snapling_win::warn(&format!(
+                "Настройки:
+{p}"
+            ));
+        }
+    });
+}
+
+/// OCR on a worker thread, text to the clipboard.
+fn recognize(img: snapling_win::Image) {
+    let lang = OCR_LANG.with(|l| l.borrow().clone());
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        match snapling_win::ocr::recognize(&img.bgra, img.width, img.height, &lang) {
+            Ok(text) if text.trim().is_empty() => {
+                info!("ocr: no text");
+                play(Sound::Error);
+            }
+            Ok(text) => {
+                info!(
+                    "ocr: {} chars in {} ms",
+                    text.chars().count(),
+                    t0.elapsed().as_millis()
+                );
+                match snapling_win::copy_text(&text) {
+                    Ok(()) => play(Sound::Copy),
+                    Err(e) => {
+                        error!("clipboard: {e}");
+                        play(Sound::Error);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("ocr: {e}");
+                play(Sound::Error);
+                snapling_win::warn(&format!(
+                    "Не удалось распознать текст.
+{e}"
+                ));
+            }
+        }
+    });
 }
 
 fn hotkey_id(a: Action) -> i32 {

@@ -22,13 +22,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, MB_ICONWARNING, MessageBoxW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetSystemMetrics, IDYES, MB_ICONQUESTION, MB_ICONWARNING, MB_YESNO, MessageBoxW,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 use windows::core::{HSTRING, w};
 
 pub mod ocr;
 pub mod overlay;
+pub mod secret;
 pub mod targets;
 pub mod uia;
 
@@ -89,6 +90,18 @@ pub fn single_instance() -> bool {
 
 pub fn warn(text: &str) {
     unsafe { MessageBoxW(None, &HSTRING::from(text), w!("Snapling"), MB_ICONWARNING) };
+}
+
+/// Yes/No question; `true` = Yes.
+pub fn ask(text: &str) -> bool {
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            w!("Snapling"),
+            MB_YESNO | MB_ICONQUESTION,
+        ) == IDYES
+    }
 }
 
 pub fn register_hotkey(id: i32, hk: &Hotkey) -> Result<(), String> {

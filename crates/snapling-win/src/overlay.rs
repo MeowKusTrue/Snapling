@@ -1,7 +1,7 @@
 //! Fullscreen region-selection overlay over the virtual screen (Win32 + GDI).
 //! Interaction follows EiSen's overlay (MIT, © 2026 Tran Trong Thuc):
 //! drag to select, Shift = square, Space = pan, corners resize, drag inside moves,
-//! arrows nudge (Shift ×10), Enter/C/double-click copy, S save, E editor, O text (OCR), Esc/right click cancel.
+//! arrows nudge (Shift ×10), Enter/C/double-click copy, S save, E editor, O text (OCR), R translate, Esc/right click cancel.
 //! Snapling additions: hover highlights the window/element under the cursor, click picks it,
 //! the wheel walks element levels (up = outer).
 
@@ -54,6 +54,7 @@ pub enum Outcome {
     Save,
     Edit,
     Text,
+    Translate,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -62,6 +63,7 @@ enum Action {
     Copy,
     Edit,
     Text,
+    Translate,
     Cancel,
 }
 
@@ -655,6 +657,7 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
                     ("Сохранить", Action::Save),
                     ("Редактор", Action::Edit),
                     ("Текст", Action::Text),
+                    ("Перевести", Action::Translate),
                     ("Отмена", Action::Cancel),
                 ];
                 let (bp, bhh, bgap, pad) = (
@@ -733,6 +736,7 @@ fn act(hwnd: HWND, a: Action) {
         Action::Save => Some(Outcome::Save),
         Action::Edit => Some(Outcome::Edit),
         Action::Text => Some(Outcome::Text),
+        Action::Translate => Some(Outcome::Translate),
         Action::Cancel => None,
     };
     finish(hwnd, out);
@@ -876,6 +880,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 v if v == b'O' as u16 && down => {
                     if with(|s| s.sel.confirmed()) == Some(true) {
                         finish(hwnd, Some(Outcome::Text));
+                    }
+                }
+                v if v == b'R' as u16 && down => {
+                    if with(|s| s.sel.confirmed()) == Some(true) {
+                        finish(hwnd, Some(Outcome::Translate));
                     }
                 }
                 v if v == VK_SPACE.0 => {

@@ -105,7 +105,7 @@ pub fn run(file: &Path, hooks: Hooks) {
     }
 }
 
-fn setup_style(ctx: &egui::Context) {
+pub(crate) fn setup_style(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);

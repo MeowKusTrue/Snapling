@@ -52,6 +52,12 @@ hide_from_capture = true
 # Язык распознавания текста (O в выделении): "auto" — по языкам Windows, или "ru", "en".
 # Распознавание работает без интернета, встроенным движком Windows.
 language = "auto"
+
+[translate]
+# Онлайн-перевод. "off" — только офлайн (модели на компьютере).
+# "deepl" — в окне перевода появится кнопка «DeepL»: текст уходит в DeepL только по её нажатию.
+# Ключ API вводится в окне перевода и хранится в диспетчере учётных данных Windows, не здесь.
+online = "off"
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -63,6 +69,7 @@ pub struct Config {
     pub sound: SoundCfg,
     pub privacy: Privacy,
     pub ocr: Ocr,
+    pub translate: Translate,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -107,6 +114,20 @@ impl Default for Privacy {
             hide_from_capture: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Online {
+    #[default]
+    Off,
+    Deepl,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Translate {
+    pub online: Online,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

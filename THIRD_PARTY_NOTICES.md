@@ -36,3 +36,14 @@ SOFTWARE.
 
 Embedded via `epaint_default_fonts` and used to render annotation text.
 Licensed under the Ubuntu Font Licence 1.0: https://ubuntu.com/legal/font-licence
+
+## OPUS-MT translation models
+
+Not bundled; downloaded on the user's request from https://huggingface.co/Xenova/opus-mt-ru-en
+and https://huggingface.co/Xenova/opus-mt-en-ru (ONNX exports by Xenova of Helsinki-NLP/opus-mt-ru-en
+and Helsinki-NLP/opus-mt-en-ru). © Language Technology Research Group at the University of Helsinki,
+licensed under CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
+
+## ONNX Runtime
+
+Statically linked through the `ort` crate. © Microsoft Corporation, MIT License.

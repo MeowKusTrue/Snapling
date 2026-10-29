@@ -194,6 +194,94 @@ fn edit_dir() -> PathBuf {
     app_dir("LOCALAPPDATA").join("edit")
 }
 
+fn models_dir() -> PathBuf {
+    app_dir("LOCALAPPDATA").join("models")
+}
+
+/// OCR here, then the translation window process (it loads the model and frees it on close).
+/// Missing model → asks before downloading: the only network access of offline translation.
+fn translate(img: snapling_win::Image) {
+    let lang = OCR_LANG.with(|l| l.borrow().clone());
+    std::thread::spawn(move || {
+        let text = match snapling_win::ocr::recognize(&img.bgra, img.width, img.height, &lang) {
+            Ok(t) if t.trim().is_empty() => {
+                info!("translate: no text");
+                return play(Sound::Error);
+            }
+            Ok(t) => t,
+            Err(e) => {
+                error!("ocr: {e}");
+                play(Sound::Error);
+                return snapling_win::warn(&format!(
+                    "Не удалось распознать текст.
+{e}"
+                ));
+            }
+        };
+        let dir = snapling_translate::detect(&text);
+        let models = models_dir();
+        if !snapling_translate::installed(&models, dir) {
+            let q = format!(
+                "Для офлайн-перевода ({}) нужна модель OPUS-MT, ~{} МБ.
+Скачать её с huggingface.co (Xenova/{})?
+
+После скачивания перевод работает без интернета.",
+                dir.label(),
+                snapling_translate::DOWNLOAD_MB,
+                dir.model()
+            );
+            if !snapling_win::ask(&q) {
+                return;
+            }
+            let t0 = Instant::now();
+            info!("model download: {}", dir.model());
+            if let Err(e) = snapling_translate::download(&models, dir) {
+                error!("model download: {e}");
+                play(Sound::Error);
+                return snapling_win::warn(&format!(
+                    "Не удалось скачать модель перевода.
+{e}"
+                ));
+            }
+            info!("model downloaded in {} s", t0.elapsed().as_secs());
+        }
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = edit_dir().join(format!("{nanos}.txt"));
+        let started = std::fs::create_dir_all(edit_dir())
+            .and_then(|()| std::fs::write(&path, &text))
+            .and_then(|()| std::env::current_exe())
+            .and_then(|exe| {
+                std::process::Command::new(exe)
+                    .arg("--translate")
+                    .arg(&path)
+                    .spawn()
+            });
+        if let Err(e) = started {
+            let _ = std::fs::remove_file(&path);
+            error!("translate window: {e}");
+            snapling_win::warn(&format!(
+                "Не удалось открыть окно перевода.
+{e}"
+            ));
+        }
+    });
+}
+
+/// Clipboard and models folder for the translation window process.
+pub fn text_hooks() -> crate::translate_ui::Hooks {
+    crate::translate_ui::Hooks {
+        copy_text: snapling_win::copy_text,
+        warn: snapling_win::warn,
+        models: models_dir(),
+        online: Config::load_or_create(&app_dir("APPDATA").join("config.toml"))
+            .is_ok_and(|c| c.translate.online == snapling_core::config::Online::Deepl),
+        get_key: || snapling_win::secret::get("DeepL"),
+        set_key: |k| snapling_win::secret::set("DeepL", k),
+    }
+}
+
 /// Hands the shot to a separate editor process through a raw file it deletes after reading.
 fn open_editor(img: snapling_win::Image, app: String) {
     std::thread::spawn(move || {
@@ -316,6 +404,7 @@ fn capture_region() {
                 open_editor(img, app);
             }
             Outcome::Text => recognize(img),
+            Outcome::Translate => translate(img),
         }
     });
     match shown {

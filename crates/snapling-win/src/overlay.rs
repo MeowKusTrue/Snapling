@@ -1069,7 +1069,29 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 finish(hwnd, Some(Outcome::Copy));
             }
         }
-        WM_RBUTTONDOWN | WM_MBUTTONDOWN => finish(hwnd, None),
+        // The first press takes the selection back, the next one closes.
+        WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+            let cleared = with(|s| {
+                let had = s.sel.rect().is_some() || !s.lasso.is_empty() || !s.stroke.is_empty();
+                if had {
+                    s.sel = Selection::new(s.width as i32, s.height as i32);
+                    s.lasso.clear();
+                    s.stroke.clear();
+                    s.armed = false;
+                    let p = s.mouse;
+                    update_hover(s, p);
+                }
+                had
+            });
+            if cleared == Some(true) {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                invalidate(hwnd, true);
+            } else {
+                finish(hwnd, None);
+            }
+        }
         WM_MOUSEWHEEL => {
             let outward = ((wp.0 >> 16) & 0xFFFF) as u16 as i16 > 0;
             let changed = with(|s| {

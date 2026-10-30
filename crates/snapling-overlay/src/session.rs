@@ -459,6 +459,18 @@ impl Session {
         }
     }
 
+    /// Right button: takes the selection back; with none left, closes.
+    pub fn cancel_click(&mut self) -> Step {
+        if self.sel.rect().is_none() && self.lasso.is_empty() && self.stroke.is_empty() {
+            return Step::Cancel;
+        }
+        self.sel = Selection::new(self.shot.width as i32, self.shot.height as i32);
+        self.lasso.clear();
+        self.stroke.clear();
+        self.armed = false;
+        Step::Stay
+    }
+
     pub fn double_click(&mut self, p: Point) -> Step {
         if self.pen.tool.is_none() && self.sel.hit(p, 0) == Hit::Inside {
             Step::Done(Outcome::Copy)
@@ -772,6 +784,15 @@ mod tests {
             (px.x, px.y, px.bgra.as_slice()),
             (105, 56, &[10, 20, 30, 255][..])
         );
+    }
+
+    #[test]
+    fn the_right_button_clears_first_and_closes_second() {
+        let mut s = session(Options::default());
+        drag(&mut s, pt(20, 30), pt(120, 80));
+        assert_eq!(s.cancel_click(), Step::Stay);
+        assert_eq!(s.sel.rect(), None);
+        assert_eq!(s.cancel_click(), Step::Cancel);
     }
 
     #[test]

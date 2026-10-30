@@ -171,7 +171,7 @@ impl ApplicationHandler for App {
                     }
                     (MouseButton::Left, ElementState::Released) => self.session.release(),
                     (MouseButton::Right | MouseButton::Middle, ElementState::Pressed) => {
-                        Step::Cancel
+                        self.session.cancel_click()
                     }
                     _ => Step::Stay,
                 };

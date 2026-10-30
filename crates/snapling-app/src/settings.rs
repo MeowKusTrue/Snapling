@@ -1623,12 +1623,13 @@ impl eframe::App for Settings {
         ui::title_bar(ui, "Snapling");
         let (hooks, ctx2) = (self.hooks.gallery, self.ctx.clone());
         let active = !self.panel_open;
+        let left = self.cfg.ui.panel_side == PanelSide::Left;
         let gallery = self
             .gallery
             .get_or_insert_with(|| History::new(hooks(), ctx2));
         egui::CentralPanel::default()
             .frame(Frame::new().fill(p.bg))
-            .show(ui, |ui| gallery.show(ui, active));
+            .show(ui, |ui| gallery.show(ui, active, left));
         match gallery.wish() {
             Some(Wish::Settings) => {
                 self.tab = Tab::General;

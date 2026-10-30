@@ -11,6 +11,7 @@ use snapling_core::history::{self, Entry};
 use snapling_core::i18n::{t, tf};
 use snapling_core::storage;
 use std::collections::{HashMap, HashSet};
+use std::f32::consts::FRAC_PI_2;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -615,8 +616,19 @@ impl History {
         self.wish.take()
     }
 
+    /// Settings and About, on the side the panel comes from.
+    fn panel_icons(&mut self, ui: &mut egui::Ui) {
+        if ui::live_icon(ui, icon::GEAR_SIX, t("Настройки"), FRAC_PI_2, 0.0).clicked() {
+            self.wish = Some(Wish::Settings);
+        }
+        if ui::live_icon(ui, icon::INFO, t("О программе"), 0.0, 2.0).clicked() {
+            self.wish = Some(Wish::About);
+        }
+    }
+
     /// Draws the page into the free space of `ui`. `active`: nothing covers it, keys are its own.
-    pub fn show(&mut self, ui: &mut egui::Ui, active: bool) {
+    /// `panel_left`: the settings panel comes from the left, its icons go there.
+    pub fn show(&mut self, ui: &mut egui::Ui, active: bool, panel_left: bool) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
         if active && self.big && ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -665,6 +677,10 @@ impl History {
             }))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    if panel_left {
+                        self.panel_icons(ui);
+                        ui.add_space(6.0);
+                    }
                     ui::heading(ui, t("Галерея"), 20.0);
                     ui.add_space(8.0);
                     let items = [t("Всё"), t("Сегодня"), t("Неделя")];
@@ -672,11 +688,8 @@ impl History {
                         self.period = i;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::ghost_text(ui, t("О программе"), 36.0).clicked() {
-                            self.wish = Some(Wish::About);
-                        }
-                        if ui::tone(ui, t("Настройки"), None, 36.0).clicked() {
-                            self.wish = Some(Wish::Settings);
+                        if !panel_left {
+                            self.panel_icons(ui);
                         }
                         if ui::ghost_text(ui, t("Открыть папку"), 36.0).clicked() {
                             (self.hooks.open_folder)();

@@ -21,7 +21,7 @@
 
 <p align="center"><a href="README.ru.md">Читать на русском</a></p>
 
-![Gallery](assets/screenshots/gallery.png)
+![Gallery](assets/screenshots/gallery-en.png)
 
 ## Features
 
@@ -40,7 +40,7 @@
 
 | | |
 |---|---|
-| ![Selection](assets/screenshots/selection.png) | ![Settings](assets/screenshots/settings.png) |
+| ![Selection](assets/screenshots/selection-en.png) | ![Settings](assets/screenshots/settings-en.png) |
 
 ## Privacy
 

@@ -16,7 +16,7 @@ egui-phosphor = "0.14.0"
 raw-window-handle = "0.6.2"
 snapling-core = { path = "../snapling-core" }
 snapling-scene = { path = "../snapling-scene" }
-snapling-translate = { version = "0.0.1", path = "../snapling-translate" }
+snapling-translate = { path = "../snapling-translate" }
 toml = { version = "1.1.8", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }

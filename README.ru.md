@@ -21,7 +21,7 @@
 
 <p align="center"><a href="README.md">Read in English</a></p>
 
-![Галерея](assets/screenshots/gallery.png)
+![Галерея](assets/screenshots/gallery-ru.png)
 
 ## Возможности
 
@@ -40,7 +40,7 @@
 
 | | |
 |---|---|
-| ![Выделение](assets/screenshots/selection.png) | ![Настройки](assets/screenshots/settings.png) |
+| ![Выделение](assets/screenshots/selection-ru.png) | ![Настройки](assets/screenshots/settings-ru.png) |
 
 ## Приватность
 

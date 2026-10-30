@@ -2275,6 +2275,9 @@ mod preview {
     #[ignore]
     fn render_mockup_scene() {
         let dir = std::path::PathBuf::from(std::env::var("SNAP_PREVIEW").expect("SNAP_PREVIEW"));
+        if let Ok(lang) = std::env::var("SNAP_LANG") {
+            snapling_core::i18n::set(&lang, "en", std::path::Path::new("."));
+        }
         let (w, h) = (1440u32, 900u32);
         let sel = Rect {
             left: 368,
@@ -2352,7 +2355,7 @@ mod preview {
                         can_undo: true,
                         can_redo: false,
                         live: Some(&live),
-                        caret: Some((Pt { x: 400.0, y: 230.0 }, "Привет")),
+                        caret: Some((Pt { x: 400.0, y: 230.0 }, "Hello")),
                         picker: false,
                         color_format: ColorFormat::Hex,
                     }),

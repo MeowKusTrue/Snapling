@@ -1,6 +1,6 @@
 # Maintainer: MeowKusTrue
 pkgname=snapling-git
-pkgver=0.0.1
+pkgver=1.0.1
 pkgrel=1
 pkgdesc='Screenshots with annotation, OCR and translation'
 arch=('x86_64')
@@ -25,7 +25,7 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd Snapling
-  printf '0.0.1.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  printf '1.0.1.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 prepare() {

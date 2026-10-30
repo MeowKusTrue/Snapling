@@ -705,6 +705,28 @@ pub fn caption(ui: &mut Ui, text: &str) {
     });
 }
 
+/// Round icon button that comes alive under the pointer: it turns by `turn` radians and grows
+/// by `grow` points.
+pub fn live_icon(ui: &mut Ui, glyph: &str, tip: &str, turn: f32, grow: f32) -> Response {
+    let (rect, r) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
+    let p = pal(ui.ctx());
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(r.id.with("live"), r.hovered(), 0.2);
+    let eased = 1.0 - (1.0 - t).powi(3);
+    ui.painter()
+        .rect_filled(rect, 19.0, p.ghost.gamma_multiply(eased));
+    let color = p.soft.lerp_to_gamma(p.text, eased);
+    let galley =
+        ui.painter()
+            .layout_no_wrap(glyph.to_string(), icon_font(20.0 + grow * eased), color);
+    let at = rect.center() - galley.size() / 2.0;
+    let shape = egui::epaint::TextShape::new(at, galley, color)
+        .with_angle_and_anchor(turn * eased, egui::Align2::CENTER_CENTER);
+    ui.painter().add(shape);
+    r.on_hover_text(tip)
+}
+
 /// Placeholder of something still loading: a calm pulse, the frames only while it is on screen.
 pub fn skeleton(ui: &Ui, rect: Rect, radius: f32) {
     let ctx = ui.ctx();

@@ -25,6 +25,8 @@ pub struct Hooks {
     pub edit: fn(&Path, &str) -> Result<(), String>,
     /// Shows the file in its folder.
     pub reveal: fn(&Path),
+    /// Pins the shot over all windows, in a process of its own.
+    pub pin: fn(&Path) -> Result<(), String>,
     /// Text of a saved shot, by the engine from the settings. Blocks.
     pub recognize: fn(&Path) -> Result<String, String>,
     /// Shots folder from the config, opened by the header button.
@@ -122,6 +124,7 @@ enum Act {
     Copy(usize),
     Edit(usize),
     Reveal(usize),
+    Pin(usize),
     Read(usize),
     Remove(usize),
 }
@@ -252,6 +255,9 @@ impl History {
             Act::Reveal(i) => {
                 (self.hooks.reveal)(Path::new(&self.entries[i].path));
                 Ok(String::new())
+            }
+            Act::Pin(i) => {
+                (self.hooks.pin)(Path::new(&self.entries[i].path)).map(|()| String::new())
             }
             Act::Read(i) => {
                 let entry = self.entries[i].clone();
@@ -411,13 +417,14 @@ impl History {
                 if ui::tone(ui, t("Редактор"), Some(half), 38.0).clicked() {
                     *act = Some(Act::Edit(index));
                 }
+                if ui::tone(ui, t("Закрепить"), Some(half), 38.0).clicked() {
+                    *act = Some(Act::Pin(index));
+                }
+            });
+            ui.horizontal(|ui| {
                 if ui::tone(ui, t("В папке"), Some(half), 38.0).clicked() {
                     *act = Some(Act::Reveal(index));
                 }
-            });
-        }
-        ui.horizontal(|ui| {
-            if !e.path.is_empty() {
                 let label = if self.reading.is_some() {
                     t("Распознаю…")
                 } else {
@@ -428,15 +435,14 @@ impl History {
                 if r.inner.clicked() {
                     *act = Some(Act::Read(index));
                 }
-            }
-            let width = if e.path.is_empty() { w } else { half };
-            if ui::ghost_text_w(ui, t("Убрать"), width, 38.0)
-                .on_hover_text(t("Файл на диске остаётся"))
-                .clicked()
-            {
-                *act = Some(Act::Remove(index));
-            }
-        });
+            });
+        }
+        if ui::ghost_text_w(ui, t("Убрать"), w, 38.0)
+            .on_hover_text(t("Файл на диске остаётся"))
+            .clicked()
+        {
+            *act = Some(Act::Remove(index));
+        }
     }
 
     fn panel(&mut self, ui: &mut egui::Ui, index: usize, hit: &str, act: &mut Option<Act>) {
@@ -461,7 +467,8 @@ impl History {
             let line = format!("«{hit}»");
             ui::short(ui, RichText::new(line).size(12.5).color(p.warn));
         }
-        let foot = 40.0 + 38.0 * 2.0 + 10.0 * 3.0;
+        let rows = if e.path.is_empty() { 1.0 } else { 3.0 };
+        let foot = 40.0 + 38.0 * rows + 10.0 * (rows + 1.0);
         if !e.path.is_empty()
             && ui::ghost_text_w(ui, t("Открыть большим"), ui.available_width(), 34.0).clicked()
         {

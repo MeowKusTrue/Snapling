@@ -12,10 +12,11 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, HTCAPTION, HWND_TOPMOST, IDC_SIZEALL,
-    LoadCursorW, RegisterClassW, SW_SHOW, SWP_NOMOVE, SetWindowPos, ShowWindow, WM_DESTROY,
-    WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_PAINT,
-    WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HTCAPTION,
+    HWND_TOPMOST, IDC_SIZEALL, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SW_SHOW,
+    SWP_NOMOVE, SetWindowPos, ShowWindow, TranslateMessage, WM_DESTROY, WM_KEYDOWN, WM_MOUSEWHEEL,
+    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_PAINT, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::w;
 
@@ -31,6 +32,8 @@ struct Pin {
 thread_local! {
     static PINS: RefCell<HashMap<isize, Pin>> = RefCell::new(HashMap::new());
     static REGISTERED: Cell<bool> = const { Cell::new(false) };
+    /// A process of its own: it ends with its last pin.
+    static ALONE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Scale after one wheel step.
@@ -82,6 +85,20 @@ pub fn show(mut img: Image) -> Result<(), String> {
         });
         style_window(hwnd.0 as isize);
         let _ = ShowWindow(hwnd, SW_SHOW);
+    }
+    Ok(())
+}
+
+/// Pins `img` and keeps this process alive until the pin is closed.
+pub fn run_alone(img: Image) -> Result<(), String> {
+    ALONE.set(true);
+    show(img)?;
+    let mut msg = MSG::default();
+    unsafe {
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
     Ok(())
 }
@@ -156,7 +173,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             });
         }
         WM_DESTROY => {
-            PINS.with(|p| p.borrow_mut().remove(&(hwnd.0 as isize)));
+            let empty = PINS.with(|p| {
+                let mut p = p.borrow_mut();
+                p.remove(&(hwnd.0 as isize));
+                p.is_empty()
+            });
+            if empty && ALONE.get() {
+                unsafe { PostQuitMessage(0) };
+            }
         }
         _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }

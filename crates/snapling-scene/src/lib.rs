@@ -1508,6 +1508,23 @@ pub fn draw_element(pm: &mut PixmapMut<'_>, e: &annotate::Element) {
     annotate::draw(pm, &swapped);
 }
 
+/// Side of the countdown mark before a delayed shot.
+pub const COUNT_SIZE: f32 = 104.0;
+
+/// Seconds left, into a transparent BGRA buffer, premultiplied.
+pub fn draw_count(pm: &mut PixmapMut<'_>, left: u32, s: f32) {
+    let c = pm.width() as f32 / 2.0;
+    let id = Transform::identity();
+    if let Some(p) = PathBuilder::from_circle(c, c, c - 1.0) {
+        pm.fill_path(&p, &paint([22, 27, 39, 235]), FillRule::Winding, id, None);
+        pm.stroke_path(&p, &paint([255, 255, 255, 40]), &stroke(1.0), id, None);
+    }
+    let digits = left.to_string();
+    let font = &fonts().semibold;
+    let w = text_w(font, &digits, 44.0 * s);
+    text(pm, font, &digits, c - w / 2.0, c, 44.0 * s, TEXT);
+}
+
 /// Row icon of the tray menu; also says what the row does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuIcon {

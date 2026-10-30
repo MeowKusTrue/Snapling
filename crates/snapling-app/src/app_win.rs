@@ -547,6 +547,17 @@ fn open_path(path: &Path) {
     let _ = std::process::Command::new("explorer").arg(path).spawn();
 }
 
+/// `snapling --pin <file>`: a shot from the gallery pinned on its own.
+pub fn run_pin(path: &Path) {
+    let res = load_image(path).and_then(|mut img| {
+        (img.x, img.y) = (120, 120);
+        snapling_win::pin::run_alone(img)
+    });
+    if let Err(e) = res {
+        snapling_win::warn(&e);
+    }
+}
+
 /// Registry, folder dialog and key polling for the settings process.
 pub fn settings_hooks() -> crate::settings::Hooks {
     crate::settings::Hooks {
@@ -575,6 +586,8 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         log: app_dir("LOCALAPPDATA").join("snapling.log"),
         default_dir: || snapling_win::pictures_dir().map(|p| p.join("Snapling")),
         pick_wav: snapling_win::pick_wav,
+        pick_toml: snapling_win::pick_toml,
+        save_toml: snapling_win::save_toml,
         preview: |cfg, s| {
             // PlaySound reads the buffer after returning; the window lives seconds to minutes.
             snapling_win::play_wav(Box::leak(sound::load(cfg, s)?.into_boxed_slice()));
@@ -610,6 +623,15 @@ pub fn history_hooks() -> crate::history_ui::Hooks {
             let _ = std::process::Command::new("explorer")
                 .arg(format!("/select,{}", path.display()))
                 .spawn();
+        },
+        pin: |path| {
+            let started = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .arg("--pin")
+                    .arg(path)
+                    .spawn()
+            });
+            started.map(|_| ()).map_err(|e| e.to_string())
         },
         recognize: |path| {
             let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"))?;
@@ -723,7 +745,7 @@ fn run_action(a: Action) {
     match a {
         Action::CaptureRegion => capture_region(None),
         Action::DelayedRegion => {
-            snapling_win::hotkey_after(hotkey_id(Action::CaptureRegion), DELAY.get());
+            snapling_win::countdown::start(DELAY.get(), hotkey_id(Action::CaptureRegion));
         }
         Action::RecognizeText => capture_region(Some(Outcome::Text)),
         Action::TranslateText => capture_region(Some(Outcome::Translate)),
@@ -952,6 +974,9 @@ pub fn run() {
     }
     if let Err(e) = snapling_win::menu::init() {
         error!("menu init: {e}");
+    }
+    if let Err(e) = snapling_win::countdown::init() {
+        error!("countdown init: {e}");
     }
     apply_config(&cfg);
     let now = history::time_string(snapling_win::local_stamp());

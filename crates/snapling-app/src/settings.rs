@@ -38,6 +38,8 @@ pub struct Hooks {
     /// Folder used when `[save] dir` is empty.
     pub default_dir: fn() -> Option<PathBuf>,
     pub pick_wav: fn() -> Option<String>,
+    pub pick_toml: fn() -> Option<String>,
+    pub save_toml: fn() -> Option<PathBuf>,
     /// Plays one sound as these settings would.
     pub preview: fn(&SoundCfg, Sound) -> Result<(), String>,
 }
@@ -313,6 +315,41 @@ impl Settings {
                 }
             });
         });
+        let store = &mut self.store;
+        let mut imported = None;
+        card(ui, |ui| {
+            let hint = t("Ключи API в файл не попадают.");
+            row(ui, t("Файл настроек"), hint, |ui| {
+                if ui::tone(ui, t("Импорт…"), None, 30.0).clicked()
+                    && let Some(file) = (self.hooks.pick_toml)()
+                {
+                    let file = Path::new(&file);
+                    let done = std::fs::read_to_string(file)
+                        .map_err(|e| e.to_string())
+                        .and_then(|text| {
+                            let cfg: Config = toml::from_str(&text).map_err(|e| e.to_string())?;
+                            std::fs::write(&store.path, text).map_err(|e| e.to_string())?;
+                            Ok(cfg)
+                        });
+                    match done {
+                        Ok(cfg) => imported = Some(cfg),
+                        Err(e) => store.error = tf("Файл не подошёл: {e}", &[("e", &e)]),
+                    }
+                }
+                if ui::tone(ui, t("Экспорт…"), None, 30.0).clicked()
+                    && let Some(to) = (self.hooks.save_toml)()
+                    && let Err(e) = std::fs::copy(&store.path, to)
+                {
+                    store.error = e.to_string();
+                }
+            });
+        });
+        if let Some(cfg) = imported {
+            ui::apply_language(&cfg.ui.language);
+            ui::set_theme(ui.ctx(), cfg.ui.theme);
+            self.cfg = cfg;
+        }
+        let store = &mut self.store;
         caption(ui, t("Отклик"));
         card(ui, |ui| {
             let title = t("Уведомление после снимка");

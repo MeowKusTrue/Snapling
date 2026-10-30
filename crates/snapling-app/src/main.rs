@@ -41,6 +41,10 @@ fn main() {
     if args.len() == 3 && args[1] == "--translate" {
         return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), false);
     }
+    #[cfg(windows)]
+    if args.len() == 3 && args[1] == "--pin" {
+        return app_win::run_pin(std::path::Path::new(&args[2]));
+    }
     if args.len() == 3 && args[1] == "--text" {
         return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), true);
     }
@@ -98,6 +102,8 @@ fn settings_hooks() -> settings::Hooks {
         free_printscreen: || Err(t("пока только Windows").into()),
         models: std::path::PathBuf::from("models"),
         open: |_| {},
+        pick_toml: || None,
+        save_toml: || None,
         log: std::path::PathBuf::new(),
         default_dir: || None,
         pick_wav: || None,
@@ -120,6 +126,7 @@ fn history_hooks() -> history_ui::Hooks {
         copy_text: |_| Err(t("пока только Windows").into()),
         edit: |_, _| Err(t("пока только Windows").into()),
         reveal: |_| {},
+        pin: |_| Err(t("пока только Windows").into()),
         recognize: |_| Err(t("пока только Windows").into()),
         open_folder: || {},
     }

@@ -48,8 +48,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
     WM_KEYDOWN, WM_SYSKEYDOWN,
 };
-use windows::core::{HSTRING, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
+pub mod countdown;
 pub mod menu;
 pub mod ocr;
 pub mod overlay;
@@ -295,28 +296,35 @@ fn write_run_entry() -> Result<(), String> {
 
 /// Native folder picker; `None` when cancelled.
 pub fn pick_folder() -> Option<String> {
-    open_dialog(true)
+    open_dialog(None)
 }
 
 /// Native picker of one WAV file; `None` when cancelled.
 pub fn pick_wav() -> Option<String> {
-    open_dialog(false)
+    open_dialog(Some((w!("WAV"), w!("*.wav"))))
 }
 
-fn open_dialog(folder: bool) -> Option<String> {
+/// Native picker of a settings file; `None` when cancelled.
+pub fn pick_toml() -> Option<String> {
+    open_dialog(Some((w!("TOML"), w!("*.toml"))))
+}
+
+/// `kind`: name and mask of the file type, `None` picks a folder.
+fn open_dialog(kind: Option<(PCWSTR, PCWSTR)>) -> Option<String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let dlg: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-        if folder {
-            dlg.SetOptions(dlg.GetOptions().ok()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
-                .ok()?;
-        } else {
-            dlg.SetFileTypes(&[COMDLG_FILTERSPEC {
-                pszName: w!("WAV"),
-                pszSpec: w!("*.wav"),
-            }])
-            .ok()?;
+        match kind {
+            None => dlg
+                .SetOptions(dlg.GetOptions().ok()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+                .ok()?,
+            Some((name, spec)) => dlg
+                .SetFileTypes(&[COMDLG_FILTERSPEC {
+                    pszName: name,
+                    pszSpec: spec,
+                }])
+                .ok()?,
         }
         dlg.Show(None).ok()?;
         let path = dlg
@@ -358,21 +366,38 @@ pub fn taskbar_is_light() -> bool {
 
 /// Native «Сохранить как»; the file type comes from the extension the user picks.
 pub fn save_file_dialog(name: &str) -> Option<std::path::PathBuf> {
+    let types = [
+        (w!("PNG"), w!("*.png")),
+        (w!("WebP"), w!("*.webp")),
+        (w!("JPEG"), w!("*.jpg")),
+    ];
+    save_dialog(name, &types, w!("png"))
+}
+
+/// Where to export the settings; `None` when cancelled.
+pub fn save_toml() -> Option<std::path::PathBuf> {
+    let types = [(w!("TOML"), w!("*.toml"))];
+    save_dialog("snapling-settings.toml", &types, w!("toml"))
+}
+
+fn save_dialog(
+    name: &str,
+    types: &[(PCWSTR, PCWSTR)],
+    extension: PCWSTR,
+) -> Option<std::path::PathBuf> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let dlg: IFileSaveDialog =
             CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-        let types = [
-            (w!("PNG"), w!("*.png")),
-            (w!("WebP"), w!("*.webp")),
-            (w!("JPEG"), w!("*.jpg")),
-        ]
-        .map(|(name, spec)| COMDLG_FILTERSPEC {
-            pszName: name,
-            pszSpec: spec,
-        });
+        let types: Vec<COMDLG_FILTERSPEC> = types
+            .iter()
+            .map(|&(name, spec)| COMDLG_FILTERSPEC {
+                pszName: name,
+                pszSpec: spec,
+            })
+            .collect();
         dlg.SetFileTypes(&types).ok()?;
-        dlg.SetDefaultExtension(w!("png")).ok()?;
+        dlg.SetDefaultExtension(extension).ok()?;
         dlg.SetFileName(&HSTRING::from(name)).ok()?;
         dlg.Show(None).ok()?;
         let path = dlg
@@ -493,20 +518,6 @@ pub fn to_recycle_bin(paths: &[String]) -> Result<(), String> {
         0 => Ok(()),
         e => Err(format!("SHFileOperationW: {e:#x}")),
     }
-}
-
-/// Sends this thread the hotkey `id` after `seconds`, for a delayed shot.
-pub fn hotkey_after(id: i32, seconds: u32) {
-    use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_HOTKEY};
-    let thread = unsafe { GetCurrentThreadId() };
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(u64::from(seconds)));
-        let wp = windows::Win32::Foundation::WPARAM(id as usize);
-        let _ = unsafe {
-            PostThreadMessageW(thread, WM_HOTKEY, wp, windows::Win32::Foundation::LPARAM(0))
-        };
-    });
 }
 
 /// Gives PrtScn back, on the user's click. The value is per user: no elevation needed.

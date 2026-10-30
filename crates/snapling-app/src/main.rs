@@ -124,6 +124,7 @@ fn history_hooks() -> history_ui::Hooks {
         now: String::new,
         copy_image: |_| Err(t("пока только Windows").into()),
         copy_text: |_| Err(t("пока только Windows").into()),
+        copy_file: |_| Err(t("пока только Windows").into()),
         edit: |_, _| Err(t("пока только Windows").into()),
         reveal: |_| {},
         pin: |_| Err(t("пока только Windows").into()),

@@ -5,7 +5,7 @@ use crate::ui::{self, caption, card, divider, row, segmented, toggle};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, Sense, TextEdit, vec2};
 use egui_phosphor::regular as icon;
 use snapling_core::config::{
-    Action, Config, Engine, Format, Online, SoundCfg, SoundPack, Theme, TrayIcon,
+    Action, Config, Engine, Format, Online, RecordFormat, SoundCfg, SoundPack, Theme, TrayIcon,
 };
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n;
@@ -766,6 +766,41 @@ impl Settings {
         (clicked, cleared)
     }
 
+    fn record_card(&mut self, ui: &mut egui::Ui) {
+        let store = &mut self.store;
+        let rec = &mut self.cfg.record;
+        caption(ui, t("Запись экрана"));
+        card(ui, |ui| {
+            let hint = t("GIF сжимается до 960 пикселей по длинной стороне.");
+            row(ui, t("Формат"), hint, |ui| {
+                let now = usize::from(rec.format == RecordFormat::Mp4);
+                if let Some(i) = segmented(ui, &["GIF", "MP4"], now, 30.0) {
+                    rec.format = [RecordFormat::Gif, RecordFormat::Mp4][i];
+                    store.set("record", "format", rec.format.extension());
+                }
+            });
+            divider(ui);
+            row(ui, t("Кадров в секунду"), "", |ui| {
+                let all = [10, 15, 30];
+                let now = all.iter().position(|v| *v == rec.fps).unwrap_or(1);
+                if let Some(i) = segmented(ui, &["10", "15", "30"], now, 30.0) {
+                    rec.fps = all[i];
+                    store.set("record", "fps", i64::from(all[i]));
+                }
+            });
+            divider(ui);
+            row(ui, t("Останавливать через"), "", |ui| {
+                let all = [60, 120, 300];
+                let now = all.iter().position(|v| *v == rec.max_seconds).unwrap_or(1);
+                let items = [t("1 мин"), t("2 мин"), t("5 мин")];
+                if let Some(i) = segmented(ui, &items, now, 30.0) {
+                    rec.max_seconds = all[i];
+                    store.set("record", "max_seconds", i64::from(all[i]));
+                }
+            });
+        });
+    }
+
     fn hotkey_pressed(&mut self, click: Option<Action>, clear: Option<Action>) {
         if let Some(a) = click {
             self.refused = None;
@@ -1307,7 +1342,10 @@ impl eframe::App for Settings {
                                     ui.spacing_mut().item_spacing.y = 14.0;
                                     match self.tab {
                                         Tab::General => self.general(ui),
-                                        Tab::Capture => self.capture(ui),
+                                        Tab::Capture => {
+                                            self.capture(ui);
+                                            self.record_card(ui);
+                                        }
                                         Tab::Hotkeys => self.hotkeys(ui),
                                         Tab::Text => self.text(ui),
                                         Tab::Models => self.models_tab(ui),

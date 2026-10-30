@@ -20,6 +20,8 @@ pub enum Button {
     Text,
     Translate,
     Pin,
+    Record,
+    Scroll,
     Cancel,
 }
 
@@ -198,23 +200,27 @@ const RAIL_BTN: (f32, f32) = (44.0, 40.0);
 const OPTS_W: f32 = 160.0;
 
 /// Toolbar buttons in mockup order; `None` is the divider.
-const BAR: [Option<Button>; 8] = [
+const BAR: [Option<Button>; 10] = [
     Some(Button::Copy),
     Some(Button::Save),
     Some(Button::Edit),
     Some(Button::Text),
     Some(Button::Translate),
     Some(Button::Pin),
+    Some(Button::Record),
+    Some(Button::Scroll),
     None,
     Some(Button::Cancel),
 ];
 
-const HINTS_SELECTED: [(&str, &str); 9] = [
+const HINTS_SELECTED: [(&str, &str); 11] = [
     ("Enter", n("копировать")),
     ("S", n("сохранить")),
     ("E", n("редактор")),
     ("O", n("текст")),
     ("P", n("закрепить")),
+    ("G", n("запись")),
+    ("D", n("длинный")),
     ("V", n("область")),
     ("L", n("произвольная")),
     ("1–9", n("рисовать")),
@@ -335,7 +341,15 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
             let lasso = sc.tools.as_ref().is_some_and(|t| t.lasso.is_some());
             let items: Vec<Option<Button>> = BAR
                 .into_iter()
-                .filter(|b| !lasso || !matches!(b, Some(Button::Text | Button::Translate)))
+                .filter(|b| {
+                    !lasso
+                        || !matches!(
+                            b,
+                            Some(
+                                Button::Text | Button::Translate | Button::Record | Button::Scroll
+                            )
+                        )
+                })
                 .collect();
             let width = |b: Option<Button>| match b {
                 Some(Button::Copy) => primary_w(s),
@@ -874,6 +888,15 @@ fn icon_data(b: Button) -> &'static [&'static str] {
             "M 15 3 L 21 9",
             "M 16 4 L 10 10 L 6 10 L 14 18 L 14 14 L 20 8",
             "M 9 15 L 4 20",
+        ],
+        Button::Record => &[
+            CIRCLE,
+            "M 12 9 C 13.7 9 15 10.3 15 12 C 15 13.7 13.7 15 12 15 C 10.3 15 9 13.7 9 12 C 9 10.3 10.3 9 12 9 Z",
+        ],
+        Button::Scroll => &[
+            "M 7 3 H 17 Q 19 3 19 5 V 13 Q 19 15 17 15 H 7 Q 5 15 5 13 V 5 Q 5 3 7 3 Z",
+            "M 12 18 V 22",
+            "M 9 19 L 12 22 L 15 19",
         ],
         Button::Cancel => &["M 6 6 L 18 18", "M 18 6 L 6 18"],
     }
@@ -1508,6 +1531,32 @@ pub fn draw_element(pm: &mut PixmapMut<'_>, e: &annotate::Element) {
     annotate::draw(pm, &swapped);
 }
 
+/// Size of the recording pill at scale 1.
+pub const PILL_SIZE: (f32, f32) = (230.0, 40.0);
+
+/// Status pill of a recording or a long shot.
+pub fn draw_pill(pm: &mut PixmapMut<'_>, label: &str, s: f32) {
+    let (w, h) = (pm.width() as f32, pm.height() as f32);
+    let id = Transform::identity();
+    if let Some(p) = rrect(0.5, 0.5, w - 1.0, h - 1.0, h / 2.0) {
+        pm.fill_path(&p, &paint([22, 27, 39, 240]), FillRule::Winding, id, None);
+        pm.stroke_path(&p, &paint([255, 255, 255, 40]), &stroke(1.0), id, None);
+    }
+    let font = &fonts().semibold;
+    let label = fit_text(font, label, 13.5 * s, w - 24.0 * s);
+    let width = text_w(font, &label, 13.5 * s);
+    text(pm, font, &label, (w - width) / 2.0, h / 2.0, 13.5 * s, TEXT);
+}
+
+/// Red frame around what is being recorded.
+pub fn draw_rec_frame(pm: &mut PixmapMut<'_>, s: f32) {
+    let (w, h) = (pm.width() as f32, pm.height() as f32);
+    let id = Transform::identity();
+    if let Some(p) = rrect(1.5, 1.5, w - 3.0, h - 3.0, 3.0 * s) {
+        pm.stroke_path(&p, &paint([255, 69, 58, 255]), &stroke(2.0), id, None);
+    }
+}
+
 /// Side of the countdown mark before a delayed shot.
 pub const COUNT_SIZE: f32 = 104.0;
 
@@ -1532,6 +1581,8 @@ pub enum MenuIcon {
     Screen,
     Repeat,
     Delay,
+    Record,
+    Scroll,
     Text,
     History,
     Folder,
@@ -1573,6 +1624,8 @@ fn menu_icon(i: MenuIcon) -> &'static [&'static str] {
             "M 8 3 C 8 9 16 9 16 12 C 16 15 8 15 8 21",
             "M 16 3 C 16 9 8 9 8 12 C 8 15 16 15 16 21",
         ],
+        MenuIcon::Record => icon_data(Button::Record),
+        MenuIcon::Scroll => icon_data(Button::Scroll),
         MenuIcon::Text => icon_data(Button::Text),
         MenuIcon::History => &[CIRCLE, "M 12 7 V 12 L 15 14"],
         MenuIcon::Folder => &[
@@ -1743,7 +1796,7 @@ mod tests {
         let lay = layout(&scene(Some(sel), true));
         let bar = lay.toolbar.unwrap();
         assert_eq!((bar.left, bar.top, bar.height), (368, 438, 46));
-        assert_eq!(lay.buttons.len(), 7);
+        assert_eq!(lay.buttons.len(), 9);
         assert_eq!(lay.buttons[0].1, Control::Action(Button::Copy));
         let pill = lay.size_pill.as_ref().unwrap();
         assert_eq!((pill.0.left, pill.0.top), (368, 182));
@@ -2000,6 +2053,8 @@ mod tests {
             Button::Text,
             Button::Translate,
             Button::Pin,
+            Button::Record,
+            Button::Scroll,
             Button::Cancel,
         ] {
             for d in icon_data(b) {

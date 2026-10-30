@@ -21,6 +21,10 @@ capture_window = "Alt+PrintScreen"
 repeat_region = "Ctrl+PrintScreen"
 # Выделение откроется через [capture] delay секунд
 delayed = ""
+# Запись экрана: первое нажатие выбирает область, второе останавливает
+record = ""
+# Выделить область и снять её с прокруткой
+long_shot = ""
 # Выделить область и сразу распознать текст
 recognize = ""
 # Выделить область и сразу распознать и перевести
@@ -58,6 +62,14 @@ toast = true
 # Размытие кистью при запуске: false — кубики, true — гаусс. Сила 0, 1 или 2.
 gauss = false
 strength = 0
+
+[record]
+# Формат записи: "gif" или "mp4".
+format = "gif"
+# Кадров в секунду: 10, 15 или 30.
+fps = 15
+# Запись останавливается сама через столько секунд.
+max_seconds = 120
 
 [history]
 # Сколько дней хранить записи галереи, 0 — всегда.
@@ -117,6 +129,7 @@ pub struct Config {
     pub hotkeys: Hotkeys,
     pub save: Save,
     pub capture: Capture,
+    pub record: Record,
     pub history: HistoryCfg,
     pub sound: SoundCfg,
     pub privacy: Privacy,
@@ -124,6 +137,41 @@ pub struct Config {
     pub translate: Translate,
     pub blur: Blur,
     pub ui: Ui,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordFormat {
+    #[default]
+    Gif,
+    Mp4,
+}
+
+impl RecordFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            RecordFormat::Gif => "gif",
+            RecordFormat::Mp4 => "mp4",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Record {
+    pub format: RecordFormat,
+    pub fps: u32,
+    pub max_seconds: u32,
+}
+
+impl Default for Record {
+    fn default() -> Self {
+        Self {
+            format: RecordFormat::Gif,
+            fps: 15,
+            max_seconds: 120,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -378,6 +426,8 @@ pub struct Hotkeys {
     pub capture_window: String,
     pub repeat_region: String,
     pub delayed: String,
+    pub record: String,
+    pub long_shot: String,
     pub recognize: String,
     pub translate: String,
 }
@@ -390,6 +440,8 @@ impl Default for Hotkeys {
             capture_window: "Alt+PrintScreen".into(),
             repeat_region: "Ctrl+PrintScreen".into(),
             delayed: String::new(),
+            record: String::new(),
+            long_shot: String::new(),
             recognize: String::new(),
             translate: String::new(),
         }
@@ -403,17 +455,21 @@ pub enum Action {
     CaptureWindow,
     RepeatRegion,
     DelayedRegion,
+    Record,
+    LongShot,
     RecognizeText,
     TranslateText,
 }
 
 impl Action {
-    pub const ALL: [Action; 7] = [
+    pub const ALL: [Action; 9] = [
         Action::CaptureRegion,
         Action::CaptureScreen,
         Action::CaptureWindow,
         Action::RepeatRegion,
         Action::DelayedRegion,
+        Action::Record,
+        Action::LongShot,
         Action::RecognizeText,
         Action::TranslateText,
     ];
@@ -426,6 +482,8 @@ impl Action {
             Action::CaptureWindow => "capture_window",
             Action::RepeatRegion => "repeat_region",
             Action::DelayedRegion => "delayed",
+            Action::Record => "record",
+            Action::LongShot => "long_shot",
             Action::RecognizeText => "recognize",
             Action::TranslateText => "translate",
         }
@@ -438,6 +496,8 @@ impl Action {
             Action::CaptureWindow => t("Активное окно"),
             Action::RepeatRegion => t("Повторить область"),
             Action::DelayedRegion => t("Снимок с задержкой"),
+            Action::Record => t("Запись экрана"),
+            Action::LongShot => t("Длинный скриншот"),
             Action::RecognizeText => t("Распознать текст"),
             Action::TranslateText => t("Текст + перевод"),
         }
@@ -452,6 +512,8 @@ impl Hotkeys {
             Action::CaptureWindow => &self.capture_window,
             Action::RepeatRegion => &self.repeat_region,
             Action::DelayedRegion => &self.delayed,
+            Action::Record => &self.record,
+            Action::LongShot => &self.long_shot,
             Action::RecognizeText => &self.recognize,
             Action::TranslateText => &self.translate,
         }
@@ -464,6 +526,8 @@ impl Hotkeys {
             Action::CaptureWindow => &mut self.capture_window,
             Action::RepeatRegion => &mut self.repeat_region,
             Action::DelayedRegion => &mut self.delayed,
+            Action::Record => &mut self.record,
+            Action::LongShot => &mut self.long_shot,
             Action::RecognizeText => &mut self.recognize,
             Action::TranslateText => &mut self.translate,
         } = combo;

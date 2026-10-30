@@ -55,6 +55,8 @@ pub mod menu;
 pub mod ocr;
 pub mod overlay;
 pub mod pin;
+pub mod rec_ui;
+pub mod record;
 pub mod secret;
 pub mod targets;
 pub mod toast;
@@ -611,19 +613,63 @@ pub(crate) fn dib_header(width: u32, height: i32) -> BITMAPINFOHEADER {
 /// All monitors as one image (virtual screen), GDI BitBlt.
 /// ponytail: GDI gives black frames for exclusive-fullscreen games; WGC/DXGI in stage 3.
 pub fn capture_virtual_screen() -> Result<Image, String> {
+    let (x, y, w, h) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    if w <= 0 || h <= 0 {
+        return Err(t("пустой виртуальный экран").into());
+    }
+    let bgra = grab(x, y, w, h, false)?;
+    Ok(Image {
+        x,
+        y,
+        width: w as u32,
+        height: h as u32,
+        bgra,
+    })
+}
+
+/// Pointer into a memory DC whose origin is the desktop point (`x`, `y`).
+unsafe fn draw_cursor(mem: windows::Win32::Graphics::Gdi::HDC, x: i32, y: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo, ICONINFO,
+    };
+    let mut ci = CURSORINFO {
+        cbSize: size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
     unsafe {
-        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        if w <= 0 || h <= 0 {
-            return Err(t("пустой виртуальный экран").into());
+        if GetCursorInfo(&mut ci).is_err() || ci.flags.0 & CURSOR_SHOWING.0 == 0 {
+            return;
         }
+        let mut info = ICONINFO::default();
+        if GetIconInfo(ci.hCursor.into(), &mut info).is_err() {
+            return;
+        }
+        let px = ci.ptScreenPos.x - info.xHotspot as i32 - x;
+        let py = ci.ptScreenPos.y - info.yHotspot as i32 - y;
+        let _ = DrawIconEx(mem, px, py, ci.hCursor.into(), 0, 0, 0, None, DI_NORMAL);
+        let _ = DeleteObject(info.hbmMask.into());
+        let _ = DeleteObject(info.hbmColor.into());
+    }
+}
+
+/// BGRA of a desktop area, opaque.
+pub(crate) fn grab(x: i32, y: i32, w: i32, h: i32, cursor: bool) -> Result<Vec<u8>, String> {
+    unsafe {
         let screen = GetDC(None);
         let mem = CreateCompatibleDC(Some(screen));
         let bmp = CreateCompatibleBitmap(screen, w, h);
         let old = SelectObject(mem, bmp.into());
         let blt = BitBlt(mem, 0, 0, w, h, Some(screen), x, y, SRCCOPY | CAPTUREBLT);
+        if cursor {
+            draw_cursor(mem, x, y);
+        }
         SelectObject(mem, old);
 
         let mut bgra = vec![0u8; w as usize * h as usize * 4];
@@ -654,13 +700,7 @@ pub fn capture_virtual_screen() -> Result<Image, String> {
         for px in bgra.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
-        Ok(Image {
-            x,
-            y,
-            width: w as u32,
-            height: h as u32,
-            bgra,
-        })
+        Ok(bgra)
     }
 }
 
@@ -695,6 +735,26 @@ pub fn copy_image(img: &Image) -> Result<(), String> {
         blocks.push((unsafe { RegisterClipboardFormatW(w!("PNG")) }, block));
     }
     put_clipboard(&blocks)
+}
+
+/// CF_HDROP: a file on the clipboard, pasted as an attachment.
+pub fn copy_file(path: &std::path::Path) -> Result<(), String> {
+    use windows::Win32::System::Ole::CF_HDROP;
+    // DROPFILES: offset of the list, a point, two flags; the last one means wide names.
+    let mut head = [0u8; 20];
+    head[0] = 20;
+    head[16] = 1;
+    let name: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain([0, 0])
+        .collect();
+    let size = head.len() + name.len() * 2;
+    let block = global(size, |dst| unsafe {
+        std::ptr::copy_nonoverlapping(head.as_ptr(), dst, head.len());
+        std::ptr::copy_nonoverlapping(name.as_ptr().cast::<u8>(), dst.add(20), name.len() * 2);
+    })?;
+    put_clipboard(&[(CF_HDROP.0 as u32, block)])
 }
 
 /// CF_UNICODETEXT.

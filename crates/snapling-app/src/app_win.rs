@@ -1,5 +1,7 @@
 use crate::app_dir;
-use snapling_core::config::{Action, Config, Engine, Format, Save, SoundCfg, Theme, TrayIcon};
+use snapling_core::config::{
+    Action, Config, Engine, Format, Record as RecordCfg, Save, SoundCfg, Theme, TrayIcon,
+};
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n::{t, tf};
 use snapling_core::selection::Rect;
@@ -7,6 +9,7 @@ use snapling_core::sound::{self, Sound};
 use snapling_core::{annotate, history, storage};
 use snapling_scene::{MenuIcon, MenuRow, ToastAction};
 use snapling_win::overlay::Outcome;
+use snapling_win::record::Recording;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -21,6 +24,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const DEEPL_PROXY: &str = "DeepLProxy";
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const CONFIG_POLL_MS: u32 = 1500;
+
+/// Result of a long shot, from its thread.
+type LongDone = (Result<snapling_win::Image, String>, String);
+static LONG_SHOT: Mutex<Option<LongDone>> = Mutex::new(None);
 
 thread_local! {
     /// Last confirmed region in screen coordinates, for "repeat region".
@@ -69,6 +76,10 @@ thread_local! {
     static OCR_LANG: RefCell<String> = RefCell::new("auto".into());
     /// `[ocr] engine = "paddle"`.
     static OCR_PADDLE: Cell<bool> = const { Cell::new(false) };
+    /// `[record]`.
+    static RECORD: Cell<RecordCfg> = Cell::new(RecordCfg::default());
+    /// The running recording and the app it started in.
+    static RECORDING: RefCell<Option<(Recording, String)>> = const { RefCell::new(None) };
     /// `[capture] delay`.
     static DELAY: Cell<u32> = const { Cell::new(3) };
     /// `[ocr] panel`.
@@ -160,6 +171,8 @@ fn menu_rows(cfg: &Config) -> Vec<MenuRow> {
         act(MenuIcon::Screen, Action::CaptureScreen),
         act(MenuIcon::Repeat, Action::RepeatRegion),
         act(MenuIcon::Delay, Action::DelayedRegion),
+        act(MenuIcon::Record, Action::Record),
+        act(MenuIcon::Scroll, Action::LongShot),
         act(MenuIcon::Text, Action::RecognizeText),
         MenuRow::Line,
         item(MenuIcon::History, t("Галерея")),
@@ -615,6 +628,7 @@ pub fn history_hooks() -> crate::history_ui::Hooks {
         now: || history::time_string(snapling_win::local_stamp()),
         copy_image: |path| snapling_win::copy_image(&load_image(path)?),
         copy_text: snapling_win::copy_text,
+        copy_file: snapling_win::copy_file,
         edit: |path, app| {
             open_editor(load_image(path)?, app.to_string());
             Ok(())
@@ -729,6 +743,8 @@ fn capture_region(auto: Option<Outcome>) {
                     play(Sound::Error);
                 }
             }
+            Outcome::Record => start_recording(img, app),
+            Outcome::Scroll => start_long_shot(&img, app),
             Outcome::Color => {}
         }
     });
@@ -741,8 +757,122 @@ fn capture_region(auto: Option<Outcome>) {
     }
 }
 
+/// Saves next to the shots, under the usual name with the extension of the format.
+fn record_path(app: &str, extension: &str) -> Result<PathBuf, String> {
+    let (dir, cfg) = SAVE
+        .with(|s| s.borrow().clone())
+        .ok_or(t("Сохранение отключено — проверь папку в настройках."))?;
+    let name = storage::render_name(&cfg.name, snapling_win::local_stamp(), app);
+    let path = storage::prepare_dir(&dir)?.join(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    Ok(path.with_extension(extension))
+}
+
+fn area_of(img: &snapling_win::Image) -> Rect {
+    Rect {
+        left: img.x,
+        top: img.y,
+        width: img.width as i32,
+        height: img.height as i32,
+    }
+}
+
+fn start_recording(img: snapling_win::Image, app: String) {
+    let rec = RECORD.get();
+    let path = match record_path(&app, rec.format.extension()) {
+        Ok(p) => p,
+        Err(e) => return snapling_win::warn(&e),
+    };
+    let area = area_of(&img);
+    snapling_win::rec_ui::show(area, false);
+    play(Sound::Capture);
+    info!(
+        "record {}x{} to {}",
+        area.width,
+        area.height,
+        path.display()
+    );
+    let thread = snapling_win::record::this_thread();
+    let run = Recording::start(area, rec.format, rec.fps, rec.max_seconds, path, thread);
+    RECORDING.with(|r| *r.borrow_mut() = Some((run, app)));
+}
+
+fn start_long_shot(img: &snapling_win::Image, app: String) {
+    let area = area_of(img);
+    snapling_win::rec_ui::show(area, true);
+    let thread = snapling_win::record::this_thread();
+    snapling_win::record::long_shot(area, thread, move |res| {
+        if let Ok(mut done) = LONG_SHOT.lock() {
+            *done = Some((res, app));
+        }
+    });
+}
+
+/// A recording or a long shot has ended: hands the result over.
+fn finish_jobs() {
+    let ended = RECORDING.with(|r| {
+        let mut r = r.borrow_mut();
+        let running = r.as_ref().is_some_and(|(run, _)| !run.finished());
+        if running { None } else { r.take() }
+    });
+    if let Some((run, app)) = ended {
+        snapling_win::rec_ui::hide();
+        match run.join() {
+            Ok(done) => {
+                info!("recorded {} s: {}", done.seconds, done.path.display());
+                let entry = history::Entry {
+                    time: history::time_string(snapling_win::local_stamp()),
+                    path: done.path.to_string_lossy().to_string(),
+                    width: done.last.width,
+                    height: done.last.height,
+                    app: app.clone(),
+                    kind: "record".into(),
+                    text: String::new(),
+                };
+                if let Err(e) = history::append(&history_file(), &entry) {
+                    warn!("history: {e}");
+                }
+                let copied = COPY_ON_CAPTURE.get()
+                    && snapling_win::copy_file(&done.path)
+                        .inspect_err(|e| error!("clipboard: {e}"))
+                        .is_ok();
+                play(Sound::Copy);
+                if TOAST.get() {
+                    notify(&done.last, &app, copied);
+                }
+            }
+            Err(e) => {
+                error!("record: {e}");
+                play(Sound::Error);
+                snapling_win::warn(&tf("Запись не удалась.\n{e}", &[("e", &e)]));
+            }
+        }
+    }
+    let long = LONG_SHOT.lock().ok().and_then(|mut l| l.take());
+    if let Some((res, app)) = long {
+        snapling_win::rec_ui::hide();
+        match res {
+            Ok(img) => {
+                info!("long shot {}x{}", img.width, img.height);
+                deliver(img, Instant::now(), app, "long", false);
+            }
+            Err(e) => capture_failed(e),
+        }
+    }
+}
+
 fn run_action(a: Action) {
     match a {
+        Action::Record => {
+            let running =
+                RECORDING.with(|r| r.borrow().as_ref().map(|(run, _)| run.stop()).is_some());
+            if !running {
+                capture_region(Some(Outcome::Record));
+            }
+        }
+        Action::LongShot => capture_region(Some(Outcome::Scroll)),
         Action::CaptureRegion => capture_region(None),
         Action::DelayedRegion => {
             snapling_win::countdown::start(DELAY.get(), hotkey_id(Action::CaptureRegion));
@@ -810,6 +940,7 @@ fn apply_config(cfg: &Config) {
     snapling_win::overlay::set_instant_copy(cfg.capture.instant_copy);
     snapling_win::overlay::set_loupe(cfg.capture.loupe);
     DELAY.set(cfg.capture.delay.clamp(1, 60));
+    RECORD.set(cfg.record);
     snapling_win::overlay::set_blur(cfg.blur.gauss, cfg.blur.strength.min(2));
     apply_ocr(&cfg.ocr.language);
     OCR_PADDLE.set(cfg.ocr.engine == Engine::Paddle);
@@ -978,6 +1109,9 @@ pub fn run() {
     if let Err(e) = snapling_win::countdown::init() {
         error!("countdown init: {e}");
     }
+    if let Err(e) = snapling_win::rec_ui::init() {
+        error!("recording init: {e}");
+    }
     apply_config(&cfg);
     let now = history::time_string(snapling_win::local_stamp());
     match history::prune(&history_file(), &now, cfg.history.keep_days) {
@@ -1027,6 +1161,7 @@ pub fn run() {
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         match msg.message {
+            snapling_win::record::WM_JOB_DONE => finish_jobs(),
             WM_HOTKEY => {
                 if let Some(a) = Action::ALL
                     .into_iter()
@@ -1079,11 +1214,20 @@ pub fn run() {
                 snapling_win::menu::show(menu_rows(&cfg), menu_light(&cfg));
             }
         }
+        if snapling_win::rec_ui::stop_asked() {
+            RECORDING.with(|r| {
+                if let Some((run, _)) = r.borrow().as_ref() {
+                    run.stop();
+                }
+            });
+        }
         match snapling_win::menu::picked() {
             Some(MenuIcon::Region) => run_action(Action::CaptureRegion),
             Some(MenuIcon::Screen) => run_action(Action::CaptureScreen),
             Some(MenuIcon::Repeat) => run_action(Action::RepeatRegion),
             Some(MenuIcon::Delay) => run_action(Action::DelayedRegion),
+            Some(MenuIcon::Record) => run_action(Action::Record),
+            Some(MenuIcon::Scroll) => run_action(Action::LongShot),
             Some(MenuIcon::Text) => run_action(Action::RecognizeText),
             Some(MenuIcon::History) => history_window.open("--history"),
             Some(MenuIcon::Folder) => open_shots_folder(),

@@ -20,6 +20,8 @@ pub enum Outcome {
     Text,
     Translate,
     Pin,
+    Record,
+    Scroll,
     /// `I`: the image is the one pixel under the cursor.
     Color,
 }
@@ -371,6 +373,8 @@ impl Session {
                     Button::Text => Step::Done(Outcome::Text),
                     Button::Translate => Step::Done(Outcome::Translate),
                     Button::Pin => Step::Done(Outcome::Pin),
+                    Button::Record => Step::Done(Outcome::Record),
+                    Button::Scroll => Step::Done(Outcome::Scroll),
                     Button::Cancel => Step::Cancel,
                 };
             }
@@ -546,6 +550,8 @@ impl Session {
             'o' => Outcome::Text,
             'r' => Outcome::Translate,
             'p' => Outcome::Pin,
+            'g' => Outcome::Record,
+            'd' => Outcome::Scroll,
             _ => return Step::Stay,
         };
         if confirmed {

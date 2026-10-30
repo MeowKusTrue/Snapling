@@ -55,6 +55,8 @@ pub enum Outcome {
     Text,
     Translate,
     Pin,
+    Record,
+    Scroll,
     /// `I`: the image is the one pixel under the cursor.
     Color,
 }
@@ -736,6 +738,8 @@ fn act(hwnd: HWND, b: Button) {
         Button::Text => Some(Outcome::Text),
         Button::Translate => Some(Outcome::Translate),
         Button::Pin => Some(Outcome::Pin),
+        Button::Record => Some(Outcome::Record),
+        Button::Scroll => Some(Outcome::Scroll),
         Button::Cancel => None,
     };
     finish(hwnd, out);
@@ -952,6 +956,8 @@ fn outcome_key(vk: u16) -> Option<Outcome> {
         b'O' => Some(Outcome::Text),
         b'R' => Some(Outcome::Translate),
         b'P' => Some(Outcome::Pin),
+        b'G' => Some(Outcome::Record),
+        b'D' => Some(Outcome::Scroll),
         _ => None,
     }
 }

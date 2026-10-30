@@ -21,6 +21,8 @@ pub struct Hooks {
     pub now: fn() -> String,
     pub copy_image: fn(&Path) -> Result<(), String>,
     pub copy_text: fn(&str) -> Result<(), String>,
+    /// A recording goes to the clipboard as a file.
+    pub copy_file: fn(&Path) -> Result<(), String>,
     /// Opens the saved shot in the editor process.
     pub edit: fn(&Path, &str) -> Result<(), String>,
     /// Shows the file in its folder.
@@ -236,13 +238,16 @@ impl History {
             }
             Act::Big(i) => {
                 self.selected = Some(i);
-                self.big = !self.entries[i].path.is_empty();
+                let e = &self.entries[i];
+                self.big = !e.path.is_empty() && !Self::is_recording(e);
                 return;
             }
             Act::Copy(i) => {
                 let e = &self.entries[i];
                 let r = if e.path.is_empty() {
                     (self.hooks.copy_text)(&e.text)
+                } else if Self::is_recording(e) {
+                    (self.hooks.copy_file)(Path::new(&e.path))
                 } else {
                     (self.hooks.copy_image)(Path::new(&e.path))
                 };
@@ -279,6 +284,10 @@ impl History {
         self.status = res.unwrap_or_else(|e| tf("Не получилось: {e}", &[("e", &e)]));
     }
 
+    fn is_recording(e: &Entry) -> bool {
+        e.kind == "record"
+    }
+
     fn title(e: &Entry) -> String {
         if !e.app.is_empty() {
             return e.app.clone();
@@ -287,6 +296,8 @@ impl History {
             "screen" => t("Весь экран"),
             "window" => t("Окно"),
             "ocr" => t("Текст"),
+            "record" => t("Запись"),
+            "long" => t("Длинный скриншот"),
             _ => t("Область"),
         }
         .to_string()
@@ -412,7 +423,11 @@ impl History {
             *act = Some(Act::Copy(index));
         }
         let half = (w - 8.0) / 2.0;
-        if !e.path.is_empty() {
+        if Self::is_recording(e) {
+            if ui::tone(ui, t("В папке"), Some(w), 38.0).clicked() {
+                *act = Some(Act::Reveal(index));
+            }
+        } else if !e.path.is_empty() {
             ui.horizontal(|ui| {
                 if ui::tone(ui, t("Редактор"), Some(half), 38.0).clicked() {
                     *act = Some(Act::Edit(index));
@@ -467,9 +482,16 @@ impl History {
             let line = format!("«{hit}»");
             ui::short(ui, RichText::new(line).size(12.5).color(p.warn));
         }
-        let rows = if e.path.is_empty() { 1.0 } else { 3.0 };
+        let rows = if e.path.is_empty() {
+            1.0
+        } else if Self::is_recording(&e) {
+            2.0
+        } else {
+            3.0
+        };
         let foot = 40.0 + 38.0 * rows + 10.0 * (rows + 1.0);
         if !e.path.is_empty()
+            && !Self::is_recording(&e)
             && ui::ghost_text_w(ui, t("Открыть большим"), ui.available_width(), 34.0).clicked()
         {
             *act = Some(Act::Big(index));
@@ -593,7 +615,10 @@ impl eframe::App for History {
             let shots: Vec<usize> = visible
                 .iter()
                 .map(|v| v.0)
-                .filter(|i| !self.entries[*i].path.is_empty())
+                .filter(|i| {
+                    let e = &self.entries[*i];
+                    !e.path.is_empty() && !Self::is_recording(e)
+                })
                 .collect();
             let at = shots.iter().position(|s| *s == i).unwrap_or(0);
             let near = [

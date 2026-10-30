@@ -229,7 +229,7 @@ impl Settings {
         };
         row(
             ui,
-            t("Запускать вместе с Windows"),
+            t("Запускать при входе в систему"),
             hint,
             |ui| {
                 if toggle(ui, on).changed()
@@ -817,6 +817,23 @@ impl Settings {
         let p = ui::pal(ui.ctx());
         ui::heading(ui, t("Горячие клавиши"), 24.0);
         self.snipping_card(ui);
+        if cfg!(not(windows)) {
+            ui.label(RichText::new(t(
+                "Здесь сочетания задаются в самой системе: привяжи клавишу к команде. Для                  Hyprland: bind = , Print, exec, snapling --region",
+            )).color(p.muted));
+            for flag in [
+                "--region",
+                "--screen",
+                "--delay",
+                "--record",
+                "--long",
+                "--ocr",
+                "--ocr-translate",
+            ] {
+                ui.label(RichText::new(format!("snapling {flag}")).font(ui::mono(13.0)));
+            }
+            return;
+        }
         let (_, problems) = hotkey::check(&self.cfg.hotkeys, self.hooks.reserved);
         let mut click = None;
         let mut clear = None;
@@ -910,16 +927,19 @@ impl Settings {
         ui::heading(ui, t("Текст и перевод"), 24.0);
         let store = &mut self.store;
         card(ui, |ui| {
-            let hint = t("PaddleOCR медленнее, модель ~11 МБ скачивается с вопросом.");
-            row(ui, t("Распознавание"), hint, |ui| {
-                let e = &mut self.cfg.ocr.engine;
-                let items = [Engine::Windows.name(), Engine::Paddle.name()];
-                if let Some(i) = segmented(ui, &items, usize::from(*e == Engine::Paddle), 30.0) {
-                    *e = [Engine::Windows, Engine::Paddle][i];
-                    store.set("ocr", "engine", ["windows", "paddle"][i]);
-                }
-            });
-            divider(ui);
+            if cfg!(windows) {
+                let hint = t("PaddleOCR медленнее, модель ~11 МБ скачивается с вопросом.");
+                row(ui, t("Распознавание"), hint, |ui| {
+                    let e = &mut self.cfg.ocr.engine;
+                    let items = [Engine::Windows.name(), Engine::Paddle.name()];
+                    if let Some(i) = segmented(ui, &items, usize::from(*e == Engine::Paddle), 30.0)
+                    {
+                        *e = [Engine::Windows, Engine::Paddle][i];
+                        store.set("ocr", "engine", ["windows", "paddle"][i]);
+                    }
+                });
+                divider(ui);
+            }
             let v = &mut self.cfg.ocr.panel;
             let title = t("Показывать окно с текстом");
             let hint = t("После распознавания. Текст в любом случае попадает в буфер.");

@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(not(windows))]
-use snapling_core::i18n::t;
+mod app_unix;
 #[cfg(windows)]
 mod app_win;
 mod editor;
@@ -17,18 +17,36 @@ fn portable_dir(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     dir.join("portable.txt").is_file().then(|| dir.join("data"))
 }
 
-/// `%APPDATA%\Snapling` or `%LOCALAPPDATA%\Snapling`, or the portable folder.
+/// Settings (`APPDATA`) and data (`LOCALAPPDATA`) folders, or the portable folder.
 fn app_dir(env: &str) -> std::path::PathBuf {
     let portable = std::env::current_exe().ok();
     portable
         .as_deref()
         .and_then(portable_dir)
-        .unwrap_or_else(|| {
-            std::env::var_os(env)
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir)
-                .join("Snapling")
-        })
+        .unwrap_or_else(|| system_dir(env))
+}
+
+#[cfg(windows)]
+fn system_dir(env: &str) -> std::path::PathBuf {
+    std::env::var_os(env)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Snapling")
+}
+
+#[cfg(not(windows))]
+fn system_dir(env: &str) -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+    if cfg!(target_os = "macos") {
+        return home.join("Library/Application Support/Snapling");
+    }
+    let (var, fallback) = match env {
+        "APPDATA" => ("XDG_CONFIG_HOME", ".config"),
+        _ => ("XDG_DATA_HOME", ".local/share"),
+    };
+    std::env::var_os(var)
+        .map_or_else(|| home.join(fallback), std::path::PathBuf::from)
+        .join("snapling")
 }
 
 fn main() {
@@ -45,6 +63,14 @@ fn main() {
     if args.len() == 3 && args[1] == "--pin" {
         return app_win::run_pin(std::path::Path::new(&args[2]));
     }
+    #[cfg(not(windows))]
+    if args.len() == 3 && args[1] == "--pin" {
+        return app_unix::run_pin(std::path::Path::new(&args[2]));
+    }
+    #[cfg(not(windows))]
+    if args.len() == 2 && args[1].to_str().is_some_and(app_unix::run_flag) {
+        return;
+    }
     if args.len() == 3 && args[1] == "--text" {
         return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), true);
     }
@@ -60,7 +86,7 @@ fn main() {
     #[cfg(windows)]
     app_win::run();
     #[cfg(not(windows))]
-    eprintln!("Snapling: macOS и Linux — в работе, пока поддерживается только Windows.");
+    app_unix::run_tray();
 }
 
 #[cfg(windows)]
@@ -70,13 +96,7 @@ fn hooks() -> editor::Hooks {
 
 #[cfg(not(windows))]
 fn hooks() -> editor::Hooks {
-    editor::Hooks {
-        copy: |_, _, _| Err(t("пока только Windows").into()),
-        save: |_, _, _, _| Err(t("пока только Windows").into()),
-        save_as: |_, _, _, _| Err(t("пока только Windows").into()),
-        text: |_, _, _| {},
-        warn: |m| eprintln!("{m}"),
-    }
+    app_unix::editor_hooks()
 }
 
 #[cfg(windows)]
@@ -86,29 +106,7 @@ fn settings_hooks() -> settings::Hooks {
 
 #[cfg(not(windows))]
 fn settings_hooks() -> settings::Hooks {
-    settings::Hooks {
-        warn: |m| eprintln!("{m}"),
-        autostart: || false,
-        set_autostart: |_| Err(t("пока только Windows").into()),
-        pick_folder: || None,
-        record_keys: |_| {},
-        recorded_combo: || None,
-        hotkey_free: |_| true,
-        autostart_blocked: || false,
-        get_proxy: || None,
-        set_proxy: |_| Err(t("пока только Windows").into()),
-        reserved: |_| None,
-        snipping_owns: || false,
-        free_printscreen: || Err(t("пока только Windows").into()),
-        models: std::path::PathBuf::from("models"),
-        open: |_| {},
-        pick_toml: || None,
-        save_toml: || None,
-        log: std::path::PathBuf::new(),
-        default_dir: || None,
-        pick_wav: || None,
-        preview: |_, _| Err(t("пока только Windows").into()),
-    }
+    app_unix::settings_hooks()
 }
 
 #[cfg(windows)]
@@ -118,19 +116,7 @@ fn history_hooks() -> history_ui::Hooks {
 
 #[cfg(not(windows))]
 fn history_hooks() -> history_ui::Hooks {
-    history_ui::Hooks {
-        warn: |m| eprintln!("{m}"),
-        file: app_dir("LOCALAPPDATA").join("history.jsonl"),
-        now: String::new,
-        copy_image: |_| Err(t("пока только Windows").into()),
-        copy_text: |_| Err(t("пока только Windows").into()),
-        copy_file: |_| Err(t("пока только Windows").into()),
-        edit: |_, _| Err(t("пока только Windows").into()),
-        reveal: |_| {},
-        pin: |_| Err(t("пока только Windows").into()),
-        recognize: |_| Err(t("пока только Windows").into()),
-        open_folder: || {},
-    }
+    app_unix::history_hooks()
 }
 
 #[cfg(windows)]
@@ -140,17 +126,7 @@ fn text_hooks() -> translate_ui::Hooks {
 
 #[cfg(not(windows))]
 fn text_hooks() -> translate_ui::Hooks {
-    translate_ui::Hooks {
-        copy_text: |_| Err(t("пока только Windows").into()),
-        warn: |m| eprintln!("{m}"),
-        models: std::path::PathBuf::from("models"),
-        online: Default::default(),
-        target: String::new(),
-        engine: "PaddleOCR",
-        get_key: |_| None,
-        set_key: |_, _| Err(t("пока только Windows").into()),
-        get_proxy: || None,
-    }
+    app_unix::text_hooks()
 }
 
 #[cfg(test)]

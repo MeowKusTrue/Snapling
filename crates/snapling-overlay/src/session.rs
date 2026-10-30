@@ -38,7 +38,7 @@ pub struct Shot {
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
-    /// DPI scale of the monitor; mockup sizes are at 1.0.
+    /// DPI scale of the monitor; mockup sizes are at 1.0. 0: ask the window.
     pub scale: f32,
     /// Selecting ends the overlay with this outcome (OCR hotkeys).
     pub auto: Option<Outcome>,
@@ -464,6 +464,13 @@ impl Session {
             Step::Done(Outcome::Copy)
         } else {
             Step::Stay
+        }
+    }
+
+    /// The window's scale, once it exists, when the options left it at 0.
+    pub fn set_scale(&mut self, scale: f32) {
+        if self.opts.scale == 0.0 {
+            self.opts.scale = scale;
         }
     }
 

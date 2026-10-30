@@ -3,6 +3,9 @@
 
 mod session;
 
+mod pin;
+
+pub use pin::run as pin;
 pub use session::{Key, Mods, Options, Outcome, Pointer, Session, Shot, Step};
 
 use snapling_core::selection::Point;
@@ -121,6 +124,7 @@ impl ApplicationHandler for App {
                 return event_loop.exit();
             }
         }
+        self.session.set_scale(window.scale_factor() as f32);
         window.set_cursor(CursorIcon::Crosshair);
         window.request_redraw();
         self.window = Some(window);

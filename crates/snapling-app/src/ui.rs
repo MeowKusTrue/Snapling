@@ -109,7 +109,7 @@ pub fn apply_language(code: &str) {
     #[cfg(windows)]
     let system = snapling_win::ui_language();
     #[cfg(not(windows))]
-    let system = "en";
+    let system = snapling_unix::ui_language();
     snapling_core::i18n::set(code, system, &language_dir());
 }
 

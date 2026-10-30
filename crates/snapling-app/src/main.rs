@@ -11,12 +11,24 @@ mod settings;
 mod translate_ui;
 mod ui;
 
-/// `%APPDATA%\Snapling` or `%LOCALAPPDATA%\Snapling`.
+/// `data` next to the exe when `portable.txt` lies there.
+fn portable_dir(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = exe.parent()?;
+    dir.join("portable.txt").is_file().then(|| dir.join("data"))
+}
+
+/// `%APPDATA%\Snapling` or `%LOCALAPPDATA%\Snapling`, or the portable folder.
 fn app_dir(env: &str) -> std::path::PathBuf {
-    std::env::var_os(env)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Snapling")
+    let portable = std::env::current_exe().ok();
+    portable
+        .as_deref()
+        .and_then(portable_dir)
+        .unwrap_or_else(|| {
+            std::env::var_os(env)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("Snapling")
+        })
 }
 
 fn main() {
@@ -122,5 +134,21 @@ fn text_hooks() -> translate_ui::Hooks {
         get_key: |_| None,
         set_key: |_, _| Err(t("пока только Windows").into()),
         get_proxy: || None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::portable_dir;
+
+    #[test]
+    fn a_marker_next_to_the_exe_makes_it_portable() {
+        let dir = std::env::temp_dir().join(format!("snapling-portable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("snapling.exe");
+        assert_eq!(portable_dir(&exe), None);
+        std::fs::write(dir.join("portable.txt"), "").unwrap();
+        assert_eq!(portable_dir(&exe), Some(dir.join("data")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -44,6 +44,12 @@ and https://huggingface.co/Xenova/opus-mt-en-ru (ONNX exports by Xenova of Helsi
 and Helsinki-NLP/opus-mt-en-ru). © Language Technology Research Group at the University of Helsinki,
 licensed under CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
 
+## PaddleOCR models
+
+Not bundled; downloaded on the user's request from https://huggingface.co/monkt/paddleocr-onnx
+(ONNX exports of PP-OCRv3 mobile detection and PP-OCRv5 East Slavic recognition).
+© PaddlePaddle Authors, licensed under Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0
+
 ## ONNX Runtime
 
 Statically linked through the `ort` crate. © Microsoft Corporation, MIT License.

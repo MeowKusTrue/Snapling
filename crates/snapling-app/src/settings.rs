@@ -4,7 +4,9 @@
 use crate::ui::{self, caption, card, divider, row, segmented, toggle};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, Sense, TextEdit, vec2};
 use egui_phosphor::regular as icon;
-use snapling_core::config::{Action, Config, Format, Online, SoundCfg, SoundPack, Theme, TrayIcon};
+use snapling_core::config::{
+    Action, Config, Engine, Format, Online, SoundCfg, SoundPack, Theme, TrayIcon,
+};
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n;
 use snapling_core::i18n::{n, t, tf};
@@ -22,7 +24,7 @@ pub struct Hooks {
     pub recorded_combo: fn() -> Option<String>,
     pub hotkey_free: fn(&Hotkey) -> bool,
     pub autostart_blocked: fn() -> bool,
-    /// DeepL proxy, kept in Credential Manager: it may hold a password.
+    /// Proxy of online translation, kept in Credential Manager: it may hold a password.
     pub get_proxy: fn() -> Option<String>,
     pub set_proxy: fn(&str) -> Result<(), String>,
     pub reserved: fn(&Hotkey) -> Option<&'static str>,
@@ -708,9 +710,20 @@ impl Settings {
         ui::heading(ui, t("Текст и перевод"), 24.0);
         let store = &mut self.store;
         card(ui, |ui| {
-            row(ui, t("Распознавание"), "", |ui| {
-                ui.label(RichText::new(t("Windows OCR, встроенный")).color(p.muted));
+            let hint = t("PaddleOCR медленнее, модель ~11 МБ скачивается с вопросом.");
+            row(ui, t("Распознавание"), hint, |ui| {
+                let e = &mut self.cfg.ocr.engine;
+                let items = [Engine::Windows.name(), Engine::Paddle.name()];
+                if let Some(i) = segmented(ui, &items, usize::from(*e == Engine::Paddle), 30.0) {
+                    *e = [Engine::Windows, Engine::Paddle][i];
+                    store.set("ocr", "engine", ["windows", "paddle"][i]);
+                }
             });
+            divider(ui);
+            let v = &mut self.cfg.ocr.panel;
+            let title = t("Показывать окно с текстом");
+            let hint = t("После распознавания. Текст в любом случае попадает в буфер.");
+            Self::flag(ui, store, title, hint, v, ("ocr", "panel"));
             divider(ui);
             row(ui, t("Языки текста"), "", |ui| {
                 let lang = &mut self.cfg.ocr.language;
@@ -726,65 +739,76 @@ impl Settings {
                 }
             });
         });
-        ui.columns(2, |cols| {
-            let online = self.cfg.translate.online;
-            let opts = [
-                (
-                    Online::Off,
-                    t("На устройстве"),
-                    t("OPUS-MT, без интернета. Модели ru↔en по ~117 МБ, скачиваются с вопросом."),
-                    p.soft,
-                    "off",
-                ),
-                (
-                    Online::Deepl,
-                    t("DeepL, онлайн"),
-                    t(
-                        "Появится кнопка в окне перевода. Текст уходит только по ней, первый раз \
+        let online = self.cfg.translate.online;
+        let by_button = t(
+            "Появится кнопка в окне перевода. Текст уходит только по ней, первый раз \
                      Snapling спросит.",
-                    ),
-                    p.warn,
-                    "deepl",
-                ),
-            ];
-            for (ui, (v, title, note, color, key)) in cols.iter_mut().zip(opts) {
-                let on = online == v;
-                let r = Frame::new()
-                    .fill(if on { p.tone } else { p.card })
-                    .stroke(egui::Stroke::new(
-                        if on { 1.5 } else { 1.0 },
-                        if on { ui::ACCENT } else { p.line },
-                    ))
-                    .corner_radius(14)
-                    .inner_margin(16)
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.set_min_height(76.0);
-                        ui.spacing_mut().item_spacing.y = 8.0;
-                        let dot = if on { icon::RADIO_BUTTON } else { icon::CIRCLE };
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(dot).font(ui::icon_font(18.0)));
-                            ui.label(RichText::new(title).font(ui::semi(14.0)));
-                        });
-                        ui.label(RichText::new(note).size(12.5).color(color));
-                    })
-                    .response;
-                if r.interact(Sense::click()).clicked() && !on {
-                    self.cfg.translate.online = v;
-                    store.set("translate", "online", key);
+        );
+        let paid = t(
+            "Платно, свой API-ключ. Текст уходит только по кнопке, первый раз Snapling \
+                     спросит.",
+        );
+        let opts = [
+            (
+                Online::Off,
+                t("На устройстве"),
+                t("OPUS-MT, без интернета. Модели ru↔en по ~117 МБ, скачиваются с вопросом."),
+                p.soft,
+                "off",
+            ),
+            (
+                Online::Deepl,
+                t("DeepL, онлайн"),
+                by_button,
+                p.warn,
+                "deepl",
+            ),
+            (Online::Yandex, t("Яндекс, онлайн"), paid, p.warn, "yandex"),
+            (Online::Google, t("Google, онлайн"), paid, p.warn, "google"),
+        ];
+        for pair in opts.chunks(2) {
+            ui.columns(2, |cols| {
+                for (ui, &(v, title, note, color, key)) in cols.iter_mut().zip(pair) {
+                    let on = online == v;
+                    let r = Frame::new()
+                        .fill(if on { p.tone } else { p.card })
+                        .stroke(egui::Stroke::new(
+                            if on { 1.5 } else { 1.0 },
+                            if on { ui::ACCENT } else { p.line },
+                        ))
+                        .corner_radius(14)
+                        .inner_margin(16)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.set_min_height(76.0);
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            let dot = if on { icon::RADIO_BUTTON } else { icon::CIRCLE };
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(dot).font(ui::icon_font(18.0)));
+                                ui.label(RichText::new(title).font(ui::semi(14.0)));
+                            });
+                            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                                ui.label(RichText::new(note).size(12.5).color(color));
+                            });
+                        })
+                        .response;
+                    if r.interact(Sense::click()).clicked() && !on {
+                        self.cfg.translate.online = v;
+                        store.set("translate", "online", key);
+                    }
                 }
-            }
-        });
+            });
+        }
         ui.label(
             RichText::new(t(
-                "Ключ DeepL вводится в окне перевода. Хранится в диспетчере учётных данных \
-                 Windows, не попадает в логи и config.",
+                "Ключ вводится в окне перевода. Хранится в диспетчере учётных данных Windows, \
+                 не попадает в логи и config.",
             ))
             .size(13.0)
             .color(p.muted),
         );
-        if self.cfg.translate.online == Online::Deepl {
-            caption(ui, t("Прокси для DeepL"));
+        if self.cfg.translate.online != Online::Off {
+            caption(ui, t("Прокси для онлайн-перевода"));
             let r = ui.add(
                 TextEdit::singleline(&mut self.proxy)
                     .font(ui::mono(13.0))
@@ -800,8 +824,8 @@ impl Settings {
             }
             ui.label(
                 RichText::new(t(
-                    "Только для запросов к DeepL: http, https, socks4, socks5, можно с логином. \
-                     Хранится там же, где ключ. Пусто — без прокси.",
+                    "Только для запросов к сервису перевода: http, https, socks4, socks5, можно \
+                     с логином. Хранится там же, где ключ. Пусто — без прокси.",
                 ))
                 .size(13.0)
                 .color(p.muted),
@@ -826,8 +850,8 @@ impl Settings {
                             .color(p.ok),
                     );
                     ui.label(t(
-                        "Snapling выходит в сеть только для скачивания модели перевода и \
-                         DeepL — и только когда ты сам это подтвердил.",
+                        "Snapling выходит в сеть только для скачивания моделей и онлайн-перевода \
+                         — и только когда ты сам это подтвердил.",
                     ));
                 });
             });

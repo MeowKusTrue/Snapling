@@ -76,8 +76,8 @@ pub fn init() -> Result<(), String> {
     Ok(())
 }
 
-/// Bottom right of the work area of the monitor under the cursor, and that monitor's scale.
-fn place() -> (i32, i32, f32) {
+/// Cursor, work area of the monitor under it, and that monitor's scale.
+pub(crate) fn under_cursor() -> (POINT, RECT, f32) {
     let mut cursor = POINT::default();
     unsafe {
         let _ = GetCursorPos(&mut cursor);
@@ -89,12 +89,16 @@ fn place() -> (i32, i32, f32) {
         let _ = GetMonitorInfoW(mon, &mut mi);
         let (mut dx, mut dy) = (96, 96);
         let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
-        let scale = dx as f32 / 96.0;
-        let (w, h) = toast_size(scale);
-        let gap = (MARGIN * scale) as i32;
-        let r = mi.rcWork;
-        (r.right - w as i32 - gap, r.bottom - h as i32 - gap, scale)
+        (cursor, mi.rcWork, dx as f32 / 96.0)
     }
+}
+
+/// Bottom right of the work area of the monitor under the cursor, and that monitor's scale.
+fn place() -> (i32, i32, f32) {
+    let (_, r, scale) = under_cursor();
+    let (w, h) = toast_size(scale);
+    let gap = (MARGIN * scale) as i32;
+    (r.right - w as i32 - gap, r.bottom - h as i32 - gap, scale)
 }
 
 pub fn show(img: Image, title: String, sub: String, on_click: OnClick) {
@@ -140,58 +144,65 @@ fn hide(hwnd: HWND) {
     STATE.with(|s| *s.borrow_mut() = None);
 }
 
+/// Puts a freshly drawn transparent buffer on a layered window.
+pub(crate) fn blit(hwnd: HWND, w: u32, h: u32, draw: impl FnOnce(&mut tiny_skia::PixmapMut<'_>)) {
+    let bmi = BITMAPINFO {
+        bmiHeader: dib_header(w, -(h as i32)),
+        ..Default::default()
+    };
+    let mut bits = std::ptr::null_mut();
+    unsafe {
+        let Ok(bmp) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            return;
+        };
+        let buf = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (w * h * 4) as usize);
+        if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(buf, w, h) {
+            draw(&mut pm);
+        }
+        let dc = CreateCompatibleDC(None);
+        let old = SelectObject(dc, bmp.into());
+        let size = SIZE {
+            cx: w as i32,
+            cy: h as i32,
+        };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+            ..Default::default()
+        };
+        let _ = UpdateLayeredWindow(
+            hwnd,
+            None,
+            None,
+            Some(&size),
+            Some(dc),
+            Some(&POINT::default()),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        );
+        SelectObject(dc, old);
+        let _ = DeleteDC(dc);
+        let _ = DeleteObject(bmp.into());
+    }
+}
+
 fn render(hwnd: HWND) {
     STATE.with(|st| {
         let st = st.borrow();
         let Some(s) = st.as_ref() else { return };
         let (w, h) = toast_size(s.scale);
-        let bmi = BITMAPINFO {
-            bmiHeader: dib_header(w, -(h as i32)),
-            ..Default::default()
-        };
-        let mut bits = std::ptr::null_mut();
-        unsafe {
-            let Ok(bmp) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
-                return;
+        blit(hwnd, w, h, |pm| {
+            let toast = Toast {
+                scale: s.scale,
+                title: &s.title,
+                sub: &s.sub,
+                shot: (&s.img.bgra, s.img.width, s.img.height),
+                hover: s.hover,
             };
-            let buf = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (w * h * 4) as usize);
-            if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(buf, w, h) {
-                let toast = Toast {
-                    scale: s.scale,
-                    title: &s.title,
-                    sub: &s.sub,
-                    shot: (&s.img.bgra, s.img.width, s.img.height),
-                    hover: s.hover,
-                };
-                draw_toast(&mut pm, &toast);
-            }
-            let dc = CreateCompatibleDC(None);
-            let old = SelectObject(dc, bmp.into());
-            let size = SIZE {
-                cx: w as i32,
-                cy: h as i32,
-            };
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as u8,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as u8,
-                ..Default::default()
-            };
-            let _ = UpdateLayeredWindow(
-                hwnd,
-                None,
-                None,
-                Some(&size),
-                Some(dc),
-                Some(&POINT::default()),
-                COLORREF(0),
-                Some(&blend),
-                ULW_ALPHA,
-            );
-            SelectObject(dc, old);
-            let _ = DeleteDC(dc);
-            let _ = DeleteObject(bmp.into());
-        }
+            draw_toast(pm, &toast);
+        });
     });
 }
 

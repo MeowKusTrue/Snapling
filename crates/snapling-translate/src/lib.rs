@@ -1,8 +1,11 @@
 //! Offline ru↔en translation: OPUS-MT (Helsinki-NLP, CC-BY-4.0) exported to ONNX by Xenova,
 //! run with ONNX Runtime. Greedy decoding without a KV cache: fine for OCR-sized texts.
 
+pub mod paddle;
+
 use ort::session::Session;
 use ort::value::Tensor;
+use snapling_core::config::Online;
 use snapling_core::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
@@ -133,6 +136,9 @@ pub fn parse_proxy(url: &str) -> Result<ureq::Proxy, String> {
     ureq::Proxy::new(url.trim()).map_err(|_| t("Адрес прокси не распознан").to_string())
 }
 
+/// Header name and value.
+type Auth = (&'static str, String);
+
 /// Free-plan keys end with `:fx` and use a separate host.
 pub fn deepl_host(key: &str) -> &'static str {
     if key.trim().ends_with(":fx") {
@@ -142,40 +148,94 @@ pub fn deepl_host(key: &str) -> &'static str {
     }
 }
 
-/// Online translation. Sends `text` to DeepL: call only on the user's explicit action.
-/// Errors never contain the key or the proxy address.
-pub fn deepl(key: &str, text: &str, dir: Dir, proxy: Option<&str>) -> Result<String, String> {
-    let (source, target) = match dir {
-        Dir::RuEn => ("RU", "EN-US"),
-        Dir::EnRu => ("EN", "RU"),
+/// Url, auth header and JSON body of one request. The key travels in a header, never in the url.
+fn request(service: Online, key: &str, text: &str, dir: Dir) -> Option<(String, Auth, String)> {
+    let key = key.trim();
+    let (from, to) = match dir {
+        Dir::RuEn => ("ru", "en"),
+        Dir::EnRu => ("en", "ru"),
     };
-    let body = serde_json::json!({ "text": [text], "source_lang": source, "target_lang": target });
+    Some(match service {
+        Online::Off => return None,
+        Online::Deepl => {
+            let (source, target) = match dir {
+                Dir::RuEn => ("RU", "EN-US"),
+                Dir::EnRu => ("EN", "RU"),
+            };
+            (
+                format!("https://{}/v2/translate", deepl_host(key)),
+                ("Authorization", format!("DeepL-Auth-Key {key}")),
+                serde_json::json!({ "text": [text], "source_lang": source, "target_lang": target })
+                    .to_string(),
+            )
+        }
+        Online::Yandex => (
+            "https://translate.api.cloud.yandex.net/translate/v2/translate".into(),
+            ("Authorization", format!("Api-Key {key}")),
+            serde_json::json!({
+                "texts": [text],
+                "sourceLanguageCode": from,
+                "targetLanguageCode": to,
+            })
+            .to_string(),
+        ),
+        Online::Google => (
+            "https://translation.googleapis.com/language/translate/v2".into(),
+            ("X-goog-api-key", key.to_string()),
+            serde_json::json!({ "q": text, "source": from, "target": to, "format": "text" })
+                .to_string(),
+        ),
+    })
+}
+
+fn reply(service: Online, json: &serde_json::Value) -> Option<String> {
+    let text = match service {
+        Online::Google => &json["data"]["translations"][0]["translatedText"],
+        _ => &json["translations"][0]["text"],
+    };
+    text.as_str().map(str::to_string)
+}
+
+/// Online translation. Sends `text` to the service: call only on the user's explicit action.
+/// Errors never contain the key or the proxy address.
+pub fn online(
+    service: Online,
+    key: &str,
+    text: &str,
+    dir: Dir,
+    proxy: Option<&str>,
+) -> Result<String, String> {
+    let name = service.name();
+    let (url, (header, auth), body) =
+        request(service, key, text, dir).ok_or(t("Онлайн-перевод выключен"))?;
     let via = proxy.map(parse_proxy).transpose()?;
     let through = via.is_some();
     let resp = agent_via(via)
-        .post(format!("https://{}/v2/translate", deepl_host(key)))
-        .header("Authorization", format!("DeepL-Auth-Key {}", key.trim()))
+        .post(url)
+        .header(header, auth)
         .content_type("application/json")
-        .send(body.to_string());
+        .send(body);
     let mut resp = match resp {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(code)) => {
             return Err(match code {
-                403 => t("DeepL: ключ не подходит").into(),
-                456 => t("DeepL: исчерпан лимит символов").into(),
-                429 => t("DeepL: слишком много запросов, попробуйте позже").into(),
-                c => tf("DeepL: ошибка сервера {c}", &[("c", &c)]),
+                401 | 403 => tf("{0}: ключ не подходит", &[("0", &name)]),
+                // Google answers 400 to a wrong key; the body here is always well formed.
+                400 if service == Online::Google => tf("{0}: ключ не подходит", &[("0", &name)]),
+                456 => tf("{0}: исчерпан лимит символов", &[("0", &name)]),
+                429 => tf(
+                    "{0}: слишком много запросов, попробуйте позже",
+                    &[("0", &name)],
+                ),
+                c => tf("{0}: ошибка сервера {c}", &[("0", &name), ("c", &c)]),
             });
         }
-        Err(_) if through => return Err(t("DeepL: нет связи через прокси").into()),
-        Err(e) => return Err(tf("DeepL: нет связи ({e})", &[("e", &e)])),
+        Err(_) if through => return Err(tf("{0}: нет связи через прокси", &[("0", &name)])),
+        Err(e) => return Err(tf("{0}: нет связи ({e})", &[("0", &name), ("e", &e)])),
     };
     let json: serde_json::Value =
         serde_json::from_str(&resp.body_mut().read_to_string().map_err(err)?).map_err(err)?;
-    json["translations"][0]["text"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| t("DeepL: неожиданный ответ").into())
+    reply(service, &json).ok_or_else(|| tf("{0}: неожиданный ответ", &[("0", &name)]))
 }
 
 /// Download size of one direction, for the consent prompt.
@@ -184,51 +244,58 @@ pub const DOWNLOAD_MB: u32 = 117;
 /// Fetches the model files from Hugging Face, checking each against its pinned SHA-256.
 /// The only network access of the offline translator; called only after the user agreed.
 pub fn download(models: &Path, dir: Dir) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    use std::io::{Read, Write};
     let root = models.join(dir.model());
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
-    let agent = agent();
     for file in FILES {
-        let dest = root.join(file);
-        if dest.is_file() {
-            continue;
-        }
         let want = sha256(dir, file).ok_or(t("нет контрольной суммы"))?;
-        let part = dest.with_extension("part");
-        let fetch = || -> Result<(), String> {
-            let resp = agent
-                .get(&url(dir, file))
-                .call()
-                .map_err(|e| format!("{file}: {e}"))?;
-            let mut body = resp.into_body().into_reader();
-            let mut out = std::fs::File::create(&part).map_err(err)?;
-            let mut hash = Sha256::new();
-            let mut buf = vec![0u8; 1 << 16];
-            loop {
-                let n = body.read(&mut buf).map_err(|e| format!("{file}: {e}"))?;
-                if n == 0 {
-                    break;
-                }
-                hash.update(&buf[..n]);
-                out.write_all(&buf[..n]).map_err(err)?;
-            }
-            let got: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
-            if got != want {
-                return Err(tf(
-                    "{file}: контрольная сумма не совпала, файл отброшен",
-                    &[("file", &file)],
-                ));
-            }
-            drop(out);
-            std::fs::rename(&part, &dest).map_err(err)
-        };
-        if let Err(e) = fetch() {
-            let _ = std::fs::remove_file(&part);
-            return Err(e);
-        }
+        fetch_file(&url(dir, file), &root.join(file), want)?;
     }
     Ok(())
+}
+
+/// Downloads `url` to `dest` unless it is there; a wrong SHA-256 discards the file.
+pub(crate) fn fetch_file(url: &str, dest: &Path, want: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    if dest.is_file() {
+        return Ok(());
+    }
+    let file = dest
+        .file_name()
+        .map_or_else(String::new, |f| f.to_string_lossy().to_string());
+    let part = dest.with_extension("part");
+    let fetch = || -> Result<(), String> {
+        let resp = agent()
+            .get(url)
+            .call()
+            .map_err(|e| format!("{file}: {e}"))?;
+        let mut body = resp.into_body().into_reader();
+        let mut out = std::fs::File::create(&part).map_err(err)?;
+        let mut hash = Sha256::new();
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            let n = body.read(&mut buf).map_err(|e| format!("{file}: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buf[..n]);
+            out.write_all(&buf[..n]).map_err(err)?;
+        }
+        let got: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if got != want {
+            return Err(tf(
+                "{file}: контрольная сумма не совпала, файл отброшен",
+                &[("file", &file)],
+            ));
+        }
+        drop(out);
+        std::fs::rename(&part, dest).map_err(err)
+    };
+    let res = fetch();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    res
 }
 
 const EOS: i64 = 0;
@@ -241,7 +308,7 @@ pub struct Model {
     tok: Tokenizer,
 }
 
-fn err(e: impl std::fmt::Display) -> String {
+pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
@@ -258,6 +325,21 @@ fn env() -> Result<&'static ort::environment::Environment, String> {
     })
     .as_ref()
     .map_err(Clone::clone)
+}
+
+pub(crate) fn session(file: &Path) -> Result<Session, String> {
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get().min(4));
+    Session::builder(env()?)
+        .map_err(err)?
+        .with_intra_threads(threads)
+        .map_err(err)?
+        // Every decoding step has a new shape: the arena and memory patterns only grow.
+        .with_memory_pattern(false)
+        .map_err(err)?
+        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
+        .map_err(err)?
+        .commit_from_file(file)
+        .map_err(|e| format!("{}: {e}", file.display()))
 }
 
 /// Xenova's export has `"precompiled_charsmap": null`, which `tokenizers` rejects;
@@ -280,26 +362,9 @@ impl Model {
                 &[("0", &root.display())],
             ));
         }
-        let env = env()?;
-        let threads = std::thread::available_parallelism().map_or(2, |n| n.get().min(4));
-        let session = |file: &str| -> Result<Session, String> {
-            Session::builder(env)
-                .map_err(err)?
-                .with_intra_threads(threads)
-                .map_err(err)?
-                // Every decoding step has a new shape: the arena and memory patterns only grow.
-                .with_memory_pattern(false)
-                .map_err(err)?
-                .with_execution_providers([ort::ep::CPU::default()
-                    .with_arena_allocator(false)
-                    .build()])
-                .map_err(err)?
-                .commit_from_file(root.join(file))
-                .map_err(|e| format!("{file}: {e}"))
-        };
         Ok(Self {
-            enc: session(FILES[0])?,
-            dec: session(FILES[1])?,
+            enc: session(&root.join(FILES[0]))?,
+            dec: session(&root.join(FILES[1]))?,
             tok: tokenizer(&root.join(FILES[2]))?,
         })
     }
@@ -399,6 +464,32 @@ mod tests {
                 "Правка"
             ]
         );
+    }
+
+    #[test]
+    fn online_requests_keep_the_key_out_of_the_url() {
+        for service in [Online::Deepl, Online::Yandex, Online::Google] {
+            let (url, (_, auth), body) =
+                request(service, " sec:fx\n", "привет", Dir::RuEn).unwrap();
+            assert!(auth.ends_with("sec:fx"), "{auth}");
+            assert!(
+                !url.contains("sec") && !body.contains("sec"),
+                "{url} {body}"
+            );
+            assert!(body.contains("привет"), "{body}");
+        }
+        assert!(request(Online::Off, "k", "t", Dir::RuEn).is_none());
+    }
+
+    #[test]
+    fn online_replies_are_read() {
+        let flat = serde_json::json!({ "translations": [{ "text": "hi" }] });
+        let google =
+            serde_json::json!({ "data": { "translations": [{ "translatedText": "hi" }] } });
+        assert_eq!(reply(Online::Deepl, &flat).as_deref(), Some("hi"));
+        assert_eq!(reply(Online::Yandex, &flat).as_deref(), Some("hi"));
+        assert_eq!(reply(Online::Google, &google).as_deref(), Some("hi"));
+        assert_eq!(reply(Online::Google, &flat), None);
     }
 
     #[test]

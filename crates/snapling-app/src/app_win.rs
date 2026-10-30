@@ -1,19 +1,18 @@
 use crate::app_dir;
-use snapling_core::config::{Action, Config, Format, Save, SoundCfg, TrayIcon};
+use snapling_core::config::{Action, Config, Engine, Format, Save, SoundCfg, Theme, TrayIcon};
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n::{t, tf};
 use snapling_core::selection::Rect;
 use snapling_core::sound::{self, Sound};
 use snapling_core::{annotate, history, storage};
-use snapling_scene::ToastAction;
+use snapling_scene::{MenuIcon, MenuRow, ToastAction};
 use snapling_win::overlay::Outcome;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 use tracing::{error, info, warn};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, MSG, PostQuitMessage, SetTimer, TranslateMessage, WM_HOTKEY,
     WM_TIMER,
@@ -53,9 +52,6 @@ impl Window {
     }
 }
 
-/// Set by the background saver.
-static LAST_SAVED: Mutex<Option<PathBuf>> = Mutex::new(None);
-
 /// Sound settings and pre-rendered WAVs; read from the saver thread too.
 type Wavs = [&'static [u8]; 3];
 static SOUND: Mutex<Option<(SoundCfg, Wavs)>> = Mutex::new(None);
@@ -71,6 +67,10 @@ thread_local! {
     static EDITOR_ON_CAPTURE: Cell<bool> = const { Cell::new(false) };
     /// `[ocr] language`.
     static OCR_LANG: RefCell<String> = RefCell::new("auto".into());
+    /// `[ocr] engine = "paddle"`.
+    static OCR_PADDLE: Cell<bool> = const { Cell::new(false) };
+    /// `[ocr] panel`.
+    static OCR_PANEL: Cell<bool> = const { Cell::new(true) };
     /// What the last warning listed: the same problems are not shown again on every reload.
     static REPORTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -147,11 +147,31 @@ fn init_log() {
     std::panic::set_hook(Box::new(|p| error!("panic: {p}")));
 }
 
-/// Action name with its hotkey on the right, as Windows menus show accelerators.
-fn menu_text(cfg: &Config, a: Action) -> String {
-    match cfg.hotkeys.combo(a).trim() {
-        "" => a.title().to_string(),
-        combo => format!("{}\t{}", a.title(), combo.replace("PrintScreen", "PrtScn")),
+fn menu_rows(cfg: &Config) -> Vec<MenuRow> {
+    let act = |i, a: Action| {
+        let keys = cfg.hotkeys.combo(a).trim().replace("PrintScreen", "PrtScn");
+        MenuRow::Item(i, a.title().to_string(), keys)
+    };
+    let item = |i, s: &'static str| MenuRow::Item(i, t(s).to_string(), String::new());
+    vec![
+        act(MenuIcon::Region, Action::CaptureRegion),
+        act(MenuIcon::Screen, Action::CaptureScreen),
+        act(MenuIcon::Repeat, Action::RepeatRegion),
+        act(MenuIcon::Text, Action::RecognizeText),
+        MenuRow::Line,
+        item(MenuIcon::History, "История"),
+        item(MenuIcon::Folder, "Папка снимков"),
+        item(MenuIcon::Settings, "Настройки"),
+        MenuRow::Line,
+        item(MenuIcon::Quit, "Выход"),
+    ]
+}
+
+fn menu_light(cfg: &Config) -> bool {
+    match cfg.ui.theme {
+        Theme::Light => true,
+        Theme::Dark => false,
+        Theme::System => snapling_win::taskbar_is_light(),
     }
 }
 
@@ -229,9 +249,6 @@ fn save_async(img: snapling_win::Image, app: String, kind: &'static str) {
                 };
                 if let Err(e) = history::append(&history_file(), &entry) {
                     warn!("history: {e}");
-                }
-                if let Ok(mut last) = LAST_SAVED.lock() {
-                    *last = Some(path);
                 }
             }
             Err(e) => {
@@ -337,12 +354,38 @@ fn models_dir() -> PathBuf {
     app_dir("LOCALAPPDATA").join("models")
 }
 
+/// Text of a shot. Missing PaddleOCR model → asks before downloading; refused → Windows OCR.
+fn read_text(img: &snapling_win::Image, lang: &str, paddle: bool) -> Result<String, String> {
+    use snapling_translate::paddle as engine;
+    let models = models_dir();
+    let windows = || snapling_win::ocr::recognize(&img.bgra, img.width, img.height, lang);
+    if !paddle {
+        return windows();
+    }
+    if !engine::installed(&models) {
+        let q = tf(
+            "Для PaddleOCR нужна модель, ~{0} МБ.
+Скачать её с huggingface.co ({1})?
+
+После скачивания распознавание работает без интернета.",
+            &[("0", &engine::DOWNLOAD_MB), ("1", &engine::REPO)],
+        );
+        if !snapling_win::ask(&q) {
+            return windows();
+        }
+        info!("model download: {}", engine::FOLDER);
+        engine::download(&models)?;
+    }
+    engine::recognize(&models, &img.bgra, img.width, img.height)
+}
+
 /// OCR here, then the translation window process (it loads the model and frees it on close).
 /// Missing model → asks before downloading: the only network access of offline translation.
 fn translate(img: snapling_win::Image) {
     let lang = OCR_LANG.with(|l| l.borrow().clone());
+    let paddle = OCR_PADDLE.get();
     std::thread::spawn(move || {
-        let text = match snapling_win::ocr::recognize(&img.bgra, img.width, img.height, &lang) {
+        let text = match read_text(&img, &lang, paddle) {
             Ok(t) if t.trim().is_empty() => {
                 info!("translate: no text");
                 return play(Sound::Error);
@@ -389,41 +432,42 @@ fn translate(img: snapling_win::Image) {
             }
             info!("model downloaded in {} s", t0.elapsed().as_secs());
         }
-        let nanos = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let path = edit_dir().join(format!("{nanos}.txt"));
-        let started = std::fs::create_dir_all(edit_dir())
-            .and_then(|()| std::fs::write(&path, &text))
-            .and_then(|()| std::env::current_exe())
-            .and_then(|exe| {
-                std::process::Command::new(exe)
-                    .arg("--translate")
-                    .arg(&path)
-                    .spawn()
-            });
-        if let Err(e) = started {
-            let _ = std::fs::remove_file(&path);
-            error!("translate window: {e}");
-            snapling_win::warn(&tf(
-                "Не удалось открыть окно перевода.
-{e}",
-                &[("e", &e)],
-            ));
-        }
+        text_window(&text, "--translate");
     });
+}
+
+/// The text window process; it deletes the file after reading.
+fn text_window(text: &str, mode: &str) {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let path = edit_dir().join(format!("{nanos}.txt"));
+    let started = std::fs::create_dir_all(edit_dir())
+        .and_then(|()| std::fs::write(&path, text))
+        .and_then(|()| std::env::current_exe())
+        .and_then(|exe| std::process::Command::new(exe).arg(mode).arg(&path).spawn());
+    if let Err(e) = started {
+        let _ = std::fs::remove_file(&path);
+        error!("translate window: {e}");
+        snapling_win::warn(&tf(
+            "Не удалось открыть окно перевода.
+{e}",
+            &[("e", &e)],
+        ));
+    }
 }
 
 /// Clipboard and models folder for the translation window process.
 pub fn text_hooks() -> crate::translate_ui::Hooks {
+    let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml")).unwrap_or_default();
     crate::translate_ui::Hooks {
         copy_text: snapling_win::copy_text,
         warn: snapling_win::warn,
         models: models_dir(),
-        online: Config::load_or_create(&app_dir("APPDATA").join("config.toml"))
-            .is_ok_and(|c| c.translate.online == snapling_core::config::Online::Deepl),
-        get_key: || snapling_win::secret::get("DeepL"),
-        set_key: |k| snapling_win::secret::set("DeepL", k),
+        online: cfg.translate.online,
+        engine: cfg.ocr.engine.name(),
+        get_key: |s| snapling_win::secret::get(s.name()),
+        set_key: |s, k| snapling_win::secret::set(s.name(), k),
         get_proxy: || snapling_win::secret::get(DEEPL_PROXY),
     }
 }
@@ -736,6 +780,8 @@ fn apply_config(cfg: &Config) {
     snapling_win::overlay::set_instant_copy(cfg.capture.instant_copy);
     snapling_win::overlay::set_blur(cfg.blur.gauss, cfg.blur.strength.min(2));
     apply_ocr(&cfg.ocr.language);
+    OCR_PADDLE.set(cfg.ocr.engine == Engine::Paddle);
+    OCR_PANEL.set(cfg.ocr.panel);
     let hide = cfg.privacy.hide_from_capture;
     match snapling_win::overlay::set_hidden_from_capture(hide) {
         Ok(()) => info!("overlay hidden from capture: {hide}"),
@@ -768,12 +814,13 @@ fn apply_ocr(lang: &str) {
     });
 }
 
-/// OCR on a worker thread, text to the clipboard.
+/// OCR on a worker thread, text to the clipboard and the text window.
 fn recognize(img: snapling_win::Image) {
     let lang = OCR_LANG.with(|l| l.borrow().clone());
+    let (paddle, panel) = (OCR_PADDLE.get(), OCR_PANEL.get());
     std::thread::spawn(move || {
         let t0 = Instant::now();
-        match snapling_win::ocr::recognize(&img.bgra, img.width, img.height, &lang) {
+        match read_text(&img, &lang, paddle) {
             Ok(text) if text.trim().is_empty() => {
                 info!("ocr: no text");
                 play(Sound::Error);
@@ -791,6 +838,9 @@ fn recognize(img: snapling_win::Image) {
                         error!("clipboard: {e}");
                         play(Sound::Error);
                     }
+                }
+                if panel {
+                    text_window(&text, "--text");
                 }
             }
             Err(e) => {
@@ -876,7 +926,7 @@ pub fn run() {
 
     let cfg_dir = app_dir("APPDATA");
     let cfg_path = cfg_dir.join("config.toml");
-    let cfg = Config::load_or_create(&cfg_path).unwrap_or_else(|e| {
+    let mut cfg = Config::load_or_create(&cfg_path).unwrap_or_else(|e| {
         snapling_win::warn(&tf(
             "Ошибка в config.toml, используются настройки по умолчанию.\n{e}",
             &[("e", &e)],
@@ -890,35 +940,14 @@ pub fn run() {
     if let Err(e) = snapling_win::toast::init() {
         error!("toast init: {e}");
     }
+    if let Err(e) = snapling_win::menu::init() {
+        error!("menu init: {e}");
+    }
     apply_config(&cfg);
 
-    let region = MenuItem::new(menu_text(&cfg, Action::CaptureRegion), true, None);
-    let screen = MenuItem::new(menu_text(&cfg, Action::CaptureScreen), true, None);
-    let repeat = MenuItem::new(menu_text(&cfg, Action::RepeatRegion), true, None);
-    let ocr = MenuItem::new(menu_text(&cfg, Action::RecognizeText), true, None);
-    let last = MenuItem::new(t("Последний снимок"), true, None);
-    let folder = MenuItem::new(t("Папка снимков"), true, None);
-    let history_item = MenuItem::new(t("История"), true, None);
-    let settings_item = MenuItem::new(t("Настройки"), true, None);
-    let quit = MenuItem::new(t("Выход"), true, None);
-    let menu = Menu::new();
-    let _ = menu.append_items(&[
-        &region,
-        &screen,
-        &repeat,
-        &ocr,
-        &PredefinedMenuItem::separator(),
-        &last,
-        &history_item,
-        &folder,
-        &settings_item,
-        &PredefinedMenuItem::separator(),
-        &quit,
-    ]);
     let mut tray_mode = cfg.ui.tray_icon;
     let mut white = tray_white(tray_mode);
     let tray = match TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
         .with_tooltip(snapling_core::APP_NAME)
         .with_icon(tray_icon(white))
         .build()
@@ -956,20 +985,12 @@ pub fn run() {
                 if now != cfg_mtime {
                     cfg_mtime = now;
                     match Config::load_or_create(&cfg_path) {
-                        Ok(cfg) => {
+                        Ok(new) => {
                             info!("config reloaded");
-                            crate::ui::apply_language(&cfg.ui.language);
-                            apply_config(&cfg);
-                            tray_mode = cfg.ui.tray_icon;
-                            region.set_text(menu_text(&cfg, Action::CaptureRegion));
-                            screen.set_text(menu_text(&cfg, Action::CaptureScreen));
-                            repeat.set_text(menu_text(&cfg, Action::RepeatRegion));
-                            ocr.set_text(menu_text(&cfg, Action::RecognizeText));
-                            last.set_text(t("Последний снимок"));
-                            folder.set_text(t("Папка снимков"));
-                            history_item.set_text(t("История"));
-                            settings_item.set_text(t("Настройки"));
-                            quit.set_text(t("Выход"));
+                            crate::ui::apply_language(&new.ui.language);
+                            apply_config(&new);
+                            tray_mode = new.ui.tray_icon;
+                            cfg = new;
                         }
                         Err(e) => {
                             warn!("config: {e}");
@@ -987,33 +1008,26 @@ pub fn run() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            if ev.id == region.id() {
-                capture_region(None);
-            } else if ev.id == screen.id() {
-                capture_rect(None, "screen");
-            } else if ev.id == repeat.id() {
-                run_action(Action::RepeatRegion);
-            } else if ev.id == ocr.id() {
-                run_action(Action::RecognizeText);
-            } else if ev.id == last.id() {
-                match LAST_SAVED.lock().ok().and_then(|l| l.clone()) {
-                    Some(p) => {
-                        let _ = std::process::Command::new("explorer")
-                            .arg(format!("/select,{}", p.display()))
-                            .spawn();
-                    }
-                    None => snapling_win::warn("В этом сеансе снимков ещё не сохранено."),
-                }
-            } else if ev.id == folder.id() {
-                open_shots_folder();
-            } else if ev.id == settings_item.id() {
-                settings_window.open("--settings");
-            } else if ev.id == history_item.id() {
-                history_window.open("--history");
-            } else if ev.id == quit.id() {
-                unsafe { PostQuitMessage(0) };
+        while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left | MouseButton::Right,
+                button_state: MouseButtonState::Up,
+                ..
+            } = ev
+            {
+                snapling_win::menu::show(menu_rows(&cfg), menu_light(&cfg));
             }
+        }
+        match snapling_win::menu::picked() {
+            Some(MenuIcon::Region) => run_action(Action::CaptureRegion),
+            Some(MenuIcon::Screen) => run_action(Action::CaptureScreen),
+            Some(MenuIcon::Repeat) => run_action(Action::RepeatRegion),
+            Some(MenuIcon::Text) => run_action(Action::RecognizeText),
+            Some(MenuIcon::History) => history_window.open("--history"),
+            Some(MenuIcon::Folder) => open_shots_folder(),
+            Some(MenuIcon::Settings) => settings_window.open("--settings"),
+            Some(MenuIcon::Quit) => unsafe { PostQuitMessage(0) },
+            None => {}
         }
     }
     info!("exit");

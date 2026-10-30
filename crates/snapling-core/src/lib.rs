@@ -3,6 +3,7 @@ pub mod config;
 pub mod history;
 pub mod hotkey;
 pub mod i18n;
+pub mod ocr;
 pub mod selection;
 pub mod sound;
 pub mod storage;

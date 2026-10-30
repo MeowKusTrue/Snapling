@@ -3410,6 +3410,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "snapling-core",
+ "snapling-scene",
+ "tiny-skia",
  "tokenizers",
  "ureq",
 ]

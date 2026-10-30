@@ -50,6 +50,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, w};
 
+pub mod menu;
 pub mod ocr;
 pub mod overlay;
 pub mod secret;

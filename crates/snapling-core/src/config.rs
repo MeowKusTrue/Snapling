@@ -72,13 +72,18 @@ hide_from_capture = true
 
 [ocr]
 # Язык распознавания текста (O в выделении): "auto" — по языкам Windows, или "ru", "en".
-# Распознавание работает без интернета, встроенным движком Windows.
 language = "auto"
+# Движок: "windows" — встроенный, быстрый; "paddle" — PaddleOCR, модель ~11 МБ скачивается с вопросом.
+# Оба работают без интернета.
+engine = "windows"
+# Показывать окно с текстом после распознавания. Текст в любом случае попадает в буфер.
+panel = true
 
 [translate]
 # Онлайн-перевод. "off" — только офлайн (модели на компьютере).
-# "deepl" — в окне перевода появится кнопка «DeepL»: текст уходит в DeepL только по её нажатию.
-# Ключ API вводится в окне перевода и хранится в диспетчере учётных данных Windows, не здесь.
+# "deepl", "yandex", "google" — в окне перевода появится кнопка сервиса: текст уходит туда только
+# по её нажатию. Ключ API вводится в окне перевода и хранится в диспетчере учётных данных
+# Windows, не здесь.
 online = "off"
 
 [ui]
@@ -224,6 +229,20 @@ pub enum Online {
     #[default]
     Off,
     Deepl,
+    Yandex,
+    Google,
+}
+
+impl Online {
+    /// Shown in the window; also names the key in Credential Manager.
+    pub fn name(self) -> &'static str {
+        match self {
+            Online::Off => "",
+            Online::Deepl => "DeepL",
+            Online::Yandex => "Yandex",
+            Online::Google => "Google",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -236,12 +255,33 @@ pub struct Translate {
 #[serde(default, deny_unknown_fields)]
 pub struct Ocr {
     pub language: String,
+    pub engine: Engine,
+    pub panel: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    #[default]
+    Windows,
+    Paddle,
+}
+
+impl Engine {
+    pub fn name(self) -> &'static str {
+        match self {
+            Engine::Windows => "Windows OCR",
+            Engine::Paddle => "PaddleOCR",
+        }
+    }
 }
 
 impl Default for Ocr {
     fn default() -> Self {
         Self {
             language: "auto".into(),
+            engine: Engine::default(),
+            panel: true,
         }
     }
 }

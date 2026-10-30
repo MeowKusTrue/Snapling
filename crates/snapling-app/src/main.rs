@@ -27,7 +27,10 @@ fn main() {
         return editor::run(std::path::Path::new(&args[2]), hooks());
     }
     if args.len() == 3 && args[1] == "--translate" {
-        return translate_ui::run(std::path::Path::new(&args[2]), text_hooks());
+        return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), false);
+    }
+    if args.len() == 3 && args[1] == "--text" {
+        return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), true);
     }
     if args.len() == 2 && args[1] == "--settings" {
         return settings::run(settings_hooks());
@@ -114,9 +117,10 @@ fn text_hooks() -> translate_ui::Hooks {
         copy_text: |_| Err(t("пока только Windows").into()),
         warn: |m| eprintln!("{m}"),
         models: std::path::PathBuf::from("models"),
-        online: false,
-        get_key: || None,
-        set_key: |_| Err(t("пока только Windows").into()),
+        online: Default::default(),
+        engine: "PaddleOCR",
+        get_key: |_| None,
+        set_key: |_, _| Err(t("пока только Windows").into()),
         get_proxy: || None,
     }
 }

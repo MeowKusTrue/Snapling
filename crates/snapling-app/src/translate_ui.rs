@@ -4,6 +4,7 @@
 use crate::ui;
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use egui_phosphor::regular as icon;
+use snapling_core::config::Online;
 use snapling_core::i18n::{t, tf};
 use snapling_translate::{Dir, Model};
 use std::path::{Path, PathBuf};
@@ -13,19 +14,22 @@ pub struct Hooks {
     pub copy_text: fn(&str) -> Result<(), String>,
     pub warn: fn(&str),
     pub models: PathBuf,
-    /// `[translate] online = "deepl"`.
-    pub online: bool,
-    pub get_key: fn() -> Option<String>,
-    pub set_key: fn(&str) -> Result<(), String>,
-    /// Proxy for DeepL requests, from Credential Manager: it may hold a password.
+    /// `[translate] online`.
+    pub online: Online,
+    /// Name on the chip.
+    pub engine: &'static str,
+    pub get_key: fn(Online) -> Option<String>,
+    pub set_key: fn(Online, &str) -> Result<(), String>,
+    /// Proxy for online requests, from Credential Manager: it may hold a password.
     pub get_proxy: fn() -> Option<String>,
 }
 
 type Reply = (u64, Result<String, String>);
-/// id, direction, text, DeepL key (`None` = offline).
-type Job = (u64, Dir, String, Option<String>);
+/// id, direction, text, service and key (`None` = offline).
+type Job = (u64, Dir, String, Option<(Online, String)>);
 
-pub fn run(file: &Path, hooks: Hooks) {
+/// `text_only`: the result of recognition, translated only when asked.
+pub fn run(file: &Path, hooks: Hooks, text_only: bool) {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -50,7 +54,12 @@ pub fn run(file: &Path, hooks: Hooks) {
         options,
         Box::new(move |cc| {
             ui::init(cc);
-            Ok(Box::new(Window::new(text, hooks, cc.egui_ctx.clone())))
+            Ok(Box::new(Window::new(
+                text,
+                hooks,
+                text_only,
+                cc.egui_ctx.clone(),
+            )))
         }),
     );
     if let Err(e) = res {
@@ -58,7 +67,7 @@ pub fn run(file: &Path, hooks: Hooks) {
     }
 }
 
-/// Loads each direction's model once and translates requests in order; a key = DeepL.
+/// Loads each direction's model once and translates requests in order; a key = online.
 fn worker(
     models: PathBuf,
     proxy: fn() -> Option<String>,
@@ -69,8 +78,9 @@ fn worker(
     let mut loaded: Vec<(Dir, Model)> = Vec::new();
     for (id, dir, text, key) in rx {
         let res = (|| {
-            if let Some(key) = key {
-                return snapling_translate::deepl(&key, &text, dir, proxy().as_deref());
+            if let Some((service, key)) = key {
+                let proxy = proxy();
+                return snapling_translate::online(service, &key, &text, dir, proxy.as_deref());
             }
             if !loaded.iter().any(|(d, _)| *d == dir) {
                 loaded.push((dir, Model::load(&models, dir)?));
@@ -92,6 +102,7 @@ struct Window {
     original: String,
     translation: String,
     dir: Dir,
+    text_only: bool,
     hooks: Hooks,
     tx: Sender<Job>,
     rx: Receiver<Reply>,
@@ -101,8 +112,8 @@ struct Window {
     copied_once: bool,
     status: String,
     /// Where the shown translation came from.
-    via_deepl: bool,
-    pending_deepl: bool,
+    via_online: bool,
+    pending_online: bool,
     /// Key being typed (`Some` = the key row is open).
     key_input: Option<String>,
     /// Send confirmation shown; agreed once per window.
@@ -111,7 +122,7 @@ struct Window {
 }
 
 impl Window {
-    fn new(original: String, hooks: Hooks, ctx: egui::Context) -> Self {
+    fn new(original: String, hooks: Hooks, text_only: bool, ctx: egui::Context) -> Self {
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
         let (models, proxy) = (hooks.models.clone(), hooks.get_proxy);
@@ -120,6 +131,7 @@ impl Window {
             dir: snapling_translate::detect(&original),
             original,
             translation: String::new(),
+            text_only,
             hooks,
             tx,
             rx,
@@ -127,40 +139,41 @@ impl Window {
             next_id: 0,
             copied_once: false,
             status: String::new(),
-            via_deepl: false,
-            pending_deepl: false,
+            via_online: false,
+            pending_online: false,
             key_input: None,
             confirm: false,
             consented: false,
         };
-        w.request(None);
+        if !text_only {
+            w.request(None);
+        }
         w
     }
 
-    fn request(&mut self, key: Option<String>) {
+    fn request(&mut self, key: Option<(Online, String)>) {
         if self.original.trim().is_empty() {
             return;
         }
         self.next_id += 1;
         self.pending = Some(self.next_id);
-        self.pending_deepl = key.is_some();
-        self.status = if key.is_some() {
-            t("Отправляю в DeepL…")
-        } else {
-            t("Перевожу офлайн…")
-        }
-        .into();
+        self.pending_online = key.is_some();
+        self.status = match &key {
+            Some((service, _)) => tf("Отправляю в {0}…", &[("0", &service.name())]),
+            None => t("Перевожу офлайн…").into(),
+        };
         let _ = self
             .tx
             .send((self.next_id, self.dir, self.original.clone(), key));
     }
 
-    /// DeepL button: key first, then a one-time confirmation, then the send.
-    fn deepl(&mut self) {
-        match (self.hooks.get_key)() {
+    /// Service button: key first, then a one-time confirmation, then the send.
+    fn send_online(&mut self) {
+        let service = self.hooks.online;
+        match (self.hooks.get_key)(service) {
             None => self.key_input = Some(String::new()),
             Some(_) if !self.consented => self.confirm = true,
-            Some(key) => self.request(Some(key)),
+            Some(key) => self.request(Some((service, key))),
         }
     }
 
@@ -175,13 +188,24 @@ impl Window {
         let Some(key) = &mut self.key_input else {
             return;
         };
+        let service = self.hooks.online;
         let mut save = false;
-        let resp = egui::Modal::new(egui::Id::new("deepl-key")).show(ctx, |ui| {
+        let resp = egui::Modal::new(egui::Id::new("online-key")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading(t("Ключ DeepL API"));
-            ui.label(t(
-                "Ключ есть в аккаунте DeepL → API Keys. Бесплатный ключ оканчивается на «:fx».",
-            ));
+            ui.heading(tf("Ключ {0} API", &[("0", &service.name())]));
+            ui.label(match service {
+                Online::Yandex => t(
+                    "Создайте сервисный аккаунт в Yandex Cloud с ролью ai.translate.user и \
+                     API-ключ для него. Перевод платный.",
+                ),
+                Online::Google => t(
+                    "Включите Cloud Translation API в Google Cloud и создайте API-ключ в разделе \
+                     Credentials. Перевод платный.",
+                ),
+                _ => t(
+                    "Ключ есть в аккаунте DeepL → API Keys. Бесплатный ключ оканчивается на «:fx».",
+                ),
+            });
             ui.label(
                 egui::RichText::new(t(
                     "Хранится в диспетчере учётных данных Windows, не в файлах.",
@@ -189,11 +213,7 @@ impl Window {
                 .small()
                 .color(ui::pal(ctx).muted),
             );
-            let r = ui.add(
-                egui::TextEdit::singleline(key)
-                    .password(true)
-                    .hint_text("xxxxxxxx-…:fx"),
-            );
+            let r = ui.add(egui::TextEdit::singleline(key).password(true));
             r.request_focus();
             ui.horizontal(|ui| {
                 save = ui.button(t("Сохранить")).clicked()
@@ -206,8 +226,8 @@ impl Window {
         if save && !key.trim().is_empty() {
             let key = key.trim().to_string();
             self.key_input = None;
-            match (self.hooks.set_key)(&key) {
-                Ok(()) => self.deepl(),
+            match (self.hooks.set_key)(service, &key) {
+                Ok(()) => self.send_online(),
                 Err(e) => self.status = e,
             }
         } else if resp.should_close() {
@@ -220,11 +240,16 @@ impl Window {
             return;
         }
         let chars = self.original.chars().count();
+        let name = self.hooks.online.name();
         let mut send = false;
-        let resp = egui::Modal::new(egui::Id::new("deepl-confirm")).show(ctx, |ui| {
+        let resp = egui::Modal::new(egui::Id::new("online-confirm")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading(t("Отправить в DeepL?"));
-            ui.label(tf("Текст ({chars} символов) уйдёт на сервер DeepL для перевода. Офлайн-перевод ничего не отправляет.", &[("chars", &chars)]));
+            ui.heading(tf("Отправить в {0}?", &[("0", &name)]));
+            ui.label(tf(
+                "Текст ({chars} символов) уйдёт на сервер {0} для перевода. Офлайн-перевод ничего \
+                 не отправляет.",
+                &[("chars", &chars), ("0", &name)],
+            ));
             ui.horizontal(|ui| {
                 send = ui.button(t("Отправить")).clicked();
                 if ui.button(t("Отмена")).clicked() {
@@ -235,7 +260,7 @@ impl Window {
         if send {
             self.confirm = false;
             self.consented = true;
-            self.deepl();
+            self.send_online();
         } else if resp.should_close() {
             self.confirm = false;
         }
@@ -250,7 +275,7 @@ impl Window {
             match res {
                 Ok(t) => {
                     self.translation = t;
-                    self.via_deepl = self.pending_deepl;
+                    self.via_online = self.pending_online;
                     self.status.clear();
                     if !self.copied_once {
                         self.copied_once = true;
@@ -324,13 +349,19 @@ impl eframe::App for Window {
                             .corner_radius(10)
                             .inner_margin(egui::Margin::symmetric(9, 3))
                             .show(ui, |ui| {
-                                let t = egui::RichText::new("Windows OCR").size(12.0);
+                                let t = egui::RichText::new(self.hooks.engine).size(12.0);
                                 ui.label(t.color(p.muted));
                             });
                     });
                 });
+                let gap = ui.spacing().item_spacing.y;
+                let high = if self.text_only {
+                    ui.available_height() - 40.0 - 38.0 - gap * 2.0
+                } else {
+                    104.0
+                };
                 ui.add_sized(
-                    [width, 104.0],
+                    [width, high],
                     egui::TextEdit::multiline(&mut self.original)
                         .margin(egui::Margin::symmetric(14, 12)),
                 );
@@ -345,14 +376,35 @@ impl eframe::App for Window {
                         self.one_line();
                     }
                 });
+                if self.text_only {
+                    let mut go = false;
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            go = ui::tone(ui, t("Перевести"), None, 38.0).clicked();
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let t =
+                                        egui::RichText::new(&self.status).size(12.0).color(p.muted);
+                                    ui.add(egui::Label::new(t).truncate());
+                                },
+                            );
+                        });
+                    });
+                    if go {
+                        self.text_only = false;
+                        self.request(None);
+                    }
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui::heading(ui, t("Перевод"), 17.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.hooks.online {
-                            let items = [t("На устройстве"), "DeepL"];
-                            let now = usize::from(self.via_deepl);
+                        if self.hooks.online != Online::Off {
+                            let items = [t("На устройстве"), self.hooks.online.name()];
+                            let now = usize::from(self.via_online);
                             match ui::segmented(ui, &items, now, 28.0) {
-                                Some(1) => self.deepl(),
+                                Some(1) => self.send_online(),
                                 Some(_) => self.request(None),
                                 None => {}
                             }
@@ -408,8 +460,8 @@ impl eframe::App for Window {
                 ui.horizontal(|ui| {
                     let via = if !self.status.is_empty() {
                         self.status.clone()
-                    } else if self.via_deepl {
-                        t("DeepL · онлайн").into()
+                    } else if self.via_online {
+                        tf("{0} · онлайн", &[("0", &self.hooks.online.name())])
                     } else {
                         t("OPUS-MT · без интернета").into()
                     };
@@ -429,7 +481,7 @@ impl eframe::App for Window {
                     });
                 });
             });
-        if run {
+        if run && !self.text_only {
             self.request(None);
         }
         self.key_row(&ctx);

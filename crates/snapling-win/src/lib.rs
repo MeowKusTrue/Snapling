@@ -117,6 +117,35 @@ pub fn single_instance() -> bool {
     handle.is_ok() && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS
 }
 
+/// Brings an open Snapling window to the front; `false` when none is on screen.
+pub fn focus_app_window() -> bool {
+    use windows::Win32::Foundation::{LPARAM, TRUE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextW, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow,
+        ShowWindow,
+    };
+    use windows::core::BOOL;
+    extern "system" fn check(hwnd: HWND, found: LPARAM) -> BOOL {
+        let mut title = [0u16; 16];
+        let len = unsafe { GetWindowTextW(hwnd, &mut title) } as usize;
+        let ours = String::from_utf16_lossy(&title[..len]) == "Snapling";
+        if !ours || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return TRUE;
+        }
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(hwnd);
+            *(found.0 as *mut bool) = true;
+        }
+        BOOL(0)
+    }
+    let mut found = false;
+    let _ = unsafe { EnumWindows(Some(check), LPARAM((&raw mut found) as isize)) };
+    found
+}
+
 static RECORD_HOOK: AtomicIsize = AtomicIsize::new(0);
 static RECORD_MODS: AtomicU8 = AtomicU8::new(0);
 static RECORDED: Mutex<Option<String>> = Mutex::new(None);

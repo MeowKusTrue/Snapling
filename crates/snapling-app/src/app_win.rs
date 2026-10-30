@@ -1143,7 +1143,12 @@ pub fn run() {
     snapling_win::set_dpi_aware();
     init_log();
     if !snapling_win::single_instance() {
-        warn!("already running, exit");
+        info!("already running: showing the window");
+        if !snapling_win::focus_app_window()
+            && let Ok(exe) = std::env::current_exe()
+        {
+            let _ = std::process::Command::new(exe).arg("--gallery").spawn();
+        }
         return;
     }
     let _ = std::fs::remove_dir_all(edit_dir());

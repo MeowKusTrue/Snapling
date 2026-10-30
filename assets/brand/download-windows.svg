@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="64" viewBox="0 0 340 64" role="img" aria-label="Download for Windows">
+  <rect width="340" height="64" rx="14" fill="#295BE8"/>
+  <g transform="translate(26 20)" fill="#FFFFFF">
+    <rect width="11" height="11"/><rect x="13" width="11" height="11"/>
+    <rect y="13" width="11" height="11"/><rect x="13" y="13" width="11" height="11"/>
+  </g>
+  <text x="66" y="28" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#FFFFFF">Download for Windows</text>
+  <text x="66" y="47" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="12.5" fill="#D6E0FF">Windows 10 and 11, x64</text>
+</svg>

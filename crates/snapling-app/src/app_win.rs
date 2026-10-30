@@ -194,7 +194,7 @@ fn menu_light(cfg: &Config) -> bool {
     }
 }
 
-/// White mark for a dark panel, near-black for a light one, as `assets/brand/tray-*.svg`.
+/// White mark for a dark panel, near-black for a light one, like the brand mark.
 fn tray_white(mode: TrayIcon) -> bool {
     match mode {
         TrayIcon::Auto => !snapling_win::taskbar_is_light(),

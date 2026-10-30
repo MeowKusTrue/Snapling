@@ -1,4 +1,4 @@
-//! Frame Spark mark (assets/brand/mark.svg) rasterized in code: no SVG dependency.
+//! Frame Spark mark rasterized in code: no SVG dependency.
 
 type P = (f32, f32);
 

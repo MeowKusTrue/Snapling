@@ -281,10 +281,11 @@ impl Settings {
 
     /// The panel over the gallery, sliding in from the side of the settings.
     fn panel(&mut self, ctx: &egui::Context) {
-        let shown = ctx.animate_bool_with_time(egui::Id::new("panel"), self.panel_open, 0.16);
-        if shown <= 0.0 {
+        let time = ctx.animate_bool_with_time(egui::Id::new("panel"), self.panel_open, 0.24);
+        if time <= 0.0 {
             return;
         }
+        let shown = 1.0 - (1.0 - time).powi(3);
         let p = ui::pal(ctx);
         let top = 44.0;
         let full = ctx.content_rect();

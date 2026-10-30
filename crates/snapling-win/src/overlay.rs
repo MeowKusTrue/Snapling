@@ -384,6 +384,7 @@ fn finish(hwnd: HWND, out: Option<Outcome>) {
     let Some(s) = STATE.with(|st| st.borrow_mut().take()) else {
         return;
     };
+    snapling_scene::drop_cache();
     let result = if let Some(out) = out {
         s.sel.rect().filter(|_| s.sel.confirmed()).and_then(|r| {
             let len = s.width as usize * s.height as usize * 4;
@@ -1161,6 +1162,37 @@ mod tests {
         assert_eq!(dst[3], 255);
         assert!(dst[0] > 140 && dst[0] < 160, "{dst:?}");
         assert!(dst[4] < 10, "{dst:?}");
+    }
+
+    /// `cargo test --release -p snapling-win bench_copy -- --ignored --nocapture`: what a shot
+    /// costs on the way to the clipboard, the clipboard call itself excluded.
+    #[test]
+    #[ignore]
+    fn bench_copy() {
+        let (w, h) = (1920u32, 1080u32);
+        let mut bgra = vec![0u8; (w * h * 4) as usize];
+        for (i, px) in bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let v = ((x * 7 + y * 13) ^ (x * y / 64)) as u8;
+            *px = [v, v / 2, 255 - v, 255];
+        }
+        let t0 = std::time::Instant::now();
+        let mut flipped = vec![0u8; bgra.len()];
+        for (out, src) in flipped
+            .chunks_exact_mut(w as usize * 4)
+            .zip(bgra.chunks_exact(w as usize * 4).rev())
+        {
+            out.copy_from_slice(src);
+        }
+        let dib = t0.elapsed();
+        let t0 = std::time::Instant::now();
+        let png = snapling_core::storage::encode_png(&bgra, w, h).unwrap();
+        println!(
+            "dib {dib:?}, png {:?} ({} KB)",
+            t0.elapsed(),
+            png.len() / 1024
+        );
+        assert_ne!(std::hint::black_box(&flipped)[0], 1);
     }
 
     /// `cargo test --release -p snapling-win bench_dim -- --ignored --nocapture`

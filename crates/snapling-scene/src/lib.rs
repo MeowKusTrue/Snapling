@@ -5,6 +5,7 @@
 use snapling_core::annotate::{self, FontRef, Pt};
 use snapling_core::i18n::{n, t};
 use snapling_core::selection::{Point, Rect};
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use tiny_skia::{
     BlendMode, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapRef,
@@ -601,8 +602,67 @@ fn grab(pm: &PixmapMut<'_>, area: Rect) -> Option<(Pixmap, i32, i32)> {
     Some((out, x0, y0))
 }
 
-/// Frosted panel: blurred backdrop, tint, hairline, optional drop shadow.
+/// Writes a [`grab`] copy back.
+fn put(pm: &mut PixmapMut<'_>, part: &Pixmap, x0: i32, y0: i32) {
+    let w = pm.width() as usize;
+    let row = part.width() as usize * 4;
+    let dst = pm.data_mut();
+    for (y, line) in part.data().chunks_exact(row).enumerate() {
+        let at = ((y0 as usize + y) * w + x0 as usize) * 4;
+        dst[at..at + row].copy_from_slice(line);
+    }
+}
+
+/// Painted glass, reusable while the pixels under it stay the same.
+struct Pane {
+    key: (Rect, u32, [u8; 4], u32, bool),
+    under: Pixmap,
+    done: Pixmap,
+}
+
+/// Panels on screen at once are a handful; moved ones age out.
+const PANES: usize = 8;
+
+thread_local! {
+    static CACHE: RefCell<Vec<Pane>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Forgets the cached glass: it holds pieces of the screenshot.
+pub fn drop_cache() {
+    CACHE.with(|c| *c.borrow_mut() = Vec::new());
+}
+
+/// Frosted panel, cached: blurring is most of a frame, and most frames change nothing under it.
 fn glass(pm: &mut PixmapMut<'_>, at: Rect, rad: f32, tint: [u8; 4], blur: f32, shadow: bool) {
+    let reach = if shadow { 2.4 * blur } else { 1.5 * blur };
+    let area = inflate(at, reach.ceil() as i32);
+    let Some((under, x0, y0)) = grab(pm, area) else {
+        return glass_now(pm, at, rad, tint, blur, shadow);
+    };
+    let key = (at, rad.to_bits(), tint, blur.to_bits(), shadow);
+    let hit = CACHE.with(|c| {
+        let c = c.borrow();
+        let same = c.iter().find(|p| p.key == key && p.under == under);
+        same.map(|p| put(pm, &p.done, x0, y0)).is_some()
+    });
+    if hit {
+        return;
+    }
+    glass_now(pm, at, rad, tint, blur, shadow);
+    if let Some((done, ..)) = grab(pm, area) {
+        CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            c.retain(|p| p.key != key);
+            if c.len() == PANES {
+                c.remove(0);
+            }
+            c.push(Pane { key, under, done });
+        });
+    }
+}
+
+/// Blurred backdrop, tint, hairline, optional drop shadow.
+fn glass_now(pm: &mut PixmapMut<'_>, at: Rect, rad: f32, tint: [u8; 4], blur: f32, shadow: bool) {
     let id = Transform::identity();
     if shadow {
         let sh = Rect {
@@ -1610,6 +1670,35 @@ mod tests {
     }
 
     #[test]
+    fn cached_glass_follows_what_is_under_it() {
+        let (w, h) = (300u32, 200u32);
+        let at = Rect {
+            left: 100,
+            top: 80,
+            width: 100,
+            height: 40,
+        };
+        let run = |buf: &mut [u8]| {
+            let mut pm = PixmapMut::from_bytes(buf, w, h).unwrap();
+            glass(&mut pm, at, 8.0, GLASS, 24.0, true);
+        };
+        drop_cache();
+        let plain = [90u8, 90, 90, 255].repeat((w * h) as usize);
+        let mut first = plain.clone();
+        run(&mut first);
+        let mut again = plain.clone();
+        run(&mut again);
+        assert_eq!(first, again, "a hit paints the same pixels");
+        let mut other = plain.clone();
+        let i = ((100 * w + 150) * 4) as usize;
+        other[i..i + 40].fill(255);
+        run(&mut other);
+        assert_ne!(first, other, "a change under the panel is seen");
+        drop_cache();
+        assert_eq!(CACHE.with(|c| c.borrow().len()), 0);
+    }
+
+    #[test]
     fn menu_finds_rows_and_skips_lines() {
         let rows = vec![
             MenuRow::Item(MenuIcon::Region, "Выделить".into(), "PrtScn".into()),
@@ -1960,7 +2049,9 @@ mod bench {
                 caret: None,
             }),
         };
-        for _ in 0..3 {
+        let frame = buf.clone();
+        for _ in 0..4 {
+            buf.copy_from_slice(&frame);
             let t0 = std::time::Instant::now();
             let lay = layout(&sc);
             let laid = t0.elapsed().as_micros();

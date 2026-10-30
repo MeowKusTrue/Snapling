@@ -82,8 +82,8 @@ const TABS: [(Tab, &str, &str); 7] = [
     (Tab::About, icon::INFO, n("О программе")),
 ];
 
-/// Width of the settings panel.
-const PANEL_W: f32 = 860.0;
+/// Narrowest the settings panel gets by dragging its edge.
+const PANEL_MIN: f32 = 640.0;
 const REPO: &str = "https://github.com/MeowKusTrue/Snapling";
 const RECORD_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -151,6 +151,9 @@ struct Settings {
     tab: Tab,
     /// The settings panel is out over the gallery.
     panel_open: bool,
+    /// Opens after the first frame, so a window started on settings slides them in too.
+    panel_opening: bool,
+    panel_width: f32,
     welcome: bool,
     autostart: bool,
     recording: Option<(Action, std::time::Instant)>,
@@ -175,6 +178,7 @@ impl Settings {
         Self {
             ctx,
             gallery: None,
+            panel_width: cfg.ui.panel_width as f32,
             cfg,
             store: Store {
                 path,
@@ -184,7 +188,8 @@ impl Settings {
             proxy: (hooks.get_proxy)().unwrap_or_default(),
             hooks,
             tab: first_tab(),
-            panel_open: page == Page::Settings,
+            panel_open: false,
+            panel_opening: page == Page::Settings,
             welcome: page == Page::Welcome,
             recording: None,
             refused: None,
@@ -281,7 +286,7 @@ impl Settings {
 
     /// The panel over the gallery, sliding in from the side of the settings.
     fn panel(&mut self, ctx: &egui::Context) {
-        let time = ctx.animate_bool_with_time(egui::Id::new("panel"), self.panel_open, 0.24);
+        let time = ctx.animate_bool_with_time(egui::Id::new("panel"), self.panel_open, 0.28);
         if time <= 0.0 {
             return;
         }
@@ -303,13 +308,18 @@ impl Settings {
         if dim.inner.clicked() {
             self.close_panel();
         }
-        let width = PANEL_W.min(body.width() - 56.0);
-        let x = match self.cfg.ui.panel_side {
-            PanelSide::Right => body.right() - width * shown,
-            PanelSide::Left => body.left() - width * (1.0 - shown),
+        let room = body.width() - 56.0;
+        let width = self.panel_width.clamp(PANEL_MIN.min(room), room);
+        let left = self.cfg.ui.panel_side == PanelSide::Left;
+        let x = if left {
+            body.left() - width * (1.0 - shown)
+        } else {
+            body.right() - width * shown
         };
         egui::Area::new(egui::Id::new("panel"))
             .order(egui::Order::Foreground)
+            .constrain(false)
+            .fade_in(false)
             .fixed_pos(egui::pos2(x, top))
             .show(ctx, |ui| {
                 Frame::new()
@@ -331,6 +341,40 @@ impl Settings {
                             });
                         });
                     });
+            });
+        if time >= 1.0 {
+            self.panel_grip(ctx, if left { x + width } else { x }, body);
+        }
+    }
+
+    /// The inner edge of the panel: dragging it changes the width, which is kept in the config.
+    fn panel_grip(&mut self, ctx: &egui::Context, edge: f32, body: egui::Rect) {
+        let left = self.cfg.ui.panel_side == PanelSide::Left;
+        let room = body.width() - 56.0;
+        let p = ui::pal(ctx);
+        let size = vec2(8.0, body.height());
+        egui::Area::new(egui::Id::new("panel-grip"))
+            .order(egui::Order::Tooltip)
+            .constrain(false)
+            .fade_in(false)
+            .fixed_pos(egui::pos2(edge - size.x / 2.0, body.top()))
+            .show(ctx, |ui| {
+                let r = ui.allocate_response(size, Sense::drag());
+                if r.hovered() || r.dragged() {
+                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    let line = egui::Stroke::new(2.0, p.soft);
+                    ui.painter().vline(edge, body.y_range(), line);
+                }
+                if r.dragged() {
+                    let moved = r.drag_delta().x;
+                    let wider = if left { moved } else { -moved };
+                    self.panel_width =
+                        (self.panel_width.min(room) + wider).clamp(PANEL_MIN.min(room), room);
+                }
+                if r.drag_stopped() {
+                    self.store
+                        .set("ui", "panel_width", self.panel_width.round() as i64);
+                }
             });
     }
 
@@ -1642,5 +1686,6 @@ impl eframe::App for Settings {
             None => {}
         }
         self.panel(&ctx);
+        self.panel_open |= std::mem::take(&mut self.panel_opening);
     }
 }

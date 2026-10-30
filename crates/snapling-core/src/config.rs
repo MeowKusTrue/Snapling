@@ -130,6 +130,8 @@ theme = "system"
 tray_icon = "auto"
 # С какой стороны выезжают настройки: "right" или "left".
 panel_side = "right"
+# Ширина панели настроек, край панели можно тянуть мышью.
+panel_width = 960
 # Экран приветствия уже показан.
 welcomed = false
 "#;
@@ -222,6 +224,7 @@ pub struct Ui {
     pub theme: Theme,
     pub tray_icon: TrayIcon,
     pub panel_side: PanelSide,
+    pub panel_width: u32,
     pub welcomed: bool,
 }
 
@@ -232,6 +235,7 @@ impl Default for Ui {
             theme: Theme::default(),
             tray_icon: TrayIcon::default(),
             panel_side: PanelSide::default(),
+            panel_width: 960,
             welcomed: false,
         }
     }

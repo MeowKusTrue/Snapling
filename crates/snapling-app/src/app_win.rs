@@ -590,20 +590,21 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         ask: snapling_win::ask,
         gallery: history_hooks,
         run_update: |setup| {
-            // The installer waits two seconds: it refuses while Snapling runs, and this process
-            // is one of them.
-            let line = format!(
-                "timeout /t 2 /nobreak >nul & start \"\" \"{}\" /SILENT",
-                setup.display()
-            );
-            std::process::Command::new("cmd")
-                .args(["/c", &line])
+            use std::os::windows::process::CommandExt;
+            const NO_WINDOW: u32 = 0x0800_0000;
+            // The installer refuses while the tray runs and cannot replace a running exe: the
+            // others go first, this process leaves right after starting it.
+            let others = format!("PID ne {}", std::process::id());
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/IM", "snapling.exe", "/FI", &others])
+                .creation_flags(NO_WINDOW)
+                .status();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::process::Command::new(setup)
+                .arg("/SILENT")
                 .spawn()
                 .map_err(|e| e.to_string())?;
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "snapling.exe"])
-                .spawn();
-            Ok(())
+            std::process::exit(0)
         },
         get_proxy: || snapling_win::secret::get(DEEPL_PROXY),
         set_proxy: |url| {

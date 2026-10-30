@@ -1037,8 +1037,8 @@ impl Settings {
             .size(13.0)
             .color(p.muted),
         );
-        if self.cfg.translate.online != Online::Off {
-            caption(ui, t("Прокси для онлайн-перевода"));
+        {
+            caption(ui, t("Прокси"));
             let r = ui.add(
                 TextEdit::singleline(&mut self.proxy)
                     .font(ui::mono(13.0))
@@ -1054,7 +1054,7 @@ impl Settings {
             }
             ui.label(
                 RichText::new(t(
-                    "Только для запросов к сервису перевода: http, https, socks4, socks5, можно \
+                    "Для онлайн-перевода и скачивания моделей: http, https, socks4, socks5, можно \
                      с логином. Хранится там же, где ключ. Пусто — без прокси.",
                 ))
                 .size(13.0)
@@ -1309,16 +1309,24 @@ impl Settings {
         );
         let ctx = ui.ctx().clone();
         match action {
-            Some((None, false)) => self.start_fetch(&ctx, paddle::FOLDER, paddle::download),
+            Some((None, false)) => {
+                let via = (self.hooks.get_proxy)();
+                self.start_fetch(&ctx, paddle::FOLDER, move |models| {
+                    paddle::download(models, via.as_deref())
+                });
+            }
             Some((None, true)) => {
                 let _ = std::fs::remove_dir_all(root.join(paddle::FOLDER));
             }
-            Some((Some(code), false)) => self.start_fetch(&ctx, code, move |models| {
-                DIRECTIONS
-                    .iter()
-                    .filter(|d| d.from == code || d.to == code)
-                    .try_for_each(|d| snapling_translate::download(models, d))
-            }),
+            Some((Some(code), false)) => {
+                let via = (self.hooks.get_proxy)();
+                self.start_fetch(&ctx, code, move |models| {
+                    DIRECTIONS
+                        .iter()
+                        .filter(|d| d.from == code || d.to == code)
+                        .try_for_each(|d| snapling_translate::download(models, d, via.as_deref()))
+                });
+            }
             Some((Some(code), true)) => {
                 for d in DIRECTIONS.iter().filter(|d| d.from == code || d.to == code) {
                     let _ = std::fs::remove_dir_all(root.join(d.model()));

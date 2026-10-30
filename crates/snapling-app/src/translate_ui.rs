@@ -84,9 +84,10 @@ fn worker(
     for job in rx {
         let (id, res) = match job {
             Job::Fetch(id, dirs) => {
+                let via = proxy();
                 let got = dirs
                     .iter()
-                    .try_for_each(|d| snapling_translate::download(&models, d));
+                    .try_for_each(|d| snapling_translate::download(&models, d, via.as_deref()));
                 (id, got.map(|()| String::new()))
             }
             Job::Text(id, from, to, text, Some((service, key))) => {
@@ -143,6 +144,8 @@ struct Window {
     /// Where the shown translation came from.
     via_online: bool,
     pending_online: bool,
+    /// The way picked in the window; `Off` = on this device.
+    mode: Online,
     /// Key being typed (`Some` = the key row is open).
     key_input: Option<String>,
     /// Send confirmation shown; agreed once per window.
@@ -174,6 +177,7 @@ impl Window {
             status: String::new(),
             via_online: false,
             pending_online: false,
+            mode: Online::Off,
             key_input: None,
             confirm: false,
             consented: false,
@@ -193,7 +197,7 @@ impl Window {
             let way = route(self.from, self.to);
             if way.is_empty() {
                 self.pending = None;
-                self.status = t("Для этой пары нет офлайн-модели, нужен онлайн-сервис").into();
+                self.status = t("Для этой пары нет офлайн-модели, выбери онлайн-сервис").into();
                 return;
             }
             self.need = way
@@ -225,15 +229,6 @@ impl Window {
         let _ = self.tx.send(Job::Fetch(self.next_id, self.need.clone()));
     }
 
-    /// Again with the same service after the languages changed.
-    fn redo(&mut self) {
-        if self.via_online {
-            self.send_online();
-        } else {
-            self.request(None);
-        }
-    }
-
     /// Service button: key first, then a one-time confirmation, then the send.
     fn send_online(&mut self) {
         let service = self.hooks.online;
@@ -241,6 +236,49 @@ impl Window {
             None => self.key_input = Some(String::new()),
             Some(_) if !self.consented => self.confirm = true,
             Some(key) => self.request(Some((service, key))),
+        }
+    }
+
+    /// Again the same way after the languages changed.
+    fn redo(&mut self) {
+        if self.mode == Online::Off {
+            self.request(None);
+        } else {
+            self.send_online();
+        }
+    }
+
+    /// Picks how to translate; a service stays the choice for the next windows too.
+    fn set_mode(&mut self, mode: Online) {
+        self.mode = mode;
+        if mode != Online::Off {
+            self.hooks.online = mode;
+            self.consented = false;
+            let path = ui::config_path();
+            let key = mode.name().to_lowercase();
+            let _ = Config::update(&path, "translate", "online", key);
+        }
+        self.redo();
+    }
+
+    fn mode_combo(&mut self, ui: &mut egui::Ui) {
+        let name = |m: Online| match m {
+            Online::Off => t("На устройстве"),
+            _ => m.name(),
+        };
+        let mut picked = None;
+        egui::ComboBox::from_id_salt("mode")
+            .selected_text(name(self.mode))
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                for m in [Online::Off, Online::Deepl, Online::Yandex, Online::Google] {
+                    if ui.selectable_label(self.mode == m, name(m)).clicked() {
+                        picked = Some(m);
+                    }
+                }
+            });
+        if let Some(m) = picked.filter(|m| *m != self.mode) {
+            self.set_mode(m);
         }
     }
 
@@ -491,15 +529,7 @@ impl eframe::App for Window {
                 ui.horizontal(|ui| {
                     ui::heading(ui, t("Перевод"), 17.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.hooks.online != Online::Off {
-                            let items = [t("На устройстве"), self.hooks.online.name()];
-                            let now = usize::from(self.via_online);
-                            match ui::segmented(ui, &items, now, 28.0) {
-                                Some(1) => self.send_online(),
-                                Some(_) => self.request(None),
-                                None => {}
-                            }
-                        }
+                        self.mode_combo(ui);
                     });
                 });
                 let row = egui::vec2(width, 36.0);
@@ -535,7 +565,7 @@ impl eframe::App for Window {
                                 let mb: u32 = self.need.iter().map(|d| d.mb).sum();
                                 ui.label(tf(
                                     "Для этого перевода нужна модель, ~{0} МБ. После скачивания \
-                                     всё работает без интернета.",
+                                     всё работает без интернета. Или выбери онлайн-сервис выше.",
                                     &[("0", &mb)],
                                 ));
                                 let (label, free) = if self.fetching {

@@ -1557,6 +1557,22 @@ pub fn draw_rec_frame(pm: &mut PixmapMut<'_>, s: f32) {
     }
 }
 
+const DIM: [u32; 3] = [16, 8, 4];
+
+/// Darkens a frame by `a` of 256 towards the overlay's night blue. Alpha ends up opaque.
+pub fn dim_into(dst: &mut [u8], src: &[u8], a: u32) {
+    let keep = 256 - a;
+    for (d, p) in dst
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<4>().0)
+    {
+        let mix = |c: usize| ((u32::from(p[c]) * keep + DIM[c] * a) >> 8) as u8;
+        *d = [mix(0), mix(1), mix(2), 255];
+    }
+}
+
 /// Side of the countdown mark before a delayed shot.
 pub const COUNT_SIZE: f32 = 104.0;
 

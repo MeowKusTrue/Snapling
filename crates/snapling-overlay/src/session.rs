@@ -5,9 +5,9 @@ use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt}
 use snapling_core::selection::{Corner, Hit, MIN_SELECTION_PX, Point, Rect, Selection};
 use snapling_scene::{
     Button, COLORS, Control, Draw, Hover, Layout, Loupe, SIZES, Scene, TOOLS, Target, Tool,
+    dim_into,
 };
 
-const DIM: [u32; 3] = [16, 8, 4];
 const DIM_SELECT: u32 = 108;
 const DIM_PAINT: u32 = 56;
 
@@ -110,19 +110,6 @@ fn pen_point(p: Point) -> Pt {
     Pt {
         x: p.x as f32,
         y: p.y as f32,
-    }
-}
-
-fn dim_into(dst: &mut [u8], src: &[u8], a: u32) {
-    let keep = 256 - a;
-    for (d, p) in dst
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(src.as_chunks::<4>().0)
-    {
-        let mix = |c: usize| ((u32::from(p[c]) * keep + DIM[c] * a) >> 8) as u8;
-        *d = [mix(0), mix(1), mix(2), 255];
     }
 }
 

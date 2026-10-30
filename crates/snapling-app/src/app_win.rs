@@ -254,15 +254,14 @@ fn save_async(img: snapling_win::Image, app: String, kind: &'static str) {
                     path.display(),
                     t0.elapsed().as_millis()
                 );
-                let entry = history::Entry {
-                    time: history::time_string(stamp),
-                    path: path.to_string_lossy().to_string(),
-                    width: img.width,
-                    height: img.height,
-                    app,
-                    kind: kind.into(),
-                    text: String::new(),
-                };
+                let entry = history::Entry::new(
+                    history::time_string(stamp),
+                    &path.to_string_lossy(),
+                    (img.width, img.height),
+                    &app,
+                    kind,
+                    "",
+                );
                 if let Err(e) = history::append(&history_file(), &entry) {
                     warn!("history: {e}");
                 }
@@ -348,15 +347,14 @@ fn open_shots_folder() {
 
 /// OCR without a saved file still lands in the history: its text can be searched and copied.
 fn remember_text(img: &snapling_win::Image, text: &str) {
-    let entry = history::Entry {
-        time: history::time_string(snapling_win::local_stamp()),
-        path: String::new(),
-        width: img.width,
-        height: img.height,
-        app: String::new(),
-        kind: "ocr".into(),
-        text: text.to_string(),
-    };
+    let entry = history::Entry::new(
+        history::time_string(snapling_win::local_stamp()),
+        "",
+        (img.width, img.height),
+        "",
+        "ocr",
+        text,
+    );
     if let Err(e) = history::append(&history_file(), &entry) {
         warn!("history: {e}");
     }
@@ -390,7 +388,8 @@ fn read_text(img: &snapling_win::Image, lang: &str, paddle: bool) -> Result<Stri
             return windows();
         }
         info!("model download: {}", engine::FOLDER);
-        engine::download(&models)?;
+        let proxy = snapling_win::secret::get(DEEPL_PROXY);
+        engine::download(&models, proxy.as_deref())?;
     }
     engine::recognize(&models, &img.bgra, img.width, img.height)
 }
@@ -445,7 +444,7 @@ fn text_window(text: &str, mode: &str) {
 
 /// Clipboard and models folder for the translation window process.
 pub fn text_hooks() -> crate::translate_ui::Hooks {
-    let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml")).unwrap_or_default();
+    let cfg = Config::load_or_create(&crate::ui::config_path()).unwrap_or_default();
     crate::translate_ui::Hooks {
         copy_text: snapling_win::copy_text,
         warn: snapling_win::warn,
@@ -488,15 +487,14 @@ fn open_editor(img: snapling_win::Image, app: String) {
 }
 
 fn remember_edit(path: &Path, width: u32, height: u32, app: &str) {
-    let entry = history::Entry {
-        time: history::time_string(snapling_win::local_stamp()),
-        path: path.to_string_lossy().to_string(),
-        width,
-        height,
-        app: app.into(),
-        kind: "edit".into(),
-        text: String::new(),
-    };
+    let entry = history::Entry::new(
+        history::time_string(snapling_win::local_stamp()),
+        &path.to_string_lossy(),
+        (width, height),
+        app,
+        "edit",
+        "",
+    );
     let _ = history::append(&history_file(), &entry);
 }
 
@@ -513,7 +511,7 @@ pub fn editor_hooks() -> crate::editor::Hooks {
             })
         },
         save: |bgra, w, h, app| {
-            let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"))?.save;
+            let cfg = Config::load_or_create(&crate::ui::config_path())?.save;
             let stamp = snapling_win::local_stamp();
             let dir = storage::prepare_dir(&save_dir(&cfg)?)?;
             let name = storage::render_name(&cfg.name, stamp, app);
@@ -522,7 +520,7 @@ pub fn editor_hooks() -> crate::editor::Hooks {
             Ok(path)
         },
         save_as: |bgra, w, h, app| {
-            let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"))?.save;
+            let cfg = Config::load_or_create(&crate::ui::config_path())?.save;
             let name = storage::render_name(&cfg.name, snapling_win::local_stamp(), app);
             let name = name.file_name().unwrap_or_default().to_string_lossy();
             let Some(path) = snapling_win::save_file_dialog(&name) else {
@@ -541,7 +539,7 @@ pub fn editor_hooks() -> crate::editor::Hooks {
             Ok(Some(saved))
         },
         text: |bgra, width, height| {
-            if let Ok(cfg) = Config::load_or_create(&app_dir("APPDATA").join("config.toml")) {
+            if let Ok(cfg) = Config::load_or_create(&crate::ui::config_path()) {
                 OCR_LANG.with(|l| *l.borrow_mut() = cfg.ocr.language.trim().to_string());
             }
             translate(snapling_win::Image {
@@ -666,12 +664,12 @@ pub fn history_hooks() -> crate::history_ui::Hooks {
             started.map(|_| ()).map_err(|e| e.to_string())
         },
         recognize: |path| {
-            let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"))?;
+            let cfg = Config::load_or_create(&crate::ui::config_path())?;
             let paddle = cfg.ocr.engine == Engine::Paddle;
             read_text(&load_image(path)?, cfg.ocr.language.trim(), paddle)
         },
         open_folder: || {
-            let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"));
+            let cfg = Config::load_or_create(&crate::ui::config_path());
             match cfg.and_then(|c| storage::prepare_dir(&save_dir(&c.save)?)) {
                 Ok(d) => open_path(&d),
                 Err(e) => snapling_win::warn(&e),
@@ -785,7 +783,7 @@ fn record_path(app: &str, extension: &str) -> Result<PathBuf, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    Ok(path.with_extension(extension))
+    Ok(storage::unique(path.with_extension(extension)))
 }
 
 fn area_of(img: &snapling_win::Image) -> Rect {
@@ -840,15 +838,14 @@ fn finish_jobs() {
         match run.join() {
             Ok(done) => {
                 info!("recorded {} s: {}", done.seconds, done.path.display());
-                let entry = history::Entry {
-                    time: history::time_string(snapling_win::local_stamp()),
-                    path: done.path.to_string_lossy().to_string(),
-                    width: done.last.width,
-                    height: done.last.height,
-                    app: app.clone(),
-                    kind: "record".into(),
-                    text: String::new(),
-                };
+                let entry = history::Entry::new(
+                    history::time_string(snapling_win::local_stamp()),
+                    &done.path.to_string_lossy(),
+                    (done.last.width, done.last.height),
+                    &app,
+                    "record",
+                    "",
+                );
                 if let Err(e) = history::append(&history_file(), &entry) {
                     warn!("history: {e}");
                 }
@@ -1131,6 +1128,7 @@ pub fn run() {
         error!("recording init: {e}");
     }
     apply_config(&cfg);
+    let _ = std::fs::remove_dir_all(models_dir().join("update"));
     let now = history::time_string(snapling_win::local_stamp());
     match history::prune(&history_file(), &now, cfg.history.keep_days) {
         Ok(old) if old.is_empty() => {}
@@ -1253,6 +1251,12 @@ pub fn run() {
             Some(MenuIcon::Quit) => unsafe { PostQuitMessage(0) },
             None => {}
         }
+    }
+    let running = RECORDING.with(|r| r.borrow_mut().take());
+    if let Some((run, _)) = running {
+        run.stop();
+        // An MP4 without its end is unreadable.
+        let _ = run.join();
     }
     info!("exit");
 }

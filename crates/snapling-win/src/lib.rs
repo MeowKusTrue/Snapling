@@ -610,6 +610,16 @@ pub(crate) fn dib_header(width: u32, height: i32) -> BITMAPINFOHEADER {
     }
 }
 
+/// Client coordinates of a mouse message.
+pub(crate) fn lparam_point(
+    lp: windows::Win32::Foundation::LPARAM,
+) -> snapling_core::selection::Point {
+    snapling_core::selection::Point {
+        x: (lp.0 & 0xFFFF) as u16 as i16 as i32,
+        y: ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
+    }
+}
+
 /// All monitors as one image (virtual screen), GDI BitBlt.
 /// ponytail: GDI gives black frames for exclusive-fullscreen games; WGC/DXGI in stage 3.
 pub fn capture_virtual_screen() -> Result<Image, String> {

@@ -15,7 +15,7 @@ use snapling_unix as unix;
 use std::path::{Path, PathBuf};
 
 fn config() -> Config {
-    Config::load_or_create(&app_dir("APPDATA").join("config.toml")).unwrap_or_default()
+    Config::load_or_create(&crate::ui::config_path()).unwrap_or_default()
 }
 
 fn history_file() -> PathBuf {
@@ -72,15 +72,14 @@ fn stamp() -> Stamp {
 }
 
 fn remember(path: &Path, width: u32, height: u32, kind: &str, text: &str) {
-    let entry = history::Entry {
-        time: history::time_string(stamp()),
-        path: path.to_string_lossy().to_string(),
-        width,
-        height,
-        app: String::new(),
-        kind: kind.into(),
-        text: text.into(),
-    };
+    let entry = history::Entry::new(
+        history::time_string(stamp()),
+        &path.to_string_lossy(),
+        (width, height),
+        "",
+        kind,
+        text,
+    );
     let _ = history::append(&history_file(), &entry);
 }
 
@@ -202,7 +201,7 @@ fn read_text(bgra: &[u8], width: u32, height: u32) -> Result<String, String> {
         if !unix::ask(&q) {
             return Ok(String::new());
         }
-        paddle::download(&models)?;
+        paddle::download(&models, unix::secret_get(PROXY).as_deref())?;
     }
     paddle::recognize(&models, bgra, width, height)
 }
@@ -250,8 +249,11 @@ fn start_recording(cfg: &Config, cap: &unix::Capture, img: &Shot) -> Result<(), 
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let (video, gif) = match cfg.record.format {
-        RecordFormat::Mp4 => (path.with_extension("mp4"), None),
-        RecordFormat::Gif => (temp_file("mp4")?, Some(path.with_extension("gif"))),
+        RecordFormat::Mp4 => (storage::unique(path.with_extension("mp4")), None),
+        RecordFormat::Gif => (
+            temp_file("mp4")?,
+            Some(storage::unique(path.with_extension("gif"))),
+        ),
     };
     unix::start_recording(
         area_of(img),
@@ -407,12 +409,15 @@ pub fn run_tray() {
     if let Ok(old) = history::prune(&history_file(), &now, cfg.history.keep_days)
         && cfg.history.delete_files
     {
-        for e in old.iter().filter(|e| !e.path.is_empty()) {
-            let _ = std::fs::remove_file(&e.path);
-        }
+        let files: Vec<&str> = old
+            .iter()
+            .map(|e| e.path.as_str())
+            .filter(|p| !p.is_empty())
+            .collect();
+        unix::to_trash(&files);
     }
     if !cfg.ui.welcomed {
-        let path = app_dir("APPDATA").join("config.toml");
+        let path = crate::ui::config_path();
         let _ = Config::update(&path, "ui", "welcomed", true);
         if let Ok(exe) = std::env::current_exe() {
             let _ = std::process::Command::new(exe).arg("--welcome").spawn();

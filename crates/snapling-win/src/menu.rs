@@ -1,22 +1,20 @@
 //! Tray menu, `assets/design/TrayWindows.dc.html`: a layered popup in the tray process.
 //! It takes focus so that a click anywhere else closes it; drawing comes from `snapling-scene`.
 
-use crate::toast::{blit, under_cursor};
-use snapling_core::selection::Point;
+use crate::lparam_point;
+use crate::toast::{blit, helper_window, under_cursor};
 use snapling_scene::{MENU_SHADOW, MenuIcon, MenuRow, draw_menu, menu_at, menu_size};
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW, SW_HIDE,
-    SW_SHOW, SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos, ShowWindow, WA_INACTIVE,
-    WM_ACTIVATE, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    DefWindowProcW, HWND_TOPMOST, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SetForegroundWindow,
+    SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_RBUTTONUP, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 use windows::core::w;
 
@@ -39,36 +37,8 @@ thread_local! {
 }
 
 pub fn init() -> Result<(), String> {
-    unsafe {
-        let hinst = GetModuleHandleW(None).map_err(|e| e.to_string())?;
-        let class = w!("SnaplingMenu");
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            hInstance: hinst.into(),
-            lpszClassName: class,
-            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            ..Default::default()
-        };
-        if RegisterClassW(&wc) == 0 {
-            return Err("RegisterClassW".into());
-        }
-        let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            class,
-            w!("Snapling"),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            Some(hinst.into()),
-            None,
-        )
-        .map_err(|e| format!("CreateWindowExW: {e}"))?;
-        HWND_MENU.set(hwnd);
-    }
+    let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+    HWND_MENU.set(helper_window(w!("SnaplingMenu"), Some(wndproc), ex)?);
     Ok(())
 }
 
@@ -143,10 +113,7 @@ fn set_hover(hwnd: HWND, hover: Option<usize>) {
 }
 
 fn row_at(lp: LPARAM) -> Option<usize> {
-    let p = Point {
-        x: (lp.0 & 0xFFFF) as u16 as i16 as i32,
-        y: ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
-    };
+    let p = lparam_point(lp);
     STATE.with(|s| {
         let s = s.borrow();
         let s = s.as_ref()?;

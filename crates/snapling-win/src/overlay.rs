@@ -8,12 +8,13 @@
 //! draw anywhere, before or after selecting, and committed shapes are baked into `annot`.
 //! L selects a freeform outline, V goes back to the rectangle.
 
-use crate::{Image, crop_bgra, dib_header, targets, uia};
+use crate::{Image, crop_bgra, dib_header, lparam_point, targets, uia};
 use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
 use snapling_core::i18n::t;
 use snapling_core::selection::{Corner, Hit, HoverChain, MIN_SELECTION_PX, Point, Rect, Selection};
 use snapling_scene::{
     Button, COLORS, Control, Draw, Hover, Layout, Loupe, SIZES, Scene, TOOLS, Target, Tool,
+    dim_into,
 };
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc::Sender;
@@ -40,7 +41,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 // Mockup: rgba(4,8,16,a) over the frame, as BGR; a in 1/256.
-const DIM: [u32; 3] = [16, 8, 4];
 const DIM_SELECT: u32 = 108;
 const DIM_PAINT: u32 = 56;
 
@@ -589,19 +589,6 @@ fn sync_dim(s: &mut State) {
     }
 }
 
-fn dim_into(dst: &mut [u8], src: &[u8], a: u32) {
-    let keep = 256 - a;
-    for (d, p) in dst
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(src.as_chunks::<4>().0)
-    {
-        let mix = |c: usize| ((u32::from(p[c]) * keep + DIM[c] * a) >> 8) as u8;
-        *d = [mix(0), mix(1), mix(2), 255];
-    }
-}
-
 /// Repaints the old and the new decoration areas only (`full`: everything). Shapes can be
 /// anywhere on screen, so drawing them repaints it all.
 // ponytail: a full blit per mouse move while drawing; track the shape's box if it ever lags.
@@ -713,13 +700,6 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
     }
     s.decor = lay.bounds;
     s.layout = lay;
-}
-
-fn lparam_point(lp: LPARAM) -> Point {
-    Point {
-        x: (lp.0 & 0xFFFF) as u16 as i16 as i32,
-        y: ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
-    }
 }
 
 fn shift_down() -> bool {

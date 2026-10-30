@@ -407,6 +407,18 @@ pub fn ask(text: &str) -> bool {
         || output("kdialog", &["--yesno", text]).is_ok()
 }
 
+/// Moves files to the trash; without a tool for that they stay where they are.
+pub fn to_trash(paths: &[&str]) {
+    for p in paths {
+        if cfg!(target_os = "macos") {
+            let script = format!("tell application \"Finder\" to delete POSIX file {p:?}");
+            let _ = output("osascript", &["-e", &script]);
+        } else {
+            let _ = output("gio", &["trash", p]);
+        }
+    }
+}
+
 pub fn open(path: &Path) {
     let tool = if cfg!(target_os = "macos") {
         "open"

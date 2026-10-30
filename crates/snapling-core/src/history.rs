@@ -20,6 +20,62 @@ pub struct Entry {
     pub text: String,
 }
 
+impl Entry {
+    pub fn new(
+        time: String,
+        path: &str,
+        size: (u32, u32),
+        app: &str,
+        kind: &str,
+        text: &str,
+    ) -> Self {
+        Self {
+            time,
+            path: path.into(),
+            width: size.0,
+            height: size.1,
+            app: app.into(),
+            kind: kind.into(),
+            text: text.into(),
+        }
+    }
+}
+
+const LOCK_TRIES: u32 = 400;
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
+/// A lock this old belongs to a process that died.
+const LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Runs `work` alone: the tray appends while the gallery rewrites the same file.
+fn locked<T>(file: &Path, work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let lock = file.with_extension("lock");
+    for _ in 0..LOCK_TRIES {
+        let taken = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock);
+        match taken {
+            Ok(_) => {
+                let res = work();
+                let _ = std::fs::remove_file(&lock);
+                return res;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => {
+                let age = std::fs::metadata(&lock)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok());
+                if age.is_some_and(|a| a > LOCK_STALE) {
+                    let _ = std::fs::remove_file(&lock);
+                }
+                std::thread::sleep(LOCK_WAIT);
+            }
+        }
+    }
+    work()
+}
+
 pub fn time_string(t: crate::storage::Stamp) -> String {
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
@@ -32,12 +88,14 @@ pub fn append(file: &Path, e: &Entry) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     }
     let line = serde_json::to_string(e).map_err(|err| err.to_string())?;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file)
-        .map_err(|err| format!("{}: {err}", file.display()))?;
-    writeln!(f, "{line}").map_err(|err| format!("{}: {err}", file.display()))
+    locked(file, || {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+            .map_err(|err| format!("{}: {err}", file.display()))?;
+        writeln!(f, "{line}").map_err(|err| format!("{}: {err}", file.display()))
+    })
 }
 
 /// All readable entries, oldest first; broken lines are skipped.
@@ -50,22 +108,25 @@ pub fn load(file: &Path) -> Vec<Entry> {
 }
 
 /// Drops the first equal entry. The image file stays on disk.
-// ponytail: rewrites the file; a capture finishing at that moment can lose its line. Fine by hand.
 pub fn remove(file: &Path, e: &Entry) -> Result<(), String> {
-    let mut entries = load(file);
-    if let Some(i) = entries.iter().position(|x| x == e) {
-        entries.remove(i);
-    }
-    write_all(file, &entries)
+    locked(file, || {
+        let mut entries = load(file);
+        if let Some(i) = entries.iter().position(|x| x == e) {
+            entries.remove(i);
+        }
+        write_all(file, &entries)
+    })
 }
 
 /// Keeps recognized text on the first equal entry, so the search finds it.
 pub fn set_text(file: &Path, e: &Entry, text: &str) -> Result<(), String> {
-    let mut entries = load(file);
-    if let Some(x) = entries.iter_mut().find(|x| *x == e) {
-        x.text = text.to_string();
-    }
-    write_all(file, &entries)
+    locked(file, || {
+        let mut entries = load(file);
+        if let Some(x) = entries.iter_mut().find(|x| *x == e) {
+            x.text = text.to_string();
+        }
+        write_all(file, &entries)
+    })
 }
 
 /// Drops entries older than `days`; 0 keeps everything. Returns the dropped ones.
@@ -73,13 +134,15 @@ pub fn prune(file: &Path, now: &str, days: u32) -> Result<Vec<Entry>, String> {
     if days == 0 {
         return Ok(Vec::new());
     }
-    let (old, kept): (Vec<Entry>, Vec<Entry>) = load(file)
-        .into_iter()
-        .partition(|e| days_ago(&e.time, now).is_some_and(|d| d > i64::from(days)));
-    if !old.is_empty() {
-        write_all(file, &kept)?;
-    }
-    Ok(old)
+    locked(file, || {
+        let (old, kept): (Vec<Entry>, Vec<Entry>) = load(file)
+            .into_iter()
+            .partition(|e| days_ago(&e.time, now).is_some_and(|d| d > i64::from(days)));
+        if !old.is_empty() {
+            write_all(file, &kept)?;
+        }
+        Ok(old)
+    })
 }
 
 fn write_all(file: &Path, entries: &[Entry]) -> Result<(), String> {
@@ -190,6 +253,25 @@ mod tests {
         assert!(prune(&f, now, 0).unwrap().is_empty());
         assert_eq!(prune(&f, now, 30).unwrap()[0].time, "2026-01-01T10:00:00");
         assert_eq!(load(&f).len(), 2, "a broken date stays");
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn writers_from_many_threads_lose_no_line() {
+        let f = std::env::temp_dir()
+            .join(format!("snapling-lock-{}", std::process::id()))
+            .join("history.jsonl");
+        let at = |n: u32| Entry::new(format!("t{n}"), "p", (1, 1), "", "region", "");
+        let a = (0..20).map(|n| {
+            let f = f.clone();
+            std::thread::spawn(move || append(&f, &at(n)).unwrap())
+        });
+        for t in a.collect::<Vec<_>>() {
+            t.join().unwrap();
+        }
+        remove(&f, &at(3)).unwrap();
+        assert_eq!(load(&f).len(), 19);
+        assert!(!f.with_extension("lock").exists());
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 

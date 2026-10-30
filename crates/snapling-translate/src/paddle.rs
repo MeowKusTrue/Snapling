@@ -45,12 +45,12 @@ pub fn installed(models: &Path) -> bool {
 }
 
 /// Called only after the user agreed.
-pub fn download(models: &Path) -> Result<(), String> {
+pub fn download(models: &Path, proxy: Option<&str>) -> Result<(), String> {
     let root = models.join(FOLDER);
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     for (file, remote, sha) in FILES {
         let url = format!("https://huggingface.co/{REPO}/resolve/main/{remote}");
-        fetch_file(&url, &root.join(file), sha)?;
+        fetch_file(&url, &root.join(file), sha, proxy)?;
     }
     Ok(())
 }

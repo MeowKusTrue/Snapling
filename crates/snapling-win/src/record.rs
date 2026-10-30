@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSinkWriter, MF_API_VERSION, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE,
     MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
@@ -26,7 +26,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
     VK_ESCAPE,
 };
-use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, SetCursorPos, WM_APP};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, PostThreadMessageW, SetCursorPos, WM_APP,
+};
 use windows::core::HSTRING;
 
 /// Sent to the tray thread when a recording or a long shot has something to hand over.
@@ -275,6 +277,14 @@ pub fn long_shot(
 }
 
 fn scroll_and_stitch(area: Rect) -> Result<Image, String> {
+    let mut home = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut home) };
+    let res = stitch_page(area);
+    let _ = unsafe { SetCursorPos(home.x, home.y) };
+    res
+}
+
+fn stitch_page(area: Rect) -> Result<Image, String> {
     let _ = unsafe { SetCursorPos(area.left + area.width / 2, area.top + area.height / 2) };
     std::thread::sleep(SCROLL_WAIT);
     let shot = || grab(area.left, area.top, area.width, area.height, false);

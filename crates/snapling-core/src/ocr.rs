@@ -1,5 +1,7 @@
 //! Screenshot preparation for text recognition.
 
+use std::borrow::Cow;
+
 /// How many times to enlarge a shot: engines lose small screen text, but big shots get slow.
 pub fn scale(width: u32, height: u32, max_side: u32) -> u32 {
     let pixels = u64::from(width) * u64::from(height);
@@ -22,13 +24,13 @@ pub fn resize(px: &[u8], width: u32, height: u32, w: u32, h: u32) -> Vec<u8> {
     }
 }
 
-/// BGRA copy `k` times larger.
-pub fn enlarge(bgra: &[u8], width: u32, height: u32, k: u32) -> (Vec<u8>, u32, u32) {
+/// BGRA `k` times larger; the same pixels when `k` is 1.
+pub fn enlarge(bgra: &[u8], width: u32, height: u32, k: u32) -> (Cow<'_, [u8]>, u32, u32) {
     if k < 2 {
-        return (bgra.to_vec(), width, height);
+        return (Cow::Borrowed(bgra), width, height);
     }
     let (w, h) = (width * k, height * k);
-    (resize(bgra, width, height, w, h), w, h)
+    (Cow::Owned(resize(bgra, width, height, w, h)), w, h)
 }
 
 #[cfg(test)]
@@ -44,6 +46,6 @@ mod tests {
         assert_eq!(scale(20_000, 20, 10_000), 1);
         let px = [10, 20, 30, 255].repeat(6);
         assert_eq!(enlarge(&px, 3, 2, 2).0.len(), 6 * 4 * 4);
-        assert_eq!(enlarge(&px, 3, 2, 1).0, px);
+        assert_eq!(*enlarge(&px, 3, 2, 1).0, *px);
     }
 }

@@ -1,22 +1,20 @@
 //! What shows during a recording or a long shot: a frame around the area and a pill with the
 //! time. Both stay out of the capture; a click on the pill stops the recording.
 
-use crate::toast::{blit, under_cursor};
+use crate::toast::{blit, helper_window, under_cursor};
 use snapling_core::i18n::{t, tf};
 use snapling_core::selection::Rect;
 use snapling_scene::{PILL_SIZE, draw_pill, draw_rec_frame};
 use std::cell::Cell;
 use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, RegisterClassW,
-    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowDisplayAffinity, SetWindowPos,
-    ShowWindow, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP,
+    DefWindowProcW, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
+    WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_TIMER,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 /// Frame thickness outside the area, so it never lands in a frame.
 const EDGE: i32 = 4;
@@ -30,44 +28,16 @@ thread_local! {
     static BEGIN: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-fn window(style: WINDOW_EX_STYLE) -> Result<HWND, String> {
-    unsafe {
-        let hinst = GetModuleHandleW(None).map_err(|e| e.to_string())?;
-        let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | style,
-            w!("SnaplingRecording"),
-            w!("Snapling"),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            Some(hinst.into()),
-            None,
-        )
-        .map_err(|e| format!("CreateWindowExW: {e}"))?;
-        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-        Ok(hwnd)
-    }
+fn window(class: PCWSTR, extra: WINDOW_EX_STYLE) -> Result<HWND, String> {
+    let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | extra;
+    let hwnd = helper_window(class, Some(wndproc), ex)?;
+    let _ = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) };
+    Ok(hwnd)
 }
 
 pub fn init() -> Result<(), String> {
-    unsafe {
-        let hinst = GetModuleHandleW(None).map_err(|e| e.to_string())?;
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            hInstance: hinst.into(),
-            lpszClassName: w!("SnaplingRecording"),
-            ..Default::default()
-        };
-        if RegisterClassW(&wc) == 0 {
-            return Err("RegisterClassW".into());
-        }
-    }
-    FRAME.set(window(WS_EX_TRANSPARENT)?);
-    PILL.set(window(WINDOW_EX_STYLE(0))?);
+    FRAME.set(window(w!("SnaplingRecordFrame"), WS_EX_TRANSPARENT)?);
+    PILL.set(window(w!("SnaplingRecordPill"), WINDOW_EX_STYLE(0))?);
     Ok(())
 }
 

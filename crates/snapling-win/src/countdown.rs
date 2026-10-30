@@ -1,16 +1,15 @@
 //! Seconds left before a delayed shot: a small click-through mark, never in the shot itself.
 
-use crate::toast::{blit, under_cursor};
+use crate::toast::{blit, helper_window, under_cursor};
 use snapling_scene::{COUNT_SIZE, draw_count};
 use std::cell::Cell;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, HWND_TOPMOST, KillTimer, PostThreadMessageW, RegisterClassW,
-    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowDisplayAffinity, SetWindowPos,
-    ShowWindow, WDA_EXCLUDEFROMCAPTURE, WM_HOTKEY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    DefWindowProcW, HWND_TOPMOST, KillTimer, PostThreadMessageW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
+    WDA_EXCLUDEFROMCAPTURE, WM_HOTKEY, WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT,
 };
 use windows::core::w;
 
@@ -22,36 +21,11 @@ thread_local! {
 }
 
 pub fn init() -> Result<(), String> {
-    unsafe {
-        let hinst = GetModuleHandleW(None).map_err(|e| e.to_string())?;
-        let class = w!("SnaplingCountdown");
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            hInstance: hinst.into(),
-            lpszClassName: class,
-            ..Default::default()
-        };
-        if RegisterClassW(&wc) == 0 {
-            return Err("RegisterClassW".into());
-        }
-        let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-            class,
-            w!("Snapling"),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            Some(hinst.into()),
-            None,
-        )
-        .map_err(|e| format!("CreateWindowExW: {e}"))?;
-        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-        HWND_COUNT.set(hwnd);
-    }
+    let ex =
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
+    let hwnd = helper_window(w!("SnaplingCountdown"), Some(wndproc), ex)?;
+    let _ = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) };
+    HWND_COUNT.set(hwnd);
     Ok(())
 }
 

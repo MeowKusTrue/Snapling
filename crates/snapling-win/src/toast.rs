@@ -2,7 +2,6 @@
 //! It never takes focus and leaves by itself; drawing comes from `snapling-scene`.
 
 use crate::{Image, dib_header};
-use snapling_core::selection::Point;
 use snapling_scene::{Toast, ToastAction, draw_toast, toast_at, toast_size};
 use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
@@ -21,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MOUSEMOVE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 const LIFE_MS: u32 = 5000;
 const MARGIN: f32 = 16.0;
@@ -42,12 +41,16 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
-pub fn init() -> Result<(), String> {
+/// A hidden popup of a class of its own, for the small windows of the tray process.
+pub(crate) fn helper_window(
+    class: PCWSTR,
+    proc: windows::Win32::UI::WindowsAndMessaging::WNDPROC,
+    ex: windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE,
+) -> Result<HWND, String> {
     unsafe {
         let hinst = GetModuleHandleW(None).map_err(|e| e.to_string())?;
-        let class = w!("SnaplingToast");
         let wc = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
+            lpfnWndProc: proc,
             hInstance: hinst.into(),
             lpszClassName: class,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
@@ -56,8 +59,8 @@ pub fn init() -> Result<(), String> {
         if RegisterClassW(&wc) == 0 {
             return Err("RegisterClassW".into());
         }
-        let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        CreateWindowExW(
+            ex,
             class,
             w!("Snapling"),
             WS_POPUP,
@@ -70,9 +73,13 @@ pub fn init() -> Result<(), String> {
             Some(hinst.into()),
             None,
         )
-        .map_err(|e| format!("CreateWindowExW: {e}"))?;
-        HWND_TOAST.set(hwnd);
+        .map_err(|e| format!("CreateWindowExW: {e}"))
     }
+}
+
+pub fn init() -> Result<(), String> {
+    let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    HWND_TOAST.set(helper_window(w!("SnaplingToast"), Some(wndproc), ex)?);
     Ok(())
 }
 
@@ -207,10 +214,7 @@ fn render(hwnd: HWND) {
 }
 
 fn action_at(lp: LPARAM) -> Option<ToastAction> {
-    let p = Point {
-        x: (lp.0 & 0xFFFF) as u16 as i16 as i32,
-        y: ((lp.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
-    };
+    let p = crate::lparam_point(lp);
     let scale = STATE.with(|s| s.borrow().as_ref().map(|s| s.scale))?;
     toast_at(scale, p)
 }

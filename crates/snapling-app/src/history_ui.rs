@@ -41,6 +41,8 @@ const CARD_W: f32 = 210.0;
 const GAP: f32 = 12.0;
 const PANEL_W: f32 = 312.0;
 const THUMB_SIDE: u32 = 480;
+/// Previews kept in the GPU, about 200 MB; the ones on screen come back on the next frame.
+const MAX_PICTURES: usize = 400;
 
 pub fn run(hooks: Hooks) {
     let options = eframe::NativeOptions {
@@ -201,6 +203,9 @@ impl History {
 
     fn poll(&mut self, ctx: &egui::Context) {
         while let Ok((path, img)) = self.got.try_recv() {
+            if self.tex.len() >= MAX_PICTURES {
+                self.tex.clear();
+            }
             let tex = img.map(|i| ctx.load_texture(&path, i, TextureOptions::LINEAR));
             self.tex.insert(path, tex);
         }

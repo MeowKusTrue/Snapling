@@ -359,23 +359,28 @@ pub fn download_setup(setup: &(String, String), dir: &Path) -> Result<PathBuf, S
     std::fs::create_dir_all(dir).map_err(err)?;
     let dest = dir.join(SETUP);
     let _ = std::fs::remove_file(&dest);
-    fetch_file(&setup.0, &dest, &want)?;
+    fetch_file(&setup.0, &dest, &want, None)?;
     Ok(dest)
 }
 
 /// Fetches the model files from Hugging Face, checking each against its pinned SHA-256.
 /// The only network access of the offline translator; called only after the user agreed.
-pub fn download(models: &Path, d: &Direction) -> Result<(), String> {
+pub fn download(models: &Path, d: &Direction, proxy: Option<&str>) -> Result<(), String> {
     let root = models.join(d.model());
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     for file in FILES {
-        fetch_file(&d.url(file), &root.join(file), d.sha256(file))?;
+        fetch_file(&d.url(file), &root.join(file), d.sha256(file), proxy)?;
     }
     Ok(())
 }
 
 /// Downloads `url` to `dest` unless it is there; a wrong SHA-256 discards the file.
-pub(crate) fn fetch_file(url: &str, dest: &Path, want: &str) -> Result<(), String> {
+pub(crate) fn fetch_file(
+    url: &str,
+    dest: &Path,
+    want: &str,
+    proxy: Option<&str>,
+) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
     if dest.is_file() {
@@ -386,7 +391,8 @@ pub(crate) fn fetch_file(url: &str, dest: &Path, want: &str) -> Result<(), Strin
         .map_or_else(String::new, |f| f.to_string_lossy().to_string());
     let part = dest.with_extension("part");
     let fetch = || -> Result<(), String> {
-        let resp = agent_for(None, None)
+        let via = proxy.map(parse_proxy).transpose()?;
+        let resp = agent_for(via, None)
             .get(url)
             .call()
             .map_err(|e| format!("{file}: {e}"))?;
@@ -715,7 +721,7 @@ Cancel",
             let mut text = text.to_string();
             let t0 = std::time::Instant::now();
             for d in route(from, to) {
-                download(&models, d).unwrap();
+                download(&models, d, None).unwrap();
                 text = Model::load(&models, d).unwrap().translate(&text).unwrap();
             }
             println!("{from}-{to} {:?}: {text}", t0.elapsed());

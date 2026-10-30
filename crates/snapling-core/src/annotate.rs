@@ -4,7 +4,7 @@
 
 pub use ab_glyph::FontRef;
 use ab_glyph::{Font, OutlineCurve, ScaleFont};
-use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Rect, Stroke, Transform};
+use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Rect, Stroke, Transform};
 pub use tiny_skia::{Pixmap, PixmapMut};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -15,7 +15,7 @@ pub struct Pt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
-    Arrow(Pt, Pt),
+    Arrow(Pt, Pt, Head),
     Line(Pt, Pt),
     Rect(Pt, Pt),
     Ellipse(Pt, Pt),
@@ -29,6 +29,17 @@ pub enum Kind {
     Pixelate(Pt, Pt),
     /// Brush stroke that hides what is under it.
     Blur(Vec<Pt>, BlurStyle),
+}
+
+/// Arrow end, «Наконечник» in the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Head {
+    #[default]
+    Sharp,
+    /// Open chevron with round ends.
+    Soft,
+    /// Heads on both ends.
+    Double,
 }
 
 /// Brush blur: «cubes» (pixelate, irreversible) or Gaussian; strength 0..=2.
@@ -86,6 +97,12 @@ impl History {
         }
     }
 
+    /// Undo point before edits made directly on `doc` (dragging, sliders).
+    pub fn snapshot(&mut self) {
+        self.undo.push(self.doc.clone());
+        self.redo.clear();
+    }
+
     pub fn push(&mut self, el: Element) {
         if !tiny(&el) {
             self.change(|d| d.elements.push(el));
@@ -134,7 +151,7 @@ impl History {
 fn tiny(e: &Element) -> bool {
     let short = |a: Pt, b: Pt| (a.x - b.x).abs() < 3.0 && (a.y - b.y).abs() < 3.0;
     match &e.kind {
-        Kind::Arrow(a, b) | Kind::Line(a, b) => short(*a, *b),
+        Kind::Arrow(a, b, _) | Kind::Line(a, b) => short(*a, *b),
         Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
             (a.x - b.x).abs() < 3.0 || (a.y - b.y).abs() < 3.0
         }
@@ -148,7 +165,7 @@ fn tiny(e: &Element) -> bool {
 /// Strokes skip points closer than `min_step` (image px) to keep them light.
 pub fn drag_to(kind: &mut Kind, p: Pt, shift: bool, min_step: f32) {
     match kind {
-        Kind::Arrow(a, b) | Kind::Line(a, b) => *b = if shift { snap45(*a, p) } else { p },
+        Kind::Arrow(a, b, _) | Kind::Line(a, b) => *b = if shift { snap45(*a, p) } else { p },
         Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
             *b = if shift { square(*a, p) } else { p }
         }
@@ -179,6 +196,95 @@ fn square(a: Pt, p: Pt) -> Pt {
     Pt {
         x: a.x + s * (p.x - a.x).signum(),
         y: a.y + s * (p.y - a.y).signum(),
+    }
+}
+
+/// Corners of the box around the element's points, widened by its stroke.
+pub fn bounds(e: &Element) -> (Pt, Pt) {
+    let (pts, pad): (Vec<Pt>, f32) = match &e.kind {
+        Kind::Arrow(a, b, _) => (vec![*a, *b], arrow_head_len(e.size)),
+        Kind::Line(a, b) | Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
+            (vec![*a, *b], e.size)
+        }
+        Kind::Pen(p) => (p.clone(), e.size),
+        Kind::Marker(p) => (p.clone(), marker_width(e.size) / 2.0),
+        Kind::Blur(p, _) => (p.clone(), blur_width(e.size) / 2.0),
+        Kind::Text(at, s) => {
+            let (w, h) = text_size(s, text_px(e.size));
+            let end = Pt {
+                x: at.x + w,
+                y: at.y + h,
+            };
+            (vec![*at, end], 2.0)
+        }
+        Kind::Step(c, n) => (vec![*c], step_radius(e.size, *n)),
+    };
+    let fold =
+        |f: fn(f32, f32) -> f32, g: fn(&Pt) -> f32, init: f32| pts.iter().map(g).fold(init, f);
+    (
+        Pt {
+            x: fold(f32::min, |p| p.x, f32::MAX) - pad,
+            y: fold(f32::min, |p| p.y, f32::MAX) - pad,
+        },
+        Pt {
+            x: fold(f32::max, |p| p.x, f32::MIN) + pad,
+            y: fold(f32::max, |p| p.y, f32::MIN) + pad,
+        },
+    )
+}
+
+/// The element under `p`, topmost first; a few pixels of slack.
+pub fn pick(doc: &Doc, p: Pt) -> Option<usize> {
+    doc.elements.iter().rposition(|e| {
+        let (a, b) = bounds(e);
+        p.x >= a.x - 4.0 && p.x <= b.x + 4.0 && p.y >= a.y - 4.0 && p.y <= b.y + 4.0
+    })
+}
+
+pub fn translate(kind: &mut Kind, dx: f32, dy: f32) {
+    let mv = |p: &mut Pt| {
+        p.x += dx;
+        p.y += dy;
+    };
+    match kind {
+        Kind::Arrow(a, b, _)
+        | Kind::Line(a, b)
+        | Kind::Rect(a, b)
+        | Kind::Ellipse(a, b)
+        | Kind::Pixelate(a, b) => {
+            mv(a);
+            mv(b);
+        }
+        Kind::Pen(p) | Kind::Marker(p) | Kind::Blur(p, _) => p.iter_mut().for_each(mv),
+        Kind::Text(a, _) | Kind::Step(a, _) => mv(a),
+    }
+}
+
+/// Closed outline through `pts`.
+pub fn polygon(pts: &[Pt]) -> Option<tiny_skia::Path> {
+    let (first, rest) = pts.split_first()?;
+    let mut pb = PathBuilder::new();
+    pb.move_to(first.x, first.y);
+    for p in rest {
+        pb.line_to(p.x, p.y);
+    }
+    pb.close();
+    pb.finish()
+}
+
+/// Makes everything outside the polygon fully transparent (BGRA, points in image pixels).
+// ponytail: hard edge. A soft one needs premultiplied BGRA in every consumer of the image.
+pub fn cut_polygon(bgra: &mut [u8], w: u32, h: u32, pts: &[Pt]) {
+    let Some(mut mask) = Mask::new(w, h) else {
+        return;
+    };
+    if let Some(path) = polygon(pts) {
+        mask.fill_path(&path, FillRule::Winding, false, Transform::identity());
+    }
+    for (px, m) in bgra.as_chunks_mut::<4>().0.iter_mut().zip(mask.data()) {
+        if *m == 0 {
+            *px = [0; 4];
+        }
     }
 }
 
@@ -538,23 +644,34 @@ pub fn draw(pm: &mut PixmapMut<'_>, e: &Element) {
                 pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
             }
         }
-        Kind::Arrow(a, b) => {
-            let [tip, l, r] = arrow_head(*a, *b, e.size);
-            let base = Pt {
-                x: (l.x + r.x) / 2.0,
-                y: (l.y + r.y) / 2.0,
+        Kind::Arrow(a, b, head) => {
+            let mut filled = |tail: Pt, tip: Pt| {
+                let [t, l, r] = arrow_head(tail, tip, e.size);
+                if let Some(p) = polygon(&[t, l, r]) {
+                    pm.fill_path(&p, &solid, FillRule::Winding, id, None);
+                    pm.stroke_path(&p, &solid, &stroke(e.size * 0.5), id, None);
+                }
+                Pt {
+                    x: (l.x + r.x) / 2.0,
+                    y: (l.y + r.y) / 2.0,
+                }
             };
-            if let Some(p) = polyline(&[*a, base]) {
+            let (from, to) = match head {
+                Head::Sharp => (*a, filled(*a, *b)),
+                Head::Double => {
+                    let end = filled(*a, *b);
+                    (filled(*b, *a), end)
+                }
+                Head::Soft => (*a, *b),
+            };
+            if let Some(p) = polyline(&[from, to]) {
                 pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
             }
-            let mut pb = PathBuilder::new();
-            pb.move_to(tip.x, tip.y);
-            pb.line_to(l.x, l.y);
-            pb.line_to(r.x, r.y);
-            pb.close();
-            if let Some(p) = pb.finish() {
-                pm.fill_path(&p, &solid, FillRule::Winding, id, None);
-                pm.stroke_path(&p, &solid, &stroke(e.size * 0.5), id, None);
+            if *head == Head::Soft {
+                let [tip, l, r] = arrow_head(*a, *b, e.size);
+                if let Some(p) = polyline(&[l, tip, r]) {
+                    pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
+                }
             }
         }
         Kind::Rect(a, b) => {
@@ -654,7 +771,7 @@ pub fn export(base: &Pixmap, doc: &Doc) -> (Vec<u8>, u32, u32) {
     for y in y0..y1 {
         let row = &data[((y * w + x0) * 4) as usize..((y * w + x1) * 4) as usize];
         for px in row.as_chunks::<4>().0 {
-            out.extend_from_slice(&[px[2], px[1], px[0], 255]);
+            out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
         }
     }
     (out, x1 - x0, y1 - y0)
@@ -715,6 +832,44 @@ pub fn read_raw(path: &std::path::Path) -> Result<Raw, String> {
 }
 
 #[cfg(test)]
+mod cut_tests {
+    use super::*;
+
+    #[test]
+    fn cut_polygon_clears_outside_only() {
+        let (w, h) = (20u32, 20u32);
+        let mut px = vec![200u8; (w * h * 4) as usize];
+        let pt = |x, y| Pt { x, y };
+        let pts = [pt(5.0, 5.0), pt(15.0, 5.0), pt(15.0, 15.0), pt(5.0, 15.0)];
+        cut_polygon(&mut px, w, h, &pts);
+        let at = |x: u32, y: u32| px[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(at(10, 10), 200);
+        assert_eq!(at(1, 1), 0);
+        assert_eq!(at(18, 10), 0);
+    }
+
+    #[test]
+    fn pick_takes_topmost_and_translate_moves_every_point() {
+        let mut doc = Doc::default();
+        let el = |kind| Element {
+            kind,
+            color: [1, 2, 3],
+            size: 4.0,
+        };
+        let (a, b) = (Pt { x: 10.0, y: 10.0 }, Pt { x: 50.0, y: 50.0 });
+        doc.elements.push(el(Kind::Rect(a, b)));
+        doc.elements.push(el(Kind::Line(a, b)));
+        assert_eq!(pick(&doc, Pt { x: 30.0, y: 30.0 }), Some(1));
+        assert_eq!(pick(&doc, Pt { x: 90.0, y: 90.0 }), None);
+        translate(&mut doc.elements[0].kind, 5.0, -5.0);
+        assert_eq!(
+            doc.elements[0].kind,
+            Kind::Rect(Pt { x: 15.0, y: 5.0 }, Pt { x: 55.0, y: 45.0 })
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -768,7 +923,7 @@ mod tests {
         let b = base();
         for kind in [
             Kind::Line(p(10.0, 40.0), p(110.0, 40.0)),
-            Kind::Arrow(p(10.0, 40.0), p(110.0, 40.0)),
+            Kind::Arrow(p(10.0, 40.0), p(110.0, 40.0), Head::Sharp),
             Kind::Rect(p(20.0, 20.0), p(100.0, 60.0)),
             Kind::Pen(vec![p(10.0, 40.0), p(60.0, 40.0), p(110.0, 40.0)]),
         ] {

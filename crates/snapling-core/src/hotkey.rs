@@ -21,6 +21,15 @@ const NAMED: &[&str] = &[
     "ScrollLock",
 ];
 
+/// Every key a hotkey can use, canonical spelling.
+pub fn key_names() -> impl Iterator<Item = String> {
+    let letters = ('A'..='Z').chain('0'..='9').map(String::from);
+    let fkeys = (1..=24).map(|n| format!("F{n}"));
+    letters
+        .chain(fkeys)
+        .chain(NAMED.iter().map(|n| n.to_string()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Hotkey {
     pub ctrl: bool,

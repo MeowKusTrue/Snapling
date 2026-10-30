@@ -3369,9 +3369,12 @@ version = "0.0.1"
 dependencies = [
  "eframe",
  "egui-phosphor",
+ "raw-window-handle",
  "snapling-core",
+ "snapling-scene",
  "snapling-translate",
  "snapling-win",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "tray-icon",

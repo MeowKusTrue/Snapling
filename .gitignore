@@ -1,5 +1,8 @@
 /target
 /vendor/
+/assets/sounds/raw/
+/assets/sounds/candidates/
+/assets/sounds/sets/
 *.log
 .env
 .env.*
@@ -8,3 +11,4 @@
 *.pfx
 *.p12
 *.zip
+/assets/sounds/*.json

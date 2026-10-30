@@ -1,4 +1,5 @@
-use snapling_core::config::{Action, Config, Save, SoundCfg};
+use crate::app_dir;
+use snapling_core::config::{Action, Config, Format, Save, SoundCfg};
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::selection::Rect;
 use snapling_core::sound::{self, Sound};
@@ -26,6 +27,29 @@ thread_local! {
     static SAVE: RefCell<Option<(PathBuf, Save)>> = const { RefCell::new(None) };
 }
 
+/// Tray windows: at most one of each.
+#[derive(Default)]
+struct Window(Option<std::process::Child>);
+
+impl Window {
+    fn open(&mut self, flag: &str) {
+        if let Some(c) = &mut self.0
+            && matches!(c.try_wait(), Ok(None))
+        {
+            return;
+        }
+        let started = std::env::current_exe()
+            .and_then(|exe| std::process::Command::new(exe).arg(flag).spawn());
+        match started {
+            Ok(c) => self.0 = Some(c),
+            Err(e) => {
+                error!("{flag}: {e}");
+                snapling_win::warn(&format!("Не удалось открыть окно.\n{e}"));
+            }
+        }
+    }
+}
+
 /// Set by the background saver.
 static LAST_SAVED: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -36,8 +60,14 @@ static SOUND: Mutex<Option<(SoundCfg, Wavs)>> = Mutex::new(None);
 thread_local! {
     /// `[capture] copy`: clipboard for hotkey captures (Enter in the overlay always copies).
     static COPY_ON_CAPTURE: Cell<bool> = const { Cell::new(true) };
+    /// The language problem check ran at least once.
+    static CHECKED_OCR: Cell<bool> = const { Cell::new(false) };
+    /// `[capture] open_editor`.
+    static EDITOR_ON_CAPTURE: Cell<bool> = const { Cell::new(false) };
     /// `[ocr] language`.
     static OCR_LANG: RefCell<String> = RefCell::new("auto".into());
+    /// What the last warning listed: the same problems are not shown again on every reload.
+    static REPORTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 fn play(s: Sound) {
@@ -55,26 +85,42 @@ fn play(s: Sound) {
     snapling_win::play_wav(wavs[i]);
 }
 
-fn apply_sound(cfg: &SoundCfg) {
+/// Returns problems with the user's own files; those events fall back to the pack.
+fn apply_sound(cfg: &SoundCfg) -> Vec<String> {
     let Ok(mut current) = SOUND.lock() else {
-        return;
+        return Vec::new();
     };
-    let volume_changed = current.as_ref().is_none_or(|(c, _)| c.volume != cfg.volume);
+    let same = |c: &SoundCfg| {
+        (
+            c.volume,
+            c.pack,
+            &c.capture_file,
+            &c.copy_file,
+            &c.error_file,
+        ) == (
+            cfg.volume,
+            cfg.pack,
+            &cfg.capture_file,
+            &cfg.copy_file,
+            &cfg.error_file,
+        )
+    };
+    let changed = current.as_ref().is_none_or(|(c, _)| !same(c));
+    let mut problems = Vec::new();
     let wavs = match current.take() {
-        Some((_, w)) if !volume_changed => w,
+        Some((_, w)) if !changed => w,
         // ponytail: leaks ~40 KB per volume change (PlaySound reads the buffer after returning);
         // free old buffers after PlaySound(NULL) if volume becomes a live slider.
-        _ => [Sound::Capture, Sound::Copy, Sound::Error]
-            .map(|s| &*Box::leak(sound::wav(s, cfg.volume).into_boxed_slice())),
+        _ => [Sound::Capture, Sound::Copy, Sound::Error].map(|s| {
+            let wav = sound::load(cfg, s).unwrap_or_else(|e| {
+                problems.push(format!("Звук: {e}"));
+                sound::wav(cfg.pack, s, cfg.volume)
+            });
+            &*Box::leak(wav.into_boxed_slice())
+        }),
     };
     *current = Some((cfg.clone(), wavs));
-}
-
-fn app_dir(env: &str) -> PathBuf {
-    std::env::var_os(env)
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Snapling")
+    problems
 }
 
 fn init_log() {
@@ -156,6 +202,7 @@ fn save_async(img: snapling_win::Image, app: String, kind: &'static str) {
                     height: img.height,
                     app,
                     kind: kind.into(),
+                    text: String::new(),
                 };
                 if let Err(e) = history::append(&history_file(), &entry) {
                     warn!("history: {e}");
@@ -185,8 +232,35 @@ fn deliver(
     if force_copy || COPY_ON_CAPTURE.get() {
         copy(&img, t0);
     }
-    if SAVE.with(|s| s.borrow().as_ref().is_some_and(|(_, c)| c.auto_save)) {
-        save_async(img, app, kind);
+    let auto_save = SAVE.with(|s| s.borrow().as_ref().is_some_and(|(_, c)| c.auto_save));
+    match (auto_save, EDITOR_ON_CAPTURE.get()) {
+        (true, true) => {
+            let copy = snapling_win::Image {
+                bgra: img.bgra.clone(),
+                ..img
+            };
+            save_async(copy, app.clone(), kind);
+            open_editor(img, app);
+        }
+        (true, false) => save_async(img, app, kind),
+        (false, true) => open_editor(img, app),
+        (false, false) => {}
+    }
+}
+
+/// OCR without a saved file still lands in the history: its text can be searched and copied.
+fn remember_text(img: &snapling_win::Image, text: &str) {
+    let entry = history::Entry {
+        time: history::time_string(snapling_win::local_stamp()),
+        path: String::new(),
+        width: img.width,
+        height: img.height,
+        app: String::new(),
+        kind: "ocr".into(),
+        text: text.to_string(),
+    };
+    if let Err(e) = history::append(&history_file(), &entry) {
+        warn!("history: {e}");
     }
 }
 
@@ -218,6 +292,7 @@ fn translate(img: snapling_win::Image) {
                 ));
             }
         };
+        remember_text(&img, &text);
         let dir = snapling_translate::detect(&text);
         let models = models_dir();
         if !snapling_translate::installed(&models, dir) {
@@ -310,6 +385,19 @@ fn open_editor(img: snapling_win::Image, app: String) {
     });
 }
 
+fn remember_edit(path: &Path, width: u32, height: u32, app: &str) {
+    let entry = history::Entry {
+        time: history::time_string(snapling_win::local_stamp()),
+        path: path.to_string_lossy().to_string(),
+        width,
+        height,
+        app: app.into(),
+        kind: "edit".into(),
+        text: String::new(),
+    };
+    let _ = history::append(&history_file(), &entry);
+}
+
 /// Clipboard and save folder for the editor process (reads config.toml itself).
 pub fn editor_hooks() -> crate::editor::Hooks {
     crate::editor::Hooks {
@@ -328,18 +416,101 @@ pub fn editor_hooks() -> crate::editor::Hooks {
             let dir = storage::prepare_dir(&save_dir(&cfg)?)?;
             let name = storage::render_name(&cfg.name, stamp, app);
             let path = storage::save_bgra(bgra, w, h, &dir, &name, cfg.format, cfg.jpeg_quality)?;
-            let entry = history::Entry {
-                time: history::time_string(stamp),
-                path: path.to_string_lossy().to_string(),
-                width: w,
-                height: h,
-                app: app.into(),
-                kind: "edit".into(),
-            };
-            let _ = history::append(&history_file(), &entry);
+            remember_edit(&path, w, h, app);
             Ok(path)
         },
+        save_as: |bgra, w, h, app| {
+            let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"))?.save;
+            let name = storage::render_name(&cfg.name, snapling_win::local_stamp(), app);
+            let name = name.file_name().unwrap_or_default().to_string_lossy();
+            let Some(path) = snapling_win::save_file_dialog(&name) else {
+                return Ok(None);
+            };
+            let ext = path.extension().unwrap_or_default().to_string_lossy();
+            let format = match ext.to_lowercase().as_str() {
+                "webp" => Format::Webp,
+                "jpg" | "jpeg" => Format::Jpeg,
+                _ => Format::Png,
+            };
+            let dir = path.parent().unwrap_or(Path::new("."));
+            let file = Path::new(path.file_name().unwrap_or_default());
+            let saved = storage::save_bgra(bgra, w, h, dir, file, format, cfg.jpeg_quality)?;
+            remember_edit(&saved, w, h, app);
+            Ok(Some(saved))
+        },
+        text: |bgra, width, height| {
+            if let Ok(cfg) = Config::load_or_create(&app_dir("APPDATA").join("config.toml")) {
+                OCR_LANG.with(|l| *l.borrow_mut() = cfg.ocr.language.trim().to_string());
+            }
+            translate(snapling_win::Image {
+                x: 0,
+                y: 0,
+                width,
+                height,
+                bgra: bgra.to_vec(),
+            });
+        },
         warn: snapling_win::warn,
+    }
+}
+
+fn open_path(path: &Path) {
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+}
+
+/// Registry, folder dialog and key polling for the settings process.
+pub fn settings_hooks() -> crate::settings::Hooks {
+    crate::settings::Hooks {
+        warn: snapling_win::warn,
+        autostart: snapling_win::autostart,
+        set_autostart: snapling_win::set_autostart,
+        pick_folder: snapling_win::pick_folder,
+        pressed_combo: snapling_win::pressed_combo,
+        pause_hotkeys: snapling_win::pause_hotkeys,
+        reserved: hotkey::reserved_on_windows,
+        open: open_path,
+        log: app_dir("LOCALAPPDATA").join("snapling.log"),
+        default_dir: || snapling_win::pictures_dir().map(|p| p.join("Snapling")),
+        pick_wav: snapling_win::pick_wav,
+        preview: |cfg, s| {
+            // PlaySound reads the buffer after returning; the window lives seconds to minutes.
+            snapling_win::play_wav(Box::leak(sound::load(cfg, s)?.into_boxed_slice()));
+            Ok(())
+        },
+    }
+}
+
+fn load_image(path: &Path) -> Result<snapling_win::Image, String> {
+    let (bgra, width, height) = storage::load_bgra(path)?;
+    Ok(snapling_win::Image {
+        x: 0,
+        y: 0,
+        width,
+        height,
+        bgra,
+    })
+}
+
+/// Clipboard, editor and folders for the history process.
+pub fn history_hooks() -> crate::history_ui::Hooks {
+    crate::history_ui::Hooks {
+        warn: snapling_win::warn,
+        file: history_file(),
+        now: || history::time_string(snapling_win::local_stamp()),
+        copy_image: |path| snapling_win::copy_image(&load_image(path)?),
+        copy_text: snapling_win::copy_text,
+        edit: |path, app| {
+            open_editor(load_image(path)?, app.to_string());
+            Ok(())
+        },
+        open: open_path,
+        open_folder: || {
+            let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"));
+            match cfg.and_then(|c| storage::prepare_dir(&save_dir(&c.save)?)) {
+                Ok(d) => open_path(&d),
+                Err(e) => snapling_win::warn(&e),
+            }
+        },
     }
 }
 
@@ -473,8 +644,10 @@ fn apply_save(cfg: &Config) -> Vec<String> {
 fn apply_config(cfg: &Config) {
     let mut problems = apply_hotkeys(cfg);
     problems.extend(apply_save(cfg));
-    apply_sound(&cfg.sound);
+    problems.extend(apply_sound(&cfg.sound));
     COPY_ON_CAPTURE.set(cfg.capture.copy);
+    EDITOR_ON_CAPTURE.set(cfg.capture.open_editor);
+    snapling_win::overlay::set_instant_copy(cfg.capture.instant_copy);
     apply_ocr(&cfg.ocr.language);
     let hide = cfg.privacy.hide_from_capture;
     match snapling_win::overlay::set_hidden_from_capture(hide) {
@@ -490,7 +663,10 @@ fn apply_config(cfg: &Config) {
 /// Checks the language off the UI thread: WinRT must not change this thread's COM apartment.
 fn apply_ocr(lang: &str) {
     let lang = lang.trim().to_string();
-    OCR_LANG.with(|l| *l.borrow_mut() = lang.clone());
+    let same = OCR_LANG.with(|l| l.replace(lang.clone())) == lang;
+    if same && CHECKED_OCR.replace(true) {
+        return;
+    }
     std::thread::spawn(move || {
         info!("ocr languages: {:?}", snapling_win::ocr::languages());
         if let Some(p) = snapling_win::ocr::language_problem(&lang) {
@@ -519,6 +695,7 @@ fn recognize(img: snapling_win::Image) {
                     text.chars().count(),
                     t0.elapsed().as_millis()
                 );
+                remember_text(&img, &text);
                 match snapling_win::copy_text(&text) {
                     Ok(()) => play(Sound::Copy),
                     Err(e) => {
@@ -568,6 +745,9 @@ fn apply_hotkeys(cfg: &Config) -> Vec<String> {
 }
 
 fn report(problems: &[String]) {
+    if REPORTED.with(|r| r.replace(problems.to_vec())) == problems {
+        return;
+    }
     if problems.is_empty() {
         return;
     }
@@ -576,7 +756,7 @@ fn report(problems: &[String]) {
     }
     let list: Vec<String> = problems.iter().map(|p| format!("• {p}")).collect();
     snapling_win::warn(&format!(
-        "Горячие клавиши:\n\n{}\n\nИзменить: меню в трее → «Настройки (config.toml)».",
+        "Настройки:\n\n{}\n\nИзменить: меню в трее → «Настройки».",
         list.join("\n")
     ));
 }
@@ -617,7 +797,8 @@ pub fn run() {
     let screen = MenuItem::new("Весь экран", true, None);
     let last = MenuItem::new("Последний снимок", true, None);
     let folder = MenuItem::new("Папка снимков", true, None);
-    let open_cfg = MenuItem::new("Настройки (config.toml)", true, None);
+    let history_item = MenuItem::new("История", true, None);
+    let settings_item = MenuItem::new("Настройки", true, None);
     let quit = MenuItem::new("Выход", true, None);
     let menu = Menu::new();
     let _ = menu.append_items(&[
@@ -625,8 +806,9 @@ pub fn run() {
         &screen,
         &PredefinedMenuItem::separator(),
         &last,
+        &history_item,
         &folder,
-        &open_cfg,
+        &settings_item,
         &PredefinedMenuItem::separator(),
         &quit,
     ]);
@@ -644,10 +826,13 @@ pub fn run() {
         }
     };
     unsafe { SetTimer(None, 0, CONFIG_POLL_MS, None) };
+    let mut settings_window = Window::default();
+    let mut history_window = Window::default();
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         match msg.message {
+            WM_HOTKEY if snapling_win::hotkeys_paused() => {}
             WM_HOTKEY => {
                 if let Some(a) = Action::ALL
                     .into_iter()
@@ -702,12 +887,14 @@ pub fn run() {
                         let _ = std::process::Command::new("explorer").arg(d).spawn();
                     }
                     Some(Err(e)) => snapling_win::warn(&e),
-                    None => snapling_win::warn(
-                        "Сохранение отключено — проверь [save] dir в config.toml.",
-                    ),
+                    None => {
+                        snapling_win::warn("Сохранение отключено — проверь папку в настройках.")
+                    }
                 }
-            } else if ev.id == open_cfg.id() {
-                let _ = std::process::Command::new("notepad").arg(&cfg_path).spawn();
+            } else if ev.id == settings_item.id() {
+                settings_window.open("--settings");
+            } else if ev.id == history_item.id() {
+                history_window.open("--history");
             } else if ev.id == quit.id() {
                 unsafe { PostQuitMessage(0) };
             }

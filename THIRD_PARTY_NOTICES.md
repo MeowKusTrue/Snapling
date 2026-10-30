@@ -52,3 +52,19 @@ Statically linked through the `ort` crate. © Microsoft Corporation, MIT License
 
 `assets/fonts`: Inter (© The Inter Project Authors) and JetBrains Mono (© The JetBrains Mono
 Project Authors), SIL Open Font License 1.1 — full texts in `assets/fonts/*-OFL.txt`.
+
+## Sounds
+
+The «Системный» pack in `assets/sounds/packs/` is made from the freedesktop sound theme
+(sound-theme-freedesktop 0.8), trimmed, converted to mono 48 kHz and leveled. Originals and the
+full credits are in `assets/sounds/system/`.
+
+- screen-capture: freesound user horsthorstensen, CC-BY-SA.
+  http://www.freesound.org/samplesViewSingle.php?id=72714
+- complete: Dr. Richard Boulanger et al, CC-BY 3.0 Unported.
+  http://www.archive.org/details/Berklee44v11
+- dialog-warning: Ivica Bukvic, CC-BY-SA.
+  http://gnome-look.org/content/show.php/%22Borealis%22+sound+theme?content=12584
+
+The changed versions of these three sounds are shared under the same licenses. The other packs are
+original to Snapling.

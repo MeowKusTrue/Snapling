@@ -4,12 +4,13 @@
 //! drag to select, Shift = square, Space = pan, corners resize, drag inside moves,
 //! arrows nudge (Shift ×10), Enter/C/double-click copy, S save, E editor, O text (OCR), R translate, Esc/right click cancel.
 //! Snapling additions: hover highlights the window/element under the cursor, click picks it,
-//! the wheel walks element levels (up = outer), and the selection can be annotated in place
-//! (tools 1–9, Ctrl+Z/Y) before it is copied: committed shapes are baked into `annot`.
+//! the wheel walks element levels (up = outer). The tool rail is always on screen: tools 1–9
+//! draw anywhere, before or after selecting, and committed shapes are baked into `annot`.
+//! L selects a freeform outline, V goes back to the rectangle.
 
 use crate::{Image, crop_bgra, dib_header, targets, uia};
-use snapling_core::annotate::{self, BlurStyle, Element, History, Kind, Pt};
-use snapling_core::selection::{Corner, Hit, HoverChain, Point, Rect, Selection};
+use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
+use snapling_core::selection::{Corner, Hit, HoverChain, MIN_SELECTION_PX, Point, Rect, Selection};
 use snapling_scene::{
     Button, COLORS, Control, Draw, Hover, Layout, SIZES, Scene, TOOLS, Target, Tool,
 };
@@ -37,8 +38,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
-// Mockup: rgba(4,8,16,.5) over the frame, as BGR.
+// Mockup: rgba(4,8,16,a) over the frame, as BGR; a in 1/256.
 const DIM: [u32; 3] = [16, 8, 4];
+const DIM_SELECT: u32 = 108;
+const DIM_PAINT: u32 = 56;
 
 type Done = Box<dyn FnOnce(Option<(Image, Outcome)>)>;
 
@@ -59,6 +62,9 @@ struct State {
     orig: HBITMAP,
     orig_bits: *const u8,
     dim: HBITMAP,
+    dim_bits: *mut u8,
+    /// Darkness `dim` was built with; `None` = rebuild, its annotations are stale.
+    dim_level: Option<u32>,
     /// The frame with committed annotations: what the selection shows and what is copied.
     annot: HBITMAP,
     annot_bits: *mut u8,
@@ -73,6 +79,15 @@ struct State {
     /// Exe name of the hovered window, for the hover pill.
     app: String,
     pen: Pen,
+    /// The press started a selection, so its release may finish one. A press on a rail
+    /// button must not pick the window under that button.
+    armed: bool,
+    /// Finished freeform outline; `sel` then holds its bounding box.
+    lasso: Vec<Pt>,
+    /// Outline being drawn.
+    stroke: Vec<Pt>,
+    /// Monitor of the tool rail.
+    rail: Rect,
     windows: Vec<(isize, Rect)>,
     monitors: Vec<Rect>,
     chain: HoverChain,
@@ -84,6 +99,8 @@ struct State {
 /// In-overlay editor state.
 struct Pen {
     tool: Option<Tool>,
+    /// Freeform selection instead of the rectangle.
+    lasso_mode: bool,
     color: [u8; 3],
     size: f32,
     blur: BlurStyle,
@@ -98,6 +115,7 @@ impl Default for Pen {
     fn default() -> Self {
         Self {
             tool: None,
+            lasso_mode: false,
             color: COLORS[0],
             size: SIZES[1],
             blur: BlurStyle::default(),
@@ -112,6 +130,8 @@ const WM_UIA: u32 = 0x8000 + 1;
 
 thread_local! {
     static HWND_OVERLAY: Cell<HWND> = Cell::new(HWND::default());
+    /// `[capture] instant_copy`.
+    static INSTANT: Cell<bool> = const { Cell::new(false) };
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     static UIA: RefCell<Option<Sender<uia::Request>>> = const { RefCell::new(None) };
 }
@@ -139,7 +159,7 @@ fn clip(r: Rect, to: Rect) -> Rect {
 /// Window → monitor fallback under `p`, plus a UIA request for the elements inside.
 /// Returns whether the highlighted rect changed.
 fn update_hover(s: &mut State, p: Point) -> bool {
-    if s.sel.confirmed() || s.sel.is_dragging() {
+    if s.sel.confirmed() || s.sel.is_dragging() || s.pen.tool.is_some() || s.pen.lasso_mode {
         return false;
     }
     let before = s.chain.current();
@@ -277,13 +297,6 @@ pub fn show(
     unsafe {
         std::ptr::copy_nonoverlapping(img.bgra.as_ptr(), orig_bits, len);
         std::ptr::copy_nonoverlapping(img.bgra.as_ptr(), annot_bits, len);
-        let dim = std::slice::from_raw_parts_mut(dim_bits, len);
-        for (i, (d, s)) in dim.iter_mut().zip(&img.bgra).enumerate() {
-            *d = match i % 4 {
-                3 => 255,
-                c => ((u32::from(*s) + DIM[c]) / 2) as u8,
-            };
-        }
     }
     let (x, y, w, h) = (img.x, img.y, img.width as i32, img.height as i32);
     let windows = targets::windows()
@@ -294,6 +307,14 @@ pub fn show(
         .into_iter()
         .map(|r| rect_from(r, (x, y)))
         .collect();
+    let mut cursor = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut cursor);
+    }
+    let mouse = Point {
+        x: cursor.x - x,
+        y: cursor.y - y,
+    };
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             origin: (x, y),
@@ -302,17 +323,23 @@ pub fn show(
             orig,
             orig_bits,
             dim,
+            dim_bits,
+            dim_level: None,
             back,
             annot,
             annot_bits,
             back_bits,
             sel: Selection::new(w, h),
-            mouse: Point::default(),
+            mouse,
             decor: None,
             layout: Layout::default(),
             hover_btn: None,
             app: String::new(),
             pen: Pen::default(),
+            armed: false,
+            lasso: Vec::new(),
+            stroke: Vec::new(),
+            rail: monitor_at((x, y), mouse).0,
             windows,
             monitors,
             chain: HoverChain::default(),
@@ -322,18 +349,7 @@ pub fn show(
         })
     });
     drop(img);
-    let mut cursor = POINT::default();
-    unsafe {
-        let _ = GetCursorPos(&mut cursor);
-    }
-    with(|s| {
-        s.mouse = Point {
-            x: cursor.x - x,
-            y: cursor.y - y,
-        };
-        let m = s.mouse;
-        update_hover(s, m);
-    });
+    with(|s| update_hover(s, mouse));
     unsafe {
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -360,7 +376,20 @@ fn finish(hwnd: HWND, out: Option<Outcome>) {
         s.sel.rect().filter(|_| s.sel.confirmed()).and_then(|r| {
             let len = s.width as usize * s.height as usize * 4;
             let src = unsafe { std::slice::from_raw_parts(s.annot_bits, len) };
-            crop_bgra(src, s.width, s.height, s.origin, r).map(|img| (img, out))
+            let mut img = crop_bgra(src, s.width, s.height, s.origin, r)?;
+            if !s.lasso.is_empty() {
+                let (dx, dy) = ((img.x - s.origin.0) as f32, (img.y - s.origin.1) as f32);
+                let pts: Vec<Pt> = s
+                    .lasso
+                    .iter()
+                    .map(|p| Pt {
+                        x: p.x - dx,
+                        y: p.y - dy,
+                    })
+                    .collect();
+                annotate::cut_polygon(&mut img.bgra, img.width, img.height, &pts);
+            }
+            Some((img, out))
         })
     } else {
         None
@@ -436,7 +465,9 @@ fn union(a: RECT, b: RECT) -> RECT {
 
 /// Scene for the current state; the caller lays it out and draws it.
 fn scene(s: &State) -> Scene<'_> {
-    let hovering = s.sel.rect().is_none() && !s.sel.is_dragging();
+    let drawing = !s.stroke.is_empty();
+    let free = s.pen.tool.is_none() && !s.pen.lasso_mode;
+    let hovering = s.sel.rect().is_none() && !s.sel.is_dragging() && free;
     let hover = hovering
         .then(|| s.chain.current())
         .flatten()
@@ -458,16 +489,20 @@ fn scene(s: &State) -> Scene<'_> {
             y: r.bottom() - 1,
         });
     let (monitor, scale) = monitor_at(s.origin, anchor);
+    let lasso = if drawing { &s.stroke } else { &s.lasso };
     Scene {
         scale,
         monitor,
         cursor_monitor: monitor_at(s.origin, s.mouse).0,
-        selection: s.sel.rect(),
-        confirmed: s.sel.confirmed(),
-        dragging: s.sel.is_dragging(),
+        selection: s.sel.rect().filter(|_| !drawing),
+        confirmed: s.sel.confirmed() && !drawing,
+        dragging: s.sel.is_dragging() || drawing,
         hover,
         hover_button: s.hover_btn,
-        tools: s.sel.confirmed().then(|| Draw {
+        tools: Some(Draw {
+            monitor: s.rail,
+            lasso_mode: s.pen.lasso_mode,
+            lasso: (!lasso.is_empty()).then_some(lasso.as_slice()),
             tool: s.pen.tool,
             color: s.pen.color,
             size: s.pen.size,
@@ -480,15 +515,55 @@ fn scene(s: &State) -> Scene<'_> {
     }
 }
 
-/// Repaints the old and the new decoration areas only (`full`: everything).
+fn dim_wanted(s: &State) -> u32 {
+    if s.sel.rect().is_none() && s.pen.tool.is_some() {
+        DIM_PAINT
+    } else {
+        DIM_SELECT
+    }
+}
+
+/// Rebuilds `dim` from `annot` when the darkness changed or shapes were committed.
+fn sync_dim(s: &mut State) {
+    let a = dim_wanted(s);
+    if s.dim_level == Some(a) {
+        return;
+    }
+    s.dim_level = Some(a);
+    let len = s.width as usize * s.height as usize * 4;
+    unsafe {
+        let _ = GdiFlush();
+        let src = std::slice::from_raw_parts(s.annot_bits, len);
+        let dst = std::slice::from_raw_parts_mut(s.dim_bits, len);
+        dim_into(dst, src, a);
+    }
+}
+
+fn dim_into(dst: &mut [u8], src: &[u8], a: u32) {
+    let keep = 256 - a;
+    for (d, p) in dst
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<4>().0)
+    {
+        let mix = |c: usize| ((u32::from(p[c]) * keep + DIM[c] * a) >> 8) as u8;
+        *d = [mix(0), mix(1), mix(2), 255];
+    }
+}
+
+/// Repaints the old and the new decoration areas only (`full`: everything). Shapes can be
+/// anywhere on screen, so drawing them repaints it all.
+// ponytail: a full blit per mouse move while drawing; track the shape's box if it ever lags.
 fn invalidate(hwnd: HWND, full: bool) {
     let areas = with(|s| {
         let new = snapling_scene::layout(&scene(s)).bounds;
-        (s.decor, new)
+        let wide = s.pen.live.is_some() || s.pen.typing.is_some();
+        (s.decor, new, wide || s.dim_level != Some(dim_wanted(s)))
     });
     unsafe {
         match areas {
-            Some((old, new)) if !full => {
+            Some((old, new, wide)) if !full && !wide => {
                 for r in [old, new].into_iter().flatten() {
                     let _ = InvalidateRect(Some(hwnd), Some(&to_rect(r)), false);
                 }
@@ -539,6 +614,7 @@ fn paint(hwnd: HWND) {
 /// then the dirty rect to the screen. The frame is re-blitted under every decoration so
 /// glass never blurs its own previous frame.
 unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
+    sync_dim(s);
     let sc = scene(s);
     let lay = snapling_scene::layout(&sc);
     let screen = RECT {
@@ -557,7 +633,12 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
         let old_back = SelectObject(back, s.back.into());
         let old_src = SelectObject(src, s.dim.into());
         blit(back, src, area);
-        if let Some(inter) = sc.selection.and_then(|r| intersect(to_rect(r), area)) {
+        let lasso = sc.tools.as_ref().and_then(|t| t.lasso);
+        if let Some(inter) = sc
+            .selection
+            .filter(|_| lasso.is_none())
+            .and_then(|r| intersect(to_rect(r), area))
+        {
             SelectObject(src, s.annot.into());
             blit(back, src, inter);
         }
@@ -565,6 +646,13 @@ unsafe fn draw(s: &mut State, hdc: HDC, clip: RECT) {
         let len = s.width as usize * s.height as usize * 4;
         let bits = std::slice::from_raw_parts_mut(s.back_bits, len);
         if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(bits, s.width, s.height) {
+            let frame = std::slice::from_raw_parts(s.annot_bits, len);
+            if let (Some(pts), Some(from)) = (
+                lasso,
+                tiny_skia::PixmapRef::from_bytes(frame, s.width, s.height),
+            ) {
+                snapling_scene::paint_region(&mut pm, from, pts);
+            }
             snapling_scene::draw(&mut pm, &sc, &lay);
         }
         blit(hdc, back, union(clip, area));
@@ -617,6 +705,7 @@ fn bake(s: &mut State) {
             }
         }
     }
+    s.dim_level = None;
 }
 
 fn commit(s: &mut State, el: Element) {
@@ -635,22 +724,51 @@ fn commit_text(s: &mut State) {
     }
 }
 
-/// Pointer in image coordinates, kept inside the selection: shapes outside it would be cut.
-fn pen_point(s: &State, p: Point) -> Pt {
-    let r = s.sel.rect().unwrap_or_default();
+/// Pointer in image coordinates.
+fn pen_point(p: Point) -> Pt {
     Pt {
-        x: p.x.clamp(r.left, r.right()) as f32,
-        y: p.y.clamp(r.top, r.bottom()) as f32,
+        x: p.x as f32,
+        y: p.y as f32,
     }
+}
+
+/// V or L: leaves the drawing tool and drops a freeform outline.
+fn set_mode(s: &mut State, lasso: bool) {
+    s.pen.tool = None;
+    s.pen.lasso_mode = lasso;
+    if lasso || !s.lasso.is_empty() {
+        s.lasso.clear();
+        s.sel = Selection::new(s.width as i32, s.height as i32);
+    }
+}
+
+/// Mouse released: the outline becomes the selection, a stray click changes nothing.
+fn close_lasso(s: &mut State) {
+    let pts = std::mem::take(&mut s.stroke);
+    let min = |f: fn(&Pt) -> f32| pts.iter().map(f).fold(f32::MAX, f32::min);
+    let max = |f: fn(&Pt) -> f32| pts.iter().map(f).fold(f32::MIN, f32::max);
+    let (x0, y0) = (min(|p| p.x) as i32, min(|p| p.y) as i32);
+    let (x1, y1) = (max(|p| p.x) as i32 + 1, max(|p| p.y) as i32 + 1);
+    if x1 - x0 < MIN_SELECTION_PX || y1 - y0 < MIN_SELECTION_PX {
+        return;
+    }
+    s.lasso = pts;
+    s.sel = Selection::new(s.width as i32, s.height as i32);
+    s.sel.set_rect(Rect {
+        left: x0,
+        top: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    });
 }
 
 /// Press with a drawing tool: starts a shape, places a number or opens the text caret.
 fn pen_down(s: &mut State, tool: Tool, p: Point) {
     commit_text(s);
-    let at = pen_point(s, p);
+    let at = pen_point(p);
     let pen = &s.pen;
     let kind = match tool {
-        Tool::Arrow => Kind::Arrow(at, at),
+        Tool::Arrow => Kind::Arrow(at, at, Head::Sharp),
         Tool::Line => Kind::Line(at, at),
         Tool::Rect => Kind::Rect(at, at),
         Tool::Ellipse => Kind::Ellipse(at, at),
@@ -680,6 +798,9 @@ fn control(hwnd: HWND, c: Control) {
         return act(hwnd, b);
     }
     with(|s| {
+        if matches!(c, Control::Select | Control::Lasso) {
+            return set_mode(s, c == Control::Lasso);
+        }
         let pen = &mut s.pen;
         match c {
             Control::Tool(t) => pen.tool = (pen.tool != Some(t)).then_some(t),
@@ -698,10 +819,16 @@ fn control(hwnd: HWND, c: Control) {
                     bake(s);
                 }
             }
-            Control::Action(_) => {}
+            Control::Action(_) | Control::Select | Control::Lasso => {}
         }
     });
-    invalidate(hwnd, false);
+    invalidate(
+        hwnd,
+        matches!(
+            c,
+            Control::Undo | Control::Redo | Control::Select | Control::Lasso
+        ),
+    );
 }
 
 fn set_cursor() {
@@ -717,14 +844,17 @@ fn set_cursor() {
         if button_at(s, p).is_some() {
             return IDC_HAND;
         }
-        let hit = s.sel.hit(p, handle_size(s, p));
-        match (s.pen.tool.filter(|_| s.sel.confirmed()), hit) {
+        let hit = if s.lasso.is_empty() {
+            s.sel.hit(p, handle_size(s, p))
+        } else {
+            Hit::Outside
+        };
+        match (s.pen.tool, hit) {
             (_, Hit::Corner(Corner::Nw | Corner::Se)) => IDC_SIZENWSE,
             (_, Hit::Corner(_)) => IDC_SIZENESW,
             (Some(Tool::Text), _) => IDC_IBEAM,
-            (Some(_), _) => IDC_CROSS,
-            (None, Hit::Inside) => IDC_SIZEALL,
-            (None, Hit::Outside) => IDC_CROSS,
+            (None, Hit::Inside) if !s.pen.lasso_mode => IDC_SIZEALL,
+            _ => IDC_CROSS,
         }
     })
     .unwrap_or(IDC_CROSS);
@@ -760,7 +890,7 @@ fn typing_key(hwnd: HWND, vk: u16) -> bool {
         }
         _ => {}
     });
-    invalidate(hwnd, false);
+    invalidate(hwnd, true);
     true
 }
 
@@ -792,13 +922,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     return Some(c);
                 }
                 let hs = handle_size(s, p);
-                if let Some(tool) = s.pen.tool.filter(|_| s.sel.confirmed())
-                    && !matches!(s.sel.hit(p, hs), Hit::Corner(_))
-                {
+                let corner = s.lasso.is_empty() && matches!(s.sel.hit(p, hs), Hit::Corner(_));
+                if let Some(tool) = s.pen.tool.filter(|_| !corner) {
                     pen_down(s, tool, p);
-                    return None;
+                } else if s.pen.lasso_mode && s.pen.tool.is_none() {
+                    s.stroke = vec![pen_point(p)];
+                } else {
+                    s.armed = true;
+                    s.sel.press(p, shift_down(), hs);
                 }
-                s.sel.press(p, shift_down(), hs);
                 None
             })
             .flatten();
@@ -814,10 +946,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             let p = lparam_point(lp);
             let repaint = with(|s| {
                 s.mouse = p;
-                if s.pen.live.is_some() {
-                    let at = pen_point(s, p);
-                    if let Some(el) = &mut s.pen.live {
-                        annotate::drag_to(&mut el.kind, at, shift_down(), 1.5);
+                let at = pen_point(p);
+                if let Some(el) = &mut s.pen.live {
+                    annotate::drag_to(&mut el.kind, at, shift_down(), 1.5);
+                    return Some(false);
+                }
+                if let Some(last) = s.stroke.last() {
+                    if (last.x - at.x).hypot(last.y - at.y) >= 2.0 {
+                        s.stroke.push(at);
                     }
                     return Some(false);
                 }
@@ -840,10 +976,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
         }
         WM_LBUTTONUP => {
-            with(|s| {
+            let selected = with(|s| {
                 if let Some(el) = s.pen.live.take() {
                     commit(s, el);
-                    return;
+                    return false;
+                }
+                if !s.stroke.is_empty() {
+                    close_lasso(s);
+                    return s.sel.confirmed();
+                }
+                if !std::mem::take(&mut s.armed) {
+                    return false;
                 }
                 s.sel.release();
                 // A click without a drag picks the highlighted window/element.
@@ -853,11 +996,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 {
                     s.sel.set_rect(r);
                 }
+                s.sel.confirmed()
             });
             unsafe {
                 let _ = ReleaseCapture();
             }
-            invalidate(hwnd, true);
+            if selected == Some(true) && INSTANT.get() {
+                finish(hwnd, Some(Outcome::Copy));
+            } else {
+                invalidate(hwnd, true);
+            }
         }
         WM_LBUTTONDBLCLK => {
             let p = lparam_point(lp);
@@ -868,7 +1016,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         WM_RBUTTONDOWN | WM_MBUTTONDOWN => finish(hwnd, None),
         WM_MOUSEWHEEL => {
             let outward = ((wp.0 >> 16) & 0xFFFF) as u16 as i16 > 0;
-            let changed = with(|s| !s.sel.confirmed() && s.chain.step(outward));
+            let changed = with(|s| {
+                !s.sel.confirmed()
+                    && s.pen.tool.is_none()
+                    && !s.pen.lasso_mode
+                    && s.chain.step(outward)
+            });
             if changed == Some(true) {
                 invalidate(hwnd, false);
             }
@@ -907,13 +1060,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         finish(hwnd, None);
                     }
                 }
-                v if down && confirmed && ctrl_down() && (v == 0x5A || v == 0x59) => {
+                v if down && ctrl_down() && (v == 0x5A || v == 0x59) => {
                     let undo = v == 0x5A && !shift_down();
                     control(hwnd, if undo { Control::Undo } else { Control::Redo });
                 }
-                v if down && confirmed && (0x31..=0x39).contains(&v) => {
+                v if down && (0x31..=0x39).contains(&v) => {
                     control(hwnd, Control::Tool(TOOLS[(v - 0x31) as usize]));
                 }
+                0x56 if down && !ctrl_down() => control(hwnd, Control::Select),
+                0x4C if down && !ctrl_down() => control(hwnd, Control::Lasso),
                 v if down && confirmed && v == VK_RETURN.0 => finish(hwnd, Some(Outcome::Copy)),
                 // S and Ctrl+S both save, as EiSen does.
                 v if down && confirmed && outcome_key(v).is_some() => {
@@ -938,7 +1093,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         _ => (0, step),
                     };
                     with(|s| {
-                        if s.sel.confirmed() {
+                        if s.sel.confirmed() && s.lasso.is_empty() {
                             s.sel.nudge(dx, dy);
                         }
                     });
@@ -950,6 +1105,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
     LRESULT(0)
+}
+
+/// Selecting copies and closes at once, skipping the action toolbar.
+pub fn set_instant_copy(on: bool) {
+    INSTANT.set(on);
 }
 
 /// Hides the overlay from screen sharing and recording (Discord, OBS, Teams) while it stays
@@ -968,4 +1128,34 @@ pub fn set_hidden_from_capture(hide: bool) -> Result<(), String> {
         WDA_NONE
     };
     unsafe { SetWindowDisplayAffinity(hwnd, mode) }.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dim_keeps_black_near_black_and_alpha_opaque() {
+        let src = [255u8, 255, 255, 0, 0, 0, 0, 0];
+        let mut dst = [0u8; 8];
+        dim_into(&mut dst, &src, DIM_SELECT);
+        assert_eq!(dst[3], 255);
+        assert!(dst[0] > 140 && dst[0] < 160, "{dst:?}");
+        assert!(dst[4] < 10, "{dst:?}");
+    }
+
+    /// `cargo test --release -p snapling-win bench_dim -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_dim() {
+        let len = 4480 * 1527 * 4;
+        let src = vec![90u8; len];
+        let mut dst = vec![0u8; len];
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            dim_into(std::hint::black_box(&mut dst), &src, DIM_SELECT);
+            std::hint::black_box(&dst);
+            println!("dim 4480x1527: {} us", t0.elapsed().as_micros());
+        }
+    }
 }

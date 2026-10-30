@@ -1,26 +1,32 @@
-//! Annotation editor window (egui). Runs as its own process (`snapling --edit <file>`):
-//! winit allows one event loop per process, and closing the editor returns its memory.
-//! Drawing is previewed with egui shapes and committed through `annotate` (tiny-skia),
-//! so what is saved is what the core renders on every OS.
+//! Annotation editor window (egui), `assets/design/Editor.dc.html`. Runs as its own process
+//! (`snapling --edit <file>`): winit allows one event loop per process, and closing the editor
+//! returns its memory. Drawing is previewed with egui shapes and committed through `annotate`
+//! (tiny-skia), so what is saved is what the core renders on every OS.
 
+use crate::ui::{self, ACCENT};
 use eframe::egui::{
-    self, Color32, ColorImage, CornerRadius, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense,
-    Shape, Stroke, StrokeKind, TextureHandle, TextureOptions,
+    self, Align2, Color32, ColorImage, Frame, Key, KeyboardShortcut, Margin, Modifiers, Pos2, Rect,
+    RichText, Sense, Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2, epaint, vec2,
 };
 use egui_phosphor::regular as icon;
 use snapling_core::annotate::Pixmap;
-use snapling_core::annotate::{self, Element, History, Kind, Pt};
+use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
 use std::path::{Path, PathBuf};
 
-/// Platform side: clipboard and the configured save folder.
+type SaveAs = fn(&[u8], u32, u32, &str) -> Result<Option<PathBuf>, String>;
+
+/// Platform side: clipboard, the configured save folder, OCR.
 pub struct Hooks {
     pub copy: fn(&[u8], u32, u32) -> Result<(), String>,
     /// bgra, width, height, source app → saved path.
     pub save: fn(&[u8], u32, u32, &str) -> Result<PathBuf, String>,
+    /// Same, after the native dialog; `None` = cancelled.
+    pub save_as: SaveAs,
+    /// OCR, then the translation window.
+    pub text: fn(&[u8], u32, u32),
     pub warn: fn(&str),
 }
 
-const ACCENT: Color32 = Color32::from_rgb(0xFF, 0x8A, 0x1F);
 const COLORS: [[u8; 3]; 8] = [
     [255, 59, 48],
     [255, 138, 31],
@@ -31,10 +37,13 @@ const COLORS: [[u8; 3]; 8] = [
     [17, 17, 17],
     [255, 255, 255],
 ];
-const SIZES: [f32; 3] = [2.0, 4.0, 8.0];
+const RAIL_H: f32 = 582.0;
+const ZOOM_STEP: f32 = 1.25;
+const ZOOM_RANGE: (f32, f32) = (0.1, 8.0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
+    Select,
     Arrow,
     Line,
     Rect,
@@ -47,22 +56,18 @@ enum Tool {
     Crop,
 }
 
-const TOOLS: [(Tool, &str, &str, Key); 10] = [
-    (Tool::Arrow, icon::ARROW_UP_RIGHT, "Стрелка (A)", Key::A),
-    (Tool::Line, icon::LINE_SEGMENT, "Линия (L)", Key::L),
-    (Tool::Rect, icon::SQUARE, "Прямоугольник (R)", Key::R),
-    (Tool::Ellipse, icon::CIRCLE, "Эллипс (O)", Key::O),
-    (Tool::Pen, icon::PENCIL_SIMPLE, "Перо (P)", Key::P),
-    (Tool::Marker, icon::HIGHLIGHTER, "Маркер (M)", Key::M),
-    (Tool::Text, icon::TEXT_T, "Текст (T)", Key::T),
-    (Tool::Step, icon::NUMBER_CIRCLE_ONE, "Нумерация (N)", Key::N),
-    (
-        Tool::Pixelate,
-        icon::CHECKERBOARD,
-        "Скрыть кистью (B)",
-        Key::B,
-    ),
-    (Tool::Crop, icon::CROP, "Обрезка (C)", Key::C),
+const TOOLS: [(Tool, &str, &str, Key); 11] = [
+    (Tool::Select, icon::CURSOR, "Выбор", Key::V),
+    (Tool::Arrow, icon::ARROW_UP_RIGHT, "Стрелка", Key::A),
+    (Tool::Line, icon::LINE_SEGMENT, "Линия", Key::L),
+    (Tool::Rect, icon::SQUARE, "Прямоугольник", Key::R),
+    (Tool::Ellipse, icon::CIRCLE, "Эллипс", Key::O),
+    (Tool::Pen, icon::PENCIL_SIMPLE, "Перо", Key::P),
+    (Tool::Marker, icon::HIGHLIGHTER, "Маркер", Key::M),
+    (Tool::Text, icon::TEXT_T, "Текст", Key::T),
+    (Tool::Step, icon::NUMBER_CIRCLE_ONE, "Нумерация", Key::N),
+    (Tool::Pixelate, icon::CHECKERBOARD, "Размытие", Key::B),
+    (Tool::Crop, icon::CROP, "Обрезка", Key::C),
 ];
 
 pub fn run(file: &Path, hooks: Hooks) {
@@ -75,17 +80,13 @@ pub fn run(file: &Path, hooks: Hooks) {
         return (hooks.warn)("Не удалось открыть снимок: неверный размер.");
     };
     let (w, h) = (raw.width as f32, raw.height as f32);
-    let big = w > 1400.0 || h > 850.0;
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Snapling — редактор")
-        .with_inner_size([w.clamp(640.0, 1400.0), (h + 96.0).clamp(420.0, 950.0)])
-        .with_min_inner_size([560.0, 360.0])
-        .with_maximized(big)
-        .with_icon(egui::IconData {
-            rgba: crate::icon::frame_spark(64, [0xFF, 0xFF, 0xFF], [0xFF, 0x8A, 0x1F]),
-            width: 64,
-            height: 64,
-        });
+    let big = w > 1040.0 || h > 700.0;
+    let size = [
+        (w + 380.0).clamp(1000.0, 1440.0),
+        (h + 180.0).clamp(700.0, 900.0),
+    ];
+    let mut viewport =
+        ui::viewport("Snapling — редактор", size, [1000.0, 700.0]).with_maximized(big);
     viewport.drag_and_drop = Some(false);
     let options = eframe::NativeOptions {
         viewport,
@@ -96,33 +97,13 @@ pub fn run(file: &Path, hooks: Hooks) {
         "Snapling editor",
         options,
         Box::new(move |cc| {
-            setup_style(&cc.egui_ctx);
+            ui::init(cc);
             Ok(Box::new(Editor::new(base, raw.app, hooks)))
         }),
     );
     if let Err(e) = res {
         warn(&format!("Редактор не запустился.\n{e}"));
     }
-}
-
-pub(crate) fn setup_style(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    ctx.set_fonts(fonts);
-    ctx.set_visuals(egui::Visuals::dark());
-    ctx.all_styles_mut(|s| {
-        s.spacing.button_padding = egui::vec2(8.0, 5.0);
-        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
-        s.visuals.selection.bg_fill = ACCENT.gamma_multiply(0.85);
-        s.visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-        for w in [
-            &mut s.visuals.widgets.inactive,
-            &mut s.visuals.widgets.hovered,
-            &mut s.visuals.widgets.active,
-        ] {
-            w.corner_radius = CornerRadius::same(8);
-        }
-    });
 }
 
 struct Editor {
@@ -135,9 +116,18 @@ struct Editor {
     tool: Tool,
     color: [u8; 3],
     size: f32,
+    head: Head,
+    blur: BlurStyle,
     drag: Option<Element>,
     /// Text being typed: image position and content.
     typing: Option<(Pt, String)>,
+    /// Element under the «Выбор» tool.
+    picked: Option<usize>,
+    /// Picked element is being dragged, image position of the last step.
+    moving: Option<Pt>,
+    /// Display points per image pixel; `None` = fit the window.
+    zoom: Option<f32>,
+    pan: Vec2,
     status: String,
 }
 
@@ -152,9 +142,15 @@ impl Editor {
             dirty: true,
             tool: Tool::Arrow,
             color: COLORS[0],
-            size: SIZES[1],
+            size: 5.0,
+            head: Head::default(),
+            blur: BlurStyle::default(),
             drag: None,
             typing: None,
+            picked: None,
+            moving: None,
+            zoom: None,
+            pan: Vec2::ZERO,
             status: String::new(),
         }
     }
@@ -177,30 +173,70 @@ impl Editor {
 
     fn undo(&mut self) {
         self.typing = None;
+        self.picked = None;
         self.dirty |= self.history.undo();
     }
 
     fn redo(&mut self) {
+        self.picked = None;
         self.dirty |= self.history.redo();
     }
 
-    fn copy(&mut self) {
+    fn export(&mut self) -> (Vec<u8>, u32, u32) {
         self.commit_text();
-        let (bgra, w, h) = annotate::export(&self.base, &self.history.doc);
-        self.status = match (self.hooks.copy)(&bgra, w, h) {
-            Ok(()) => format!("Скопировано в буфер · {w}×{h}"),
-            Err(e) => format!("Не удалось скопировать: {e}"),
-        };
+        annotate::export(&self.base, &self.history.doc)
+    }
+
+    fn copy(&mut self) -> bool {
+        let (bgra, w, h) = self.export();
+        match (self.hooks.copy)(&bgra, w, h) {
+            Ok(()) => {
+                self.status = format!("Скопировано в буфер · {w}×{h}");
+                true
+            }
+            Err(e) => {
+                self.status = format!("Не удалось скопировать: {e}");
+                false
+            }
+        }
     }
 
     fn save(&mut self) {
-        self.commit_text();
-        let (bgra, w, h) = annotate::export(&self.base, &self.history.doc);
+        let (bgra, w, h) = self.export();
         // ponytail: encodes on the UI thread (a 4K PNG freezes ~0.3 s); move to a thread if it bothers.
         self.status = match (self.hooks.save)(&bgra, w, h, &self.app) {
             Ok(p) => format!("Сохранено: {}", p.display()),
             Err(e) => format!("Не удалось сохранить: {e}"),
         };
+    }
+
+    fn save_as(&mut self) {
+        let (bgra, w, h) = self.export();
+        self.status = match (self.hooks.save_as)(&bgra, w, h, &self.app) {
+            Ok(Some(p)) => format!("Сохранено: {}", p.display()),
+            Ok(None) => String::new(),
+            Err(e) => format!("Не удалось сохранить: {e}"),
+        };
+    }
+
+    fn delete_picked(&mut self) {
+        if let Some(i) = self.picked.take() {
+            self.history.change(|d| {
+                d.elements.remove(i);
+            });
+            self.dirty = true;
+        }
+    }
+
+    fn set_tool(&mut self, tool: Tool) {
+        self.commit_text();
+        self.tool = tool;
+        self.picked = None;
+    }
+
+    /// The element shown in the inspector, if «Выбор» holds one.
+    fn picked_mut(&mut self) -> Option<&mut Element> {
+        self.history.doc.elements.get_mut(self.picked?)
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -231,95 +267,344 @@ impl Editor {
         if !typing {
             for (tool, _, _, key) in TOOLS {
                 if ctx.input(|i| i.key_pressed(key) && i.modifiers.is_none()) {
-                    self.tool = tool;
+                    self.set_tool(tool);
                 }
+            }
+            let del = ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace));
+            if del {
+                self.delete_picked();
             }
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            for (tool, glyph, tip, _) in TOOLS {
-                let b = ui
-                    .selectable_label(self.tool == tool, egui::RichText::new(glyph).size(18.0))
-                    .on_hover_text(tip);
-                if b.clicked() {
-                    self.commit_text();
-                    self.tool = tool;
-                }
-            }
-            ui.separator();
-            for c in COLORS {
-                let (r, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::click());
-                let selected = self.color == c;
-                ui.painter()
-                    .circle_filled(r.center(), if selected { 9.0 } else { 7.0 }, rgb(c));
-                if selected || resp.hovered() {
-                    ui.painter().circle_stroke(
-                        r.center(),
-                        10.5,
-                        Stroke::new(1.5, Color32::from_gray(220)),
-                    );
-                }
-                if resp.clicked() {
-                    self.color = c;
-                }
-            }
-            ui.separator();
-            for (i, s) in SIZES.into_iter().enumerate() {
-                let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
-                let fill = if self.size == s {
-                    ACCENT
-                } else if resp.hovered() {
-                    Color32::from_gray(230)
-                } else {
-                    Color32::from_gray(150)
-                };
-                ui.painter()
-                    .circle_filled(r.center(), 2.5 + i as f32 * 2.0, fill);
-                if resp
-                    .on_hover_text(["Тонкая", "Средняя", "Толстая"][i])
-                    .clicked()
-                {
-                    self.size = s;
-                }
-            }
-            ui.separator();
-            let undo = ui.add_enabled(
-                self.history.can_undo(),
-                egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE),
-            );
-            if undo.on_hover_text("Отменить (Ctrl+Z)").clicked() {
-                self.undo();
-            }
-            let redo = ui.add_enabled(
-                self.history.can_redo(),
-                egui::Button::new(icon::ARROW_CLOCKWISE),
-            );
-            if redo.on_hover_text("Повторить (Ctrl+Y)").clicked() {
-                self.redo();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let save = egui::Button::new(
-                    egui::RichText::new(format!("{} Сохранить", icon::FLOPPY_DISK))
-                        .color(Color32::BLACK),
-                )
-                .fill(ACCENT);
-                if ui.add(save).on_hover_text("Ctrl+S").clicked() {
-                    self.save();
-                }
-                if ui
-                    .button(format!("{} Копировать", icon::COPY))
-                    .on_hover_text("Ctrl+C")
-                    .clicked()
-                {
-                    self.copy();
-                }
-            });
-        });
+    /// Floating panel of the design: glass tint, hairline, soft shadow.
+    fn panel(ctx: &egui::Context, radius: u8, margin: Margin) -> Frame {
+        let p = ui::pal(ctx);
+        Frame::new()
+            .fill(p.main.gamma_multiply(0.94))
+            .stroke(Stroke::new(1.0, p.line))
+            .corner_radius(radius)
+            .inner_margin(margin)
+            .shadow(epaint::Shadow {
+                offset: [0, 12],
+                blur: 32,
+                spread: 0,
+                color: Color32::from_black_alpha(90),
+            })
     }
 
-    fn canvas(&mut self, ui: &mut egui::Ui) {
+    fn top_bar(&mut self, ctx: &egui::Context) {
+        let p = ui::pal(ctx);
+        let width = ctx.content_rect().width() - 32.0;
+        let (mut copy, mut save_as, mut text) = (false, false, false);
+        let (w, h) = (self.base.width(), self.base.height());
+        egui::Area::new(egui::Id::new("top"))
+            .anchor(Align2::LEFT_TOP, vec2(16.0, 16.0))
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| {
+                Self::panel(ctx, 16, Margin::symmetric(0, 0)).show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.set_height(56.0);
+                    ui::drag_area(ui, ui.max_rect());
+                    let size = vec2(width, 56.0);
+                    let row = egui::Layout::left_to_right(egui::Align::Center);
+                    ui.allocate_ui_with_layout(size, row, |ui| {
+                        ui.add_space(16.0);
+                        ui::draw_logo(ui, 22.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.add_space(9.0);
+                            let name = if self.app.is_empty() {
+                                "Снимок".to_string()
+                            } else {
+                                format!("Снимок · {}", self.app)
+                            };
+                            ui.label(RichText::new(name).font(ui::semi(14.0)));
+                            let sub = format!("{w} × {h}");
+                            ui.label(RichText::new(sub).size(12.0).color(p.muted));
+                        });
+                        let right = egui::Layout::right_to_left(egui::Align::Center);
+                        ui.with_layout(right, |ui| {
+                            ui.add_space(10.0);
+                            ui::window_buttons(ui, 38.0);
+                            let (d, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
+                            ui.painter()
+                                .vline(d.center().x, d.y_range(), Stroke::new(1.0, p.line));
+                            copy = ui::primary(ui, "Копировать и закрыть", None, 38.0).clicked();
+                            save_as = ui::tone(ui, "Сохранить как…", None, 38.0).clicked();
+                            text = ui::ghost_text(ui, "Текст и перевод", 38.0).clicked();
+                        });
+                    });
+                });
+            });
+        if copy && self.copy() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if save_as {
+            self.save_as();
+        }
+        if text {
+            let (bgra, w, h) = self.export();
+            (self.hooks.text)(&bgra, w, h);
+            self.status = "Распознаю текст…".into();
+        }
+    }
+
+    fn rail(&mut self, ctx: &egui::Context) {
+        let p = ui::pal(ctx);
+        let top = ((ctx.content_rect().height() - RAIL_H) / 2.0).max(84.0);
+        let mut pick = None;
+        let (mut undo, mut redo) = (false, false);
+        egui::Area::new(egui::Id::new("rail"))
+            .fixed_pos(Pos2::new(16.0, top))
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| {
+                Self::panel(ctx, 16, Margin::same(6)).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    for (tool, glyph, tip, _) in TOOLS {
+                        let name = format!("{tip} ({})", key_name(tool));
+                        if ui::rail_button(ui, glyph, self.tool == tool, true, &name).clicked() {
+                            pick = Some(tool);
+                        }
+                    }
+                    let (d, _) = ui.allocate_exact_size(vec2(40.0, 9.0), Sense::hover());
+                    ui.painter().hline(
+                        (d.left() + 6.0)..=(d.right() - 6.0),
+                        d.center().y,
+                        Stroke::new(1.0, p.line),
+                    );
+                    undo = ui::rail_button(
+                        ui,
+                        icon::ARROW_COUNTER_CLOCKWISE,
+                        false,
+                        self.history.can_undo(),
+                        "Отменить (Ctrl+Z)",
+                    )
+                    .clicked();
+                    redo = ui::rail_button(
+                        ui,
+                        icon::ARROW_CLOCKWISE,
+                        false,
+                        self.history.can_redo(),
+                        "Повторить (Ctrl+Y)",
+                    )
+                    .clicked();
+                });
+            });
+        if let Some(t) = pick {
+            self.set_tool(t);
+        }
+        if undo {
+            self.undo();
+        }
+        if redo {
+            self.redo();
+        }
+    }
+
+    fn inspector_title(&self) -> &'static str {
+        if let Some(e) = self.picked.and_then(|i| self.history.doc.elements.get(i)) {
+            return match e.kind {
+                Kind::Arrow(..) => "Стрелка",
+                Kind::Line(..) => "Линия",
+                Kind::Rect(..) => "Прямоугольник",
+                Kind::Ellipse(..) => "Эллипс",
+                Kind::Pen(..) => "Перо",
+                Kind::Marker(..) => "Маркер",
+                Kind::Text(..) => "Текст",
+                Kind::Step(..) => "Нумерация",
+                Kind::Pixelate(..) | Kind::Blur(..) => "Размытие",
+            };
+        }
+        TOOLS.iter().find(|t| t.0 == self.tool).map_or("", |t| t.2)
+    }
+
+    fn inspector(&mut self, ctx: &egui::Context) {
+        let p = ui::pal(ctx);
+        let picked = self.picked.and_then(|i| self.history.doc.elements.get(i));
+        let arrow = picked.map_or(self.tool == Tool::Arrow, |e| {
+            matches!(e.kind, Kind::Arrow(..))
+        });
+        let blur = picked.map_or(self.tool == Tool::Pixelate, |e| {
+            matches!(e.kind, Kind::Blur(..))
+        });
+        let bare = picked.is_none() && matches!(self.tool, Tool::Select | Tool::Crop);
+        let color = picked.map_or(self.color, |e| e.color);
+        let mut size = picked.map_or(self.size, |e| e.size);
+        let head = match picked.map(|e| &e.kind) {
+            Some(Kind::Arrow(_, _, h)) => *h,
+            _ => self.head,
+        };
+        let mut new_color = None;
+        let mut size_step = None;
+        let mut new_head = None;
+        let mut new_blur = None;
+        let title = self.inspector_title();
+        egui::Area::new(egui::Id::new("inspector"))
+            .anchor(Align2::RIGHT_TOP, vec2(-16.0, 88.0))
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| {
+                Self::panel(ctx, 16, Margin::same(16)).show(ui, |ui| {
+                    ui.set_width(216.0);
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.label(RichText::new(title).font(ui::semi(15.0)));
+                    if bare {
+                        let hint = if self.tool == Tool::Crop {
+                            "Обведи рамкой. Клик — сбросить обрезку."
+                        } else {
+                            "Кликни по фигуре: двигай, меняй цвет и толщину, Delete — удалить."
+                        };
+                        ui.label(RichText::new(hint).size(12.5).color(p.muted));
+                        return;
+                    }
+                    if !blur {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Цвет").size(12.5).color(p.muted));
+                        for row in COLORS.chunks(4) {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 16.0;
+                                for &c in row {
+                                    if swatch(ui, c, c == color).clicked() {
+                                        new_color = Some(c);
+                                    }
+                                }
+                            });
+                        }
+                    } else {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Вид").size(12.5).color(p.muted));
+                        let items = ["Кубики", "Гаусс"];
+                        let now = usize::from(self.blur.gauss);
+                        if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
+                            new_blur = Some(BlurStyle {
+                                gauss: i == 1,
+                                ..self.blur
+                            });
+                        }
+                        ui.label(RichText::new("Сила").size(12.5).color(p.muted));
+                        let items = ["Слабая", "Средняя", "Сильная"];
+                        let now = usize::from(self.blur.strength);
+                        if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
+                            new_blur = Some(BlurStyle {
+                                strength: i as u8,
+                                ..self.blur
+                            });
+                        }
+                    }
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Толщина").size(12.5).color(p.muted));
+                    ui.spacing_mut().slider_width = 216.0;
+                    let r = ui.add(egui::Slider::new(&mut size, 1.0..=16.0).show_value(false));
+                    if r.drag_started() || r.clicked() {
+                        size_step = Some((size, true));
+                    } else if r.changed() {
+                        size_step = Some((size, false));
+                    }
+                    if arrow {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Наконечник").size(12.5).color(p.muted));
+                        let heads = [Head::Sharp, Head::Soft, Head::Double];
+                        let now = heads.iter().position(|h| *h == head).unwrap_or(0);
+                        let items = ["Острый", "Мягкий", "Двойной"];
+                        if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
+                            new_head = Some(heads[i]);
+                        }
+                    }
+                });
+            });
+        if let Some(c) = new_color {
+            self.color = c;
+            if let Some(i) = self.picked {
+                self.history.change(|d| d.elements[i].color = c);
+                self.dirty = true;
+            }
+        }
+        if let Some((v, first)) = size_step {
+            self.size = v;
+            if self.picked.is_some() && first {
+                self.history.snapshot();
+            }
+            if let Some(e) = self.picked_mut() {
+                e.size = v;
+                self.dirty = true;
+            }
+        }
+        if let Some(h) = new_head {
+            self.head = h;
+            if let Some(i) = self.picked {
+                self.history.change(|d| {
+                    if let Kind::Arrow(_, _, old) = &mut d.elements[i].kind {
+                        *old = h;
+                    }
+                });
+                self.dirty = true;
+            }
+        }
+        if let Some(b) = new_blur {
+            self.blur = b;
+            if let Some(i) = self.picked {
+                self.history.change(|d| {
+                    if let Kind::Blur(_, old) = &mut d.elements[i].kind {
+                        *old = b;
+                    }
+                });
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn zoom_pill(&mut self, ctx: &egui::Context, k: f32) {
+        let p = ui::pal(ctx);
+        let percent = (k * ctx.pixels_per_point() * 100.0).round();
+        let (mut out, mut fit, mut into) = (false, false, false);
+        egui::Area::new(egui::Id::new("zoom"))
+            .anchor(Align2::LEFT_BOTTOM, vec2(112.0, -24.0))
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| {
+                Self::panel(ctx, 12, Margin::same(4)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        out = ui::ghost_icon(ui, icon::MINUS, 30.0, "Уменьшить").clicked();
+                        let label = RichText::new(format!("{percent}%"))
+                            .font(ui::mono(13.0))
+                            .color(p.soft);
+                        let b = egui::Button::new(label)
+                            .frame(false)
+                            .min_size(vec2(52.0, 30.0));
+                        fit = ui.add(b).on_hover_text("По размеру окна").clicked();
+                        into = ui::ghost_icon(ui, icon::PLUS, 30.0, "Увеличить").clicked();
+                    });
+                });
+            });
+        if out || into {
+            let step = if into { ZOOM_STEP } else { 1.0 / ZOOM_STEP };
+            self.zoom = Some((k * step).clamp(ZOOM_RANGE.0, ZOOM_RANGE.1));
+        }
+        if fit {
+            self.zoom = None;
+            self.pan = Vec2::ZERO;
+        }
+        if !self.status.is_empty() {
+            egui::Area::new(egui::Id::new("status"))
+                .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -28.0))
+                .order(egui::Order::Middle)
+                .interactable(false)
+                .show(ctx, |ui| {
+                    Self::panel(ctx, 12, Margin::symmetric(14, 8)).show(ui, |ui| {
+                        let t = RichText::new(&self.status).size(13.0).color(p.soft);
+                        ui.add(egui::Label::new(t).extend());
+                    });
+                });
+        }
+    }
+
+    /// Fit-to-window scale, never above one image pixel per physical pixel.
+    fn fit(&self, view: Rect, ppp: f32) -> f32 {
+        let (iw, ih) = (self.base.width() as f32, self.base.height() as f32);
+        (view.width() / iw).min(view.height() / ih).min(1.0 / ppp)
+    }
+
+    fn canvas(&mut self, ui: &mut egui::Ui) -> f32 {
         let (iw, ih) = (self.base.width() as f32, self.base.height() as f32);
         if self.dirty || self.tex.is_none() {
             let pm = annotate::compose(&self.base, &self.history.doc);
@@ -333,13 +618,59 @@ impl Editor {
             }
             self.dirty = false;
         }
-        let avail = ui.available_rect_before_wrap();
-        // 1 image pixel = 1 physical pixel at most; shrink to fit otherwise.
-        let k = (avail.width() / iw)
-            .min(avail.height() / ih)
-            .min(1.0 / ui.ctx().pixels_per_point());
-        let rect = Rect::from_center_size(avail.center(), egui::vec2(iw * k, ih * k));
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+        let all = ui.max_rect();
+        let p = ui::pal(ui.ctx());
+        let dot = p.text.gamma_multiply(0.07);
+        let mut y = all.top() + 10.0;
+        while y < all.bottom() {
+            let mut x = all.left() + 10.0;
+            while x < all.right() {
+                ui.painter().circle_filled(Pos2::new(x, y), 1.0, dot);
+                x += 20.0;
+            }
+            y += 20.0;
+        }
+        // Space the floating panels leave free.
+        let view = Rect::from_min_max(
+            Pos2::new(all.left() + 88.0, all.top() + 88.0),
+            Pos2::new(all.right() - 280.0, all.bottom() - 72.0),
+        );
+        let ppp = ui.ctx().pixels_per_point();
+        let mut k = self.zoom.unwrap_or_else(|| self.fit(view, ppp));
+
+        let back = ui.interact(all, ui.id().with("pan"), Sense::drag());
+        let (scroll, pinch, hover, space) = ui.input(|i| {
+            (
+                i.smooth_scroll_delta.y,
+                i.zoom_delta(),
+                i.pointer.hover_pos(),
+                i.key_down(Key::Space),
+            )
+        });
+        if let Some(at) = hover.filter(|h| all.contains(*h)) {
+            let factor = pinch * (scroll * 0.002).exp();
+            if factor != 1.0 {
+                let next = (k * factor).clamp(ZOOM_RANGE.0, ZOOM_RANGE.1);
+                let center = view.center() + self.pan;
+                self.pan += (at - center) * (1.0 - next / k);
+                self.zoom = Some(next);
+                k = next;
+            }
+        }
+        let panning = space || ui.input(|i| i.pointer.middle_down());
+        if back.dragged() || (panning && ui.input(|i| i.pointer.any_down())) {
+            self.pan += ui.input(|i| i.pointer.delta());
+        }
+
+        let rect = Rect::from_center_size(view.center() + self.pan, vec2(iw * k, ih * k));
+        let shadow = epaint::Shadow {
+            offset: [0, 30],
+            blur: 80,
+            spread: 0,
+            color: Color32::from_black_alpha(130),
+        };
+        ui.painter().add(shadow.as_shape(rect, 10));
+        let resp = ui.interact(rect, ui.id().with("shot"), Sense::click_and_drag());
         let to_img = |p: Pos2| Pt {
             x: ((p.x - rect.min.x) / k).clamp(0.0, iw),
             y: ((p.y - rect.min.y) / k).clamp(0.0, ih),
@@ -348,58 +679,79 @@ impl Editor {
         let shift = ui.input(|i| i.modifiers.shift);
 
         if let Some(t) = &self.tex {
-            ui.painter().image(
-                t.id(),
-                rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            egui::Image::new((t.id(), rect.size()))
+                .corner_radius(10)
+                .paint_at(ui, rect);
         }
-        if resp.hovered() {
+        if resp.hovered() && !panning {
             ui.ctx().set_cursor_icon(match self.tool {
                 Tool::Text => egui::CursorIcon::Text,
+                Tool::Select => egui::CursorIcon::Default,
                 _ => egui::CursorIcon::Crosshair,
             });
         }
 
-        if resp.drag_started() {
+        if resp.drag_started() && !panning {
             self.commit_text();
             if let Some(start) = ui.input(|i| i.pointer.press_origin()).map(to_img) {
+                if self.tool == Tool::Select {
+                    self.picked = annotate::pick(&self.history.doc, start);
+                    if self.picked.is_some() {
+                        self.history.snapshot();
+                        self.moving = Some(start);
+                    }
+                }
                 let kind = match self.tool {
-                    Tool::Arrow => Some(Kind::Arrow(start, start)),
+                    Tool::Arrow => Some(Kind::Arrow(start, start, self.head)),
                     Tool::Line => Some(Kind::Line(start, start)),
                     Tool::Rect => Some(Kind::Rect(start, start)),
                     Tool::Ellipse => Some(Kind::Ellipse(start, start)),
                     Tool::Pen => Some(Kind::Pen(vec![start])),
                     Tool::Marker => Some(Kind::Marker(vec![start])),
-                    Tool::Pixelate => Some(Kind::Blur(vec![start], annotate::BlurStyle::default())),
+                    Tool::Pixelate => Some(Kind::Blur(vec![start], self.blur)),
                     Tool::Crop => Some(Kind::Pixelate(start, start)),
-                    Tool::Text | Tool::Step => None,
+                    Tool::Text | Tool::Step | Tool::Select => None,
                 };
                 self.drag = kind.map(|k| self.el(k));
             }
+        }
+        if let (Some(last), Some(at)) = (self.moving, resp.interact_pointer_pos().map(to_img)) {
+            if let Some(e) = self.picked_mut() {
+                annotate::translate(&mut e.kind, at.x - last.x, at.y - last.y);
+            }
+            self.moving = Some(at);
+            self.dirty = true;
         }
         if let (Some(el), Some(p)) = (&mut self.drag, resp.interact_pointer_pos()) {
             let p = to_img(p);
             annotate::drag_to(&mut el.kind, p, shift, 1.5 / k);
         }
-        if resp.drag_stopped()
-            && let Some(el) = self.drag.take()
-        {
-            match (self.tool, el.kind) {
-                (Tool::Crop, Kind::Pixelate(a, b)) => {
-                    if (a.x - b.x).abs() >= 3.0 && (a.y - b.y).abs() >= 3.0 {
-                        self.history.change(|d| d.crop = Some((a, b)));
+        if resp.drag_stopped() {
+            self.moving = None;
+            if let Some(el) = self.drag.take() {
+                match (self.tool, el.kind) {
+                    (Tool::Crop, Kind::Pixelate(a, b)) => {
+                        if (a.x - b.x).abs() >= 3.0 && (a.y - b.y).abs() >= 3.0 {
+                            self.history.change(|d| d.crop = Some((a, b)));
+                        }
                     }
+                    (_, kind) => self.history.push(Element { kind, ..el }),
                 }
-                (_, kind) => self.history.push(Element { kind, ..el }),
+                self.dirty = true;
             }
-            self.dirty = true;
         }
         if resp.clicked()
             && let Some(p) = resp.interact_pointer_pos().map(to_img)
         {
             match self.tool {
+                Tool::Select => {
+                    self.picked = annotate::pick(&self.history.doc, p);
+                    if let Some(e) = self.picked_mut() {
+                        let (c, s) = (e.color, e.size);
+                        self.color = c;
+                        self.size = s;
+                    }
+                }
                 Tool::Step => {
                     self.commit_text();
                     let el = self.el(Kind::Step(p, self.history.next_step()));
@@ -418,14 +770,21 @@ impl Editor {
             }
         }
 
-        let painter = ui.painter_at(rect);
+        let painter = ui.painter_at(all);
         if let Some((a, b)) = self.history.doc.crop {
             dim_outside(&painter, rect, Rect::from_two_pos(to_scr(a), to_scr(b)));
         }
         if let Some(el) = &self.drag {
-            preview(&painter, el, self.tool, k, to_scr);
+            preview(&painter, el, self.tool, k, to_scr, rect);
+        }
+        if let Some(e) = self.picked.and_then(|i| self.history.doc.elements.get(i)) {
+            let (a, b) = annotate::bounds(e);
+            let r = Rect::from_two_pos(to_scr(a), to_scr(b)).expand(3.0);
+            let s = Stroke::new(1.5, ACCENT);
+            painter.rect_stroke(r, 4.0, s, StrokeKind::Outside);
         }
         self.text_box(ui, k, to_scr);
+        k
     }
 
     fn text_box(&mut self, ui: &mut egui::Ui, k: f32, to_scr: impl Fn(Pt) -> Pos2) {
@@ -442,7 +801,7 @@ impl Editor {
             .show(ui.ctx(), |ui| {
                 let width = annotate::text_size(text, px).0 + px;
                 let edit = egui::TextEdit::multiline(text)
-                    .font(egui::FontId::proportional(px))
+                    .font(egui::FontId::new(px, egui::FontFamily::Name("shot".into())))
                     .text_color(color)
                     .frame(egui::Frame::NONE)
                     .desired_rows(1)
@@ -476,42 +835,52 @@ impl Editor {
     }
 }
 
+fn key_name(tool: Tool) -> char {
+    match tool {
+        Tool::Select => 'V',
+        Tool::Arrow => 'A',
+        Tool::Line => 'L',
+        Tool::Rect => 'R',
+        Tool::Ellipse => 'O',
+        Tool::Pen => 'P',
+        Tool::Marker => 'M',
+        Tool::Text => 'T',
+        Tool::Step => 'N',
+        Tool::Pixelate => 'B',
+        Tool::Crop => 'C',
+    }
+}
+
+/// Round color button, 32 px; the selected one gets a ring.
+fn swatch(ui: &mut egui::Ui, c: [u8; 3], on: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::click());
+    let center = rect.center();
+    ui.painter().circle_filled(center, 16.0, rgb(c));
+    if on {
+        let ring = Stroke::new(2.0, rgb(c));
+        ui.painter().circle_stroke(center, 18.5, ring);
+    } else if r.hovered() {
+        let ring = Stroke::new(1.5, ui::pal(ui.ctx()).soft);
+        ui.painter().circle_stroke(center, 18.0, ring);
+    }
+    r
+}
+
 impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui::preview(ui.ctx());
         self.shortcuts(ui.ctx());
-        egui::Panel::top("tools")
-            .frame(
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(10, 8))
-                    .fill(Color32::from_rgb(0x16, 0x1B, 0x26)),
-            )
-            .show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("status")
-            .frame(
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(12, 6))
-                    .fill(Color32::from_rgb(0x16, 0x1B, 0x26)),
-            )
-            .show(ui, |ui| {
-                let hint = "Shift — ровно · Ctrl+Z / Ctrl+Y · клик с обрезкой — сбросить обрезку";
-                let text = if self.status.is_empty() {
-                    hint
-                } else {
-                    &self.status
-                };
-                ui.label(
-                    egui::RichText::new(text)
-                        .small()
-                        .color(Color32::from_gray(170)),
-                );
-            });
+        let ctx = ui.ctx().clone();
+        ui::frame_edges(&ctx);
+        let fill = ui::pal(&ctx).well;
+        let mut k = 1.0;
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(0x0E, 0x11, 0x18))
-                    .inner_margin(12),
-            )
-            .show(ui, |ui| self.canvas(ui));
+            .frame(Frame::new().fill(fill))
+            .show(ui, |ui| k = self.canvas(ui));
+        self.top_bar(&ctx);
+        self.rail(&ctx);
+        self.inspector(&ctx);
+        self.zoom_pill(&ctx, k);
     }
 }
 
@@ -544,14 +913,21 @@ fn dim_outside(painter: &egui::Painter, all: Rect, keep: Rect) {
 }
 
 /// Live shape while dragging; the committed one is rendered by `annotate`.
-fn preview(painter: &egui::Painter, el: &Element, tool: Tool, k: f32, to_scr: impl Fn(Pt) -> Pos2) {
+fn preview(
+    painter: &egui::Painter,
+    el: &Element,
+    tool: Tool,
+    k: f32,
+    to_scr: impl Fn(Pt) -> Pos2,
+    image: Rect,
+) {
     let color = rgb(el.color);
     let stroke = Stroke::new(el.size * k, color);
     match &el.kind {
         Kind::Line(a, b) => {
             painter.line_segment([to_scr(*a), to_scr(*b)], stroke);
         }
-        Kind::Arrow(a, b) => {
+        Kind::Arrow(a, b, _) => {
             let [tip, l, r] = annotate::arrow_head(*a, *b, el.size);
             let base = Pt {
                 x: (l.x + r.x) / 2.0,
@@ -599,7 +975,7 @@ fn preview(painter: &egui::Painter, el: &Element, tool: Tool, k: f32, to_scr: im
         Kind::Pixelate(a, b) => {
             let r = Rect::from_two_pos(to_scr(*a), to_scr(*b));
             if tool == Tool::Crop {
-                dim_outside(painter, painter.clip_rect(), r);
+                dim_outside(painter, image, r);
             } else {
                 painter.rect_filled(r, 0.0, Color32::from_white_alpha(40));
                 painter.add(Shape::dashed_line(

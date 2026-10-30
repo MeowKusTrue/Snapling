@@ -14,6 +14,9 @@ pub struct Entry {
     pub height: u32,
     pub app: String,
     pub kind: String,
+    /// Recognized text, searchable. Entries from OCR alone have an empty `path`.
+    #[serde(default)]
+    pub text: String,
 }
 
 pub fn time_string(t: crate::storage::Stamp) -> String {
@@ -45,6 +48,65 @@ pub fn load(file: &Path) -> Vec<Entry> {
         .collect()
 }
 
+/// Drops the first equal entry. The image file stays on disk.
+// ponytail: rewrites the file; a capture finishing at that moment can lose its line. Fine by hand.
+pub fn remove(file: &Path, e: &Entry) -> Result<(), String> {
+    let mut entries = load(file);
+    if let Some(i) = entries.iter().position(|x| x == e) {
+        entries.remove(i);
+    }
+    let mut text = String::new();
+    for x in &entries {
+        text += &serde_json::to_string(x).map_err(|err| err.to_string())?;
+        text.push('\n');
+    }
+    let part = file.with_extension("jsonl.part");
+    std::fs::write(&part, text)
+        .and_then(|()| std::fs::rename(&part, file))
+        .map_err(|err| format!("{}: {err}", file.display()))
+}
+
+fn day(time: &str) -> Option<i64> {
+    let (y, m, d): (i64, i64, i64) = (
+        time.get(0..4)?.parse().ok()?,
+        time.get(5..7)?.parse().ok()?,
+        time.get(8..10)?.parse().ok()?,
+    );
+    let (y, m) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
+    Some(365 * y + y / 4 - y / 100 + y / 400 + 153 * (m + 1) / 5 + d)
+}
+
+/// Whole days between two `time_string`s; `None` for a broken string.
+pub fn days_ago(time: &str, now: &str) -> Option<i64> {
+    Some(day(now)? - day(time)?)
+}
+
+/// «Сегодня, 14:21», «Вчера, 22:17» or «27.10».
+pub fn when(time: &str, now: &str) -> String {
+    let hm = time.get(11..16).unwrap_or("");
+    match days_ago(time, now) {
+        Some(0) => format!("Сегодня, {hm}"),
+        Some(1) => format!("Вчера, {hm}"),
+        _ => match (time.get(8..10), time.get(5..7)) {
+            (Some(d), Some(m)) => format!("{d}.{m}"),
+            _ => time.to_string(),
+        },
+    }
+}
+
+/// Case-insensitive search over the app, the file name and the recognized text.
+/// `Some` holds the matching text line for the card (empty for other matches).
+pub fn matches(e: &Entry, query: &str) -> Option<String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Some(String::new());
+    }
+    if let Some(line) = e.text.lines().find(|l| l.to_lowercase().contains(&q)) {
+        return Some(line.trim().chars().take(40).collect());
+    }
+    (e.app.to_lowercase().contains(&q) || e.path.to_lowercase().contains(&q)).then(String::new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,6 +123,7 @@ mod tests {
             height: 20,
             app: "Discord".into(),
             kind: "region".into(),
+            text: String::new(),
         };
         append(&f, &e).unwrap();
         std::fs::OpenOptions::new()
@@ -70,7 +133,45 @@ mod tests {
             .write_all(b"{broken\n")
             .unwrap();
         append(&f, &e).unwrap();
-        assert_eq!(load(&f), vec![e.clone(), e]);
+        assert_eq!(load(&f), vec![e.clone(), e.clone()]);
+        remove(&f, &e).unwrap();
+        assert_eq!(load(&f), vec![e]);
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn old_lines_without_text_load() {
+        let l = r#"{"time":"t","path":"p","width":1,"height":2,"app":"a","kind":"k"}"#;
+        assert_eq!(serde_json::from_str::<Entry>(l).unwrap().text, "");
+    }
+
+    #[test]
+    fn when_counts_days_over_month_and_leap_day() {
+        let now = "2024-03-01T09:00:00";
+        assert_eq!(when("2024-03-01T08:05:00", now), "Сегодня, 08:05");
+        assert_eq!(when("2024-02-29T22:17:00", now), "Вчера, 22:17");
+        assert_eq!(when("2024-02-28T22:17:00", now), "28.02");
+        assert_eq!(
+            days_ago("2023-12-31T00:00:00", "2024-01-01T00:00:00"),
+            Some(1)
+        );
+        assert_eq!(when("сломано", now), "сломано");
+    }
+
+    #[test]
+    fn matches_finds_text_line_ignoring_case() {
+        let e = Entry {
+            time: String::new(),
+            path: r"E:\a.png".into(),
+            width: 1,
+            height: 1,
+            app: "Discord".into(),
+            kind: "region".into(),
+            text: "первая\nСчёт на 2 400".into(),
+        };
+        assert_eq!(matches(&e, "счёт").as_deref(), Some("Счёт на 2 400"));
+        assert_eq!(matches(&e, "disc").as_deref(), Some(""));
+        assert_eq!(matches(&e, "нет"), None);
+        assert_eq!(matches(&e, "  ").as_deref(), Some(""));
     }
 }

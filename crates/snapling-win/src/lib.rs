@@ -1,25 +1,45 @@
 #![cfg(windows)]
 
-use snapling_core::hotkey::Hotkey;
+use snapling_core::hotkey::{self, Hotkey};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, GetLastError, GlobalFree, HANDLE,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HOTKEY_ALREADY_REGISTERED,
+    GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND,
+};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
+    DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
     CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
     SRCCOPY, SelectObject,
 };
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegDeleteKeyValueW,
+    RegGetValueW, RegOpenKeyExW, RegSetValueExW,
+};
+use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+    GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+    RegisterHotKey, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+};
+use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+use windows::Win32::UI::Shell::{
+    FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog, IFileOpenDialog,
+    IFileSaveDialog, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, IDYES, MB_ICONQUESTION, MB_ICONWARNING, MB_YESNO, MessageBoxW,
@@ -88,6 +108,185 @@ pub fn single_instance() -> bool {
     handle.is_ok() && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS
 }
 
+const HOTKEY_PAUSE: windows::core::PCWSTR = w!("Local\\Snapling.HotkeyRecording");
+static PAUSE: AtomicIsize = AtomicIsize::new(0);
+
+/// While the settings window records a combo, the tray must not act on it.
+/// A named mutex: it goes away by itself if that window crashes.
+pub fn pause_hotkeys(on: bool) {
+    let old = PAUSE.swap(0, Ordering::Relaxed);
+    if old != 0 {
+        let _ = unsafe { CloseHandle(HANDLE(old as _)) };
+    }
+    if on && let Ok(h) = unsafe { CreateMutexW(None, false, HOTKEY_PAUSE) } {
+        PAUSE.store(h.0 as isize, Ordering::Relaxed);
+    }
+}
+
+pub fn hotkeys_paused() -> bool {
+    match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, HOTKEY_PAUSE) } {
+        Ok(h) => {
+            let _ = unsafe { CloseHandle(h) };
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The combo held right now, for recording. PrintScreen may report only its "pressed since
+/// last call" bit, so the first call clears stale bits and its result is to be ignored.
+pub fn pressed_combo() -> Option<String> {
+    let state = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) } as u16;
+    let down = |vk: u16| state(vk) & 0x8000 != 0;
+    let key = hotkey::key_names()
+        .filter(|k| vk_code(k).is_some_and(|vk| state(vk as u16) & 0x8001 != 0))
+        .last()?;
+    let hk = Hotkey {
+        ctrl: down(VK_CONTROL.0),
+        alt: down(VK_MENU.0),
+        shift: down(VK_SHIFT.0),
+        win: down(VK_LWIN.0) || down(VK_RWIN.0),
+        key,
+    };
+    Some(hk.to_string())
+}
+
+const RUN_KEY: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+
+pub fn autostart() -> bool {
+    unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            RUN_KEY,
+            w!("Snapling"),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            None,
+        )
+    }
+    .is_ok()
+}
+
+pub fn set_autostart(on: bool) -> Result<(), String> {
+    let fail = |e| format!("автозапуск: {e:?}");
+    unsafe {
+        if !on {
+            let e = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("Snapling"));
+            return if e.is_ok() || e == ERROR_FILE_NOT_FOUND {
+                Ok(())
+            } else {
+                Err(fail(e))
+            };
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let value: Vec<u16> = format!("\"{}\"", exe.display())
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        let bytes = std::slice::from_raw_parts(value.as_ptr().cast::<u8>(), value.len() * 2);
+        let mut key = HKEY::default();
+        let e = RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, None, KEY_SET_VALUE, &mut key);
+        if e.is_err() {
+            return Err(fail(e));
+        }
+        let e = RegSetValueExW(key, w!("Snapling"), None, REG_SZ, Some(bytes));
+        let _ = RegCloseKey(key);
+        if e.is_err() {
+            return Err(fail(e));
+        }
+    }
+    Ok(())
+}
+
+/// Native folder picker; `None` when cancelled.
+pub fn pick_folder() -> Option<String> {
+    open_dialog(true)
+}
+
+/// Native picker of one WAV file; `None` when cancelled.
+pub fn pick_wav() -> Option<String> {
+    open_dialog(false)
+}
+
+fn open_dialog(folder: bool) -> Option<String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dlg: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        if folder {
+            dlg.SetOptions(dlg.GetOptions().ok()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+                .ok()?;
+        } else {
+            dlg.SetFileTypes(&[COMDLG_FILTERSPEC {
+                pszName: w!("WAV"),
+                pszSpec: w!("*.wav"),
+            }])
+            .ok()?;
+        }
+        dlg.Show(None).ok()?;
+        let path = dlg
+            .GetResult()
+            .ok()?
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0 as *const _));
+        text
+    }
+}
+
+/// Native «Сохранить как»; the file type comes from the extension the user picks.
+pub fn save_file_dialog(name: &str) -> Option<std::path::PathBuf> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dlg: IFileSaveDialog =
+            CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let types = [
+            (w!("PNG"), w!("*.png")),
+            (w!("WebP"), w!("*.webp")),
+            (w!("JPEG"), w!("*.jpg")),
+        ]
+        .map(|(name, spec)| COMDLG_FILTERSPEC {
+            pszName: name,
+            pszSpec: spec,
+        });
+        dlg.SetFileTypes(&types).ok()?;
+        dlg.SetDefaultExtension(w!("png")).ok()?;
+        dlg.SetFileName(&HSTRING::from(name)).ok()?;
+        dlg.Show(None).ok()?;
+        let path = dlg
+            .GetResult()
+            .ok()?
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0 as *const _));
+        text.map(Into::into)
+    }
+}
+
+/// A borderless window keeps the Windows 11 look: rounded corners and the system shadow.
+pub fn style_window(hwnd: isize) {
+    let hwnd = HWND(hwnd as _);
+    let round = DWMWCP_ROUND;
+    let margins = MARGINS {
+        cxLeftWidth: 1,
+        cxRightWidth: 1,
+        cyTopHeight: 1,
+        cyBottomHeight: 1,
+    };
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&raw const round).cast(),
+            size_of_val(&round) as u32,
+        );
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+    }
+}
+
 pub fn warn(text: &str) {
     unsafe { MessageBoxW(None, &HSTRING::from(text), w!("Snapling"), MB_ICONWARNING) };
 }
@@ -135,7 +334,7 @@ pub fn unregister_hotkey(id: i32) {
 /// Windows 11 «Use the Print screen key to open screen capture»: on unless explicitly 0.
 /// Read-only; Snapling never changes this setting.
 pub fn snipping_owns_printscreen() -> bool {
-    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    use windows::Win32::System::Registry::RRF_RT_REG_DWORD;
     let mut value = 0u32;
     let mut size = 4u32;
     let res = unsafe {
@@ -247,29 +446,50 @@ pub fn capture_virtual_screen() -> Result<Image, String> {
     }
 }
 
-/// CF_DIB, bottom-up rows as most apps expect.
+/// CF_DIB, bottom-up rows as most apps expect. A freeform shot also goes as "PNG" with its
+/// transparency; apps that read only the DIB get it on white.
 pub fn copy_image(img: &Image) -> Result<(), String> {
     let header = dib_header(img.width, img.height as i32);
     let hsize = size_of::<BITMAPINFOHEADER>();
     let row = img.width as usize * 4;
-    put_clipboard(CF_DIB.0 as u32, hsize + img.bgra.len(), |dst| unsafe {
+    let cut = snapling_core::storage::has_cutout(&img.bgra);
+    let dib = global(hsize + img.bgra.len(), |dst| unsafe {
         std::ptr::copy_nonoverlapping((&raw const header).cast::<u8>(), dst, hsize);
         for (i, src) in img.bgra.chunks_exact(row).rev().enumerate() {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.add(hsize + i * row), row);
+            let out = dst.add(hsize + i * row);
+            std::ptr::copy_nonoverlapping(src.as_ptr(), out, row);
+            if cut {
+                let line = std::slice::from_raw_parts_mut(out, row);
+                for px in line.as_chunks_mut::<4>().0 {
+                    if px[3] == 0 {
+                        *px = [255; 4];
+                    }
+                }
+            }
         }
-    })
+    })?;
+    let mut blocks = vec![(CF_DIB.0 as u32, dib)];
+    if cut {
+        let png = snapling_core::storage::encode_png(&img.bgra, img.width, img.height)?;
+        let block = global(png.len(), |dst| unsafe {
+            std::ptr::copy_nonoverlapping(png.as_ptr(), dst, png.len());
+        })?;
+        blocks.push((unsafe { RegisterClipboardFormatW(w!("PNG")) }, block));
+    }
+    put_clipboard(&blocks)
 }
 
 /// CF_UNICODETEXT.
 pub fn copy_text(text: &str) -> Result<(), String> {
     let utf16: Vec<u16> = text.encode_utf16().chain([0]).collect();
-    put_clipboard(CF_UNICODETEXT.0 as u32, utf16.len() * 2, |dst| unsafe {
+    let block = global(utf16.len() * 2, |dst| unsafe {
         std::ptr::copy_nonoverlapping(utf16.as_ptr().cast::<u8>(), dst, utf16.len() * 2);
-    })
+    })?;
+    put_clipboard(&[(CF_UNICODETEXT.0 as u32, block)])
 }
 
-/// Replaces the clipboard with one `format` block of `size` bytes written by `fill`.
-fn put_clipboard(format: u32, size: usize, fill: impl FnOnce(*mut u8)) -> Result<(), String> {
+/// Movable memory of `size` bytes written by `fill`.
+fn global(size: usize, fill: impl FnOnce(*mut u8)) -> Result<HGLOBAL, String> {
     unsafe {
         let mem = GlobalAlloc(GMEM_MOVEABLE, size).map_err(|e| format!("GlobalAlloc: {e}"))?;
         let dst = GlobalLock(mem) as *mut u8;
@@ -279,15 +499,36 @@ fn put_clipboard(format: u32, size: usize, fill: impl FnOnce(*mut u8)) -> Result
         }
         fill(dst);
         let _ = GlobalUnlock(mem);
+        Ok(mem)
+    }
+}
 
+/// Replaces the clipboard with these blocks; it owns the ones it accepted.
+fn put_clipboard(blocks: &[(u32, HGLOBAL)]) -> Result<(), String> {
+    unsafe {
+        let free = |from: usize| {
+            for (_, mem) in &blocks[from..] {
+                let _ = GlobalFree(Some(*mem));
+            }
+        };
         if let Err(e) = OpenClipboard(None) {
-            let _ = GlobalFree(Some(mem));
+            free(0);
             return Err(format!("OpenClipboard: {e}"));
         }
-        let res = EmptyClipboard().and_then(|_| SetClipboardData(format, Some(HANDLE(mem.0))));
+        let mut res = EmptyClipboard().map_err(|e| e.to_string());
+        let mut done = 0;
+        for (format, mem) in blocks {
+            if res.is_err() {
+                break;
+            }
+            match SetClipboardData(*format, Some(HANDLE(mem.0))) {
+                Ok(_) => done += 1,
+                Err(e) => res = Err(e.to_string()),
+            }
+        }
         let _ = CloseClipboard();
         if let Err(e) = res {
-            let _ = GlobalFree(Some(mem));
+            free(done);
             return Err(format!("SetClipboardData: {e}"));
         }
         Ok(())

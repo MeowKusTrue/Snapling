@@ -242,6 +242,53 @@ mod tests {
 
 /// Encodes top-down BGRA into `dir/name.<ext>` (unique name, parent folders created).
 /// Written to `*.part` first and renamed, so a crash never leaves a half-written image.
+/// Image file → BGRA, for copying or editing a saved shot.
+pub fn load_bgra(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
+    let img = image::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    let mut px = img.into_raw();
+    px.as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .for_each(|p| p.swap(0, 2));
+    Ok((px, w, h))
+}
+
+/// Small RGBA preview no larger than `max` on either side.
+pub fn thumbnail(path: &Path, max: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let img = image::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .thumbnail(max, max)
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    Ok((img.into_raw(), w, h))
+}
+
+/// The freeform selection left fully transparent pixels.
+pub fn has_cutout(bgra: &[u8]) -> bool {
+    bgra.as_chunks::<4>().0.iter().any(|p| p[3] == 0)
+}
+
+fn rgba(bgra: &[u8]) -> Vec<u8> {
+    bgra.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[2], p[1], p[0], p[3]])
+        .collect()
+}
+
+/// PNG in memory, for the clipboard.
+pub fn encode_png(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(&rgba(bgra), width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
 pub fn save_bgra(
     bgra: &[u8],
     width: u32,
@@ -254,12 +301,22 @@ pub fn save_bgra(
     use crate::config::Format;
     use image::ImageEncoder;
 
-    let rgb: Vec<u8> = bgra
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|p| [p[2], p[1], p[0]])
-        .collect();
+    let cut = has_cutout(bgra) && format != Format::Jpeg;
+    let pixels: Vec<u8> = if cut {
+        rgba(bgra)
+    } else {
+        bgra.as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| {
+                if p[3] == 0 {
+                    [255; 3]
+                } else {
+                    [p[2], p[1], p[0]]
+                }
+            })
+            .collect()
+    };
     let path = unique(dir.join(name).with_extension(format.ext()));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -267,16 +324,20 @@ pub fn save_bgra(
     let part = path.with_extension(format!("{}.part", format.ext()));
     let file = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
     let out = std::io::BufWriter::new(file);
-    let color = image::ExtendedColorType::Rgb8;
+    let color = if cut {
+        image::ExtendedColorType::Rgba8
+    } else {
+        image::ExtendedColorType::Rgb8
+    };
     let encoded = match format {
         Format::Png => {
-            image::codecs::png::PngEncoder::new(out).write_image(&rgb, width, height, color)
+            image::codecs::png::PngEncoder::new(out).write_image(&pixels, width, height, color)
         }
         Format::Webp => image::codecs::webp::WebPEncoder::new_lossless(out)
-            .write_image(&rgb, width, height, color),
+            .write_image(&pixels, width, height, color),
         Format::Jpeg => {
             image::codecs::jpeg::JpegEncoder::new_with_quality(out, jpeg_quality.clamp(1, 100))
-                .write_image(&rgb, width, height, color)
+                .write_image(&pixels, width, height, color)
         }
     };
     if let Err(e) = encoded {
@@ -291,6 +352,20 @@ pub fn save_bgra(
 mod save_tests {
     use super::*;
     use crate::config::Format;
+
+    #[test]
+    fn cutout_stays_transparent_in_png_and_white_in_jpeg() {
+        let base = std::env::temp_dir().join(format!("snapling-cut-{}", std::process::id()));
+        let bgra = [10, 20, 30, 255, 0, 0, 0, 0];
+        let png = save_bgra(&bgra, 2, 1, &base, Path::new("a"), Format::Png, 90).unwrap();
+        let img = image::open(&png).unwrap().into_rgba8();
+        assert_eq!(img.get_pixel(0, 0).0, [30, 20, 10, 255]);
+        assert_eq!(img.get_pixel(1, 0).0[3], 0);
+        let jpg = save_bgra(&bgra, 2, 1, &base, Path::new("b"), Format::Jpeg, 100).unwrap();
+        let img = image::open(&jpg).unwrap().into_rgb8();
+        assert!(img.get_pixel(1, 0).0[0] > 200);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn saves_every_format_and_decodes_back() {

@@ -6,7 +6,8 @@ use snapling_core::annotate::{self, FontRef, Pt};
 use snapling_core::selection::{Point, Rect};
 use std::sync::OnceLock;
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapMut, Stroke, Transform,
+    BlendMode, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapRef,
+    Stroke, Transform,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,10 @@ pub const TOOLS: [Tool; 9] = [
     Tool::Blur,
 ];
 
+pub const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
+pub const FONT_MONO: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-SemiBold.ttf");
+
 pub const COLORS: [[u8; 3]; 8] = [
     [255, 59, 48],
     [255, 138, 31],
@@ -61,6 +66,10 @@ pub const SIZES: [f32; 3] = [2.0, 4.0, 8.0];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Control {
     Action(Button),
+    /// Rectangular selection (V).
+    Select,
+    /// Freeform selection (L).
+    Lasso,
     Tool(Tool),
     Undo,
     Redo,
@@ -71,8 +80,14 @@ pub enum Control {
     Strength(u8),
 }
 
-/// Editor state shown after the selection is confirmed.
+/// Tool rail and annotations, on screen from the first frame.
 pub struct Draw<'a> {
+    /// Monitor the rail stays on: the one under the cursor at open.
+    pub monitor: Rect,
+    /// Freeform selection is the active mode.
+    pub lasso_mode: bool,
+    /// Outline of the freeform selection, finished or being drawn.
+    pub lasso: Option<&'a [Pt]>,
     pub tool: Option<Tool>,
     pub color: [u8; 3],
     pub size: f32,
@@ -148,9 +163,12 @@ const ORANGE: [u8; 4] = [0xFF, 0x8A, 0x1F, 255];
 const ICON: [u8; 4] = [0xE6, 0xEB, 0xF5, 255];
 const ICON_MUTED: [u8; 4] = [0xA3, 0xAE, 0xC2, 255];
 const TEXT: [u8; 4] = [0xF3, 0xF6, 0xFC, 255];
-const BTN: f32 = 40.0;
-const BAR_PAD: f32 = 6.0;
+const BTN: f32 = 36.0;
+const BAR_PAD: f32 = 5.0;
 const GAP: f32 = 4.0;
+const RAIL_W: f32 = 56.0;
+const RAIL_BTN: (f32, f32) = (44.0, 40.0);
+const OPTS_W: f32 = 160.0;
 
 /// Toolbar buttons in mockup order; `None` is the divider.
 const BAR: [Option<Button>; 7] = [
@@ -163,21 +181,43 @@ const BAR: [Option<Button>; 7] = [
     Some(Button::Cancel),
 ];
 
-const HINTS_DRAW: [(&str, &str); 5] = [
-    ("1–9", "рисовать"),
-    ("Ctrl+Z", "отменить"),
-    ("Enter", "копировать"),
-    ("S", "сохранить"),
-    ("Esc", "инструмент / отмена"),
-];
-
-const HINTS: [(&str, &str); 7] = [
+const HINTS_SELECTED: [(&str, &str); 8] = [
     ("Enter", "копировать"),
     ("S", "сохранить"),
     ("E", "редактор"),
     ("O", "текст"),
-    ("R", "перевод"),
+    ("V", "область"),
+    ("L", "произвольная"),
+    ("1–9", "рисовать"),
+    ("Esc", "отмена"),
+];
+
+const HINTS: [(&str, &str); 6] = [
+    ("Мышь", "выделить"),
+    ("Клик", "окно"),
     ("Shift", "квадрат"),
+    ("L", "произвольная"),
+    ("1–9", "рисовать"),
+    ("Esc", "отмена"),
+];
+
+const HINTS_PAINT: [(&str, &str); 5] = [
+    ("", "Рисуй прямо по экрану"),
+    ("V", "выделить область"),
+    ("L", "произвольная"),
+    ("Ctrl+Z", "отменить"),
+    ("Esc", "закрыть"),
+];
+
+const HINTS_LASSO: [(&str, &str); 2] = [
+    ("", "Обведи мышью, контур замкнётся сам"),
+    ("Esc", "отмена"),
+];
+
+const HINTS_LASSO_DONE: [(&str, &str); 4] = [
+    ("", "За контуром снимок прозрачный"),
+    ("Enter", "копировать"),
+    ("L", "обвести заново"),
     ("Esc", "отмена"),
 ];
 
@@ -192,11 +232,9 @@ fn fonts() -> &'static Fonts {
     F.get_or_init(|| {
         let f = |b: &'static [u8]| FontRef::try_from_slice(b).expect("bundled font");
         Fonts {
-            regular: f(include_bytes!("../../../assets/fonts/Inter-Regular.ttf")),
-            semibold: f(include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf")),
-            mono: f(include_bytes!(
-                "../../../assets/fonts/JetBrainsMono-SemiBold.ttf"
-            )),
+            regular: f(FONT_REGULAR),
+            semibold: f(FONT_SEMIBOLD),
+            mono: f(FONT_MONO),
         }
     })
 }
@@ -235,7 +273,7 @@ fn text_w(font: &FontRef<'_>, s: &str, px: f32) -> f32 {
 }
 
 fn primary_w(s: f32) -> f32 {
-    (12.0 + 18.0 + 8.0 + 16.0) * s + text_w(&fonts().semibold, "Копировать", 14.0 * s)
+    (10.0 + 17.0 + 8.0 + 14.0) * s + text_w(&fonts().semibold, "Копировать", 13.5 * s)
 }
 
 /// Pill above the selection's top-left corner, or inside it when there is no room.
@@ -258,15 +296,27 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
     let blur = (24.0 * s).ceil() as i32;
     if let Some(sel) = sc.selection {
         let label = format!("{} × {}", sel.width, sel.height);
-        let (w, h) = (text_w(&f.mono, &label, 12.0 * s) + 20.0 * s, 24.0 * s);
-        let pill = above_or_inside(sel, sc.monitor, w, h, 14.0 * s, s);
+        let (w, h) = (text_w(&f.mono, &label, 11.0 * s) + 16.0 * s, 20.0 * s);
+        let pill = above_or_inside(sel, sc.monitor, w, h, 8.0 * s, s);
         out.bounds = union(out.bounds, inflate(pill, blur));
         out.size_pill = Some((pill, label));
         out.bounds = union(out.bounds, inflate(sel, (10.0 * s) as i32));
         if sc.confirmed && !sc.dragging {
-            let tw = 2.0 * BAR_PAD * s + primary_w(s) + 5.0 * BTN * s + 9.0 * s + 6.0 * GAP * s;
+            let lasso = sc.tools.as_ref().is_some_and(|t| t.lasso.is_some());
+            let items: Vec<Option<Button>> = BAR
+                .into_iter()
+                .filter(|b| !lasso || !matches!(b, Some(Button::Text | Button::Translate)))
+                .collect();
+            let width = |b: Option<Button>| match b {
+                Some(Button::Copy) => primary_w(s),
+                Some(_) => BTN * s,
+                None => 9.0 * s,
+            };
+            let tw = 2.0 * BAR_PAD * s
+                + items.iter().map(|b| width(*b)).sum::<f32>()
+                + (items.len() - 1) as f32 * GAP * s;
             let th = (BTN + 2.0 * BAR_PAD) * s;
-            let gap = 18.0 * s;
+            let gap = 14.0 * s;
             let mon = sc.monitor;
             let x = (sel.left as f32)
                 .min(mon.right() as f32 - tw - gap)
@@ -283,27 +333,20 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
             let bar = r(x, y, tw, th);
             let mut bx = x + BAR_PAD * s;
             let by = y + BAR_PAD * s;
-            for b in BAR {
-                let w = match b {
-                    Some(Button::Copy) => primary_w(s),
-                    Some(_) => BTN * s,
-                    None => 9.0 * s,
-                };
+            for b in items {
+                let w = width(b);
                 match b {
                     Some(b) => out
                         .buttons
                         .push((r(bx, by, w, BTN * s), Control::Action(b))),
                     None => out
                         .dividers
-                        .push(r(bx + 4.0 * s, by + 9.0 * s, s, 22.0 * s)),
+                        .push(r(bx + 4.0 * s, by + 8.0 * s, s, 20.0 * s)),
                 }
                 bx += w + GAP * s;
             }
             out.bounds = union(out.bounds, inflate(bar, (40.0 * s) as i32));
             out.toolbar = Some(bar);
-            if let Some(t) = &sc.tools {
-                editor_layout(&mut out, sc, t, sel, bar);
-            }
         }
     } else if let Some(hv) = &sc.hover {
         let tag = text_w(&f.semibold, hv.target.label(), 13.0 * s) + 18.0 * s;
@@ -323,6 +366,15 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
         out.bounds = union(out.bounds, inflate(pill, blur));
         out.bounds = union(out.bounds, inflate(hv.rect, (8.0 * s) as i32));
         out.hover_pill = Some(pill);
+    }
+    if let Some(pts) = sc.tools.as_ref().and_then(|t| t.lasso) {
+        for p in pts {
+            let dot = r(p.x - 4.0, p.y - 4.0, 8.0, 8.0);
+            out.bounds = union(out.bounds, dot);
+        }
+    }
+    if let Some(t) = sc.tools.as_ref().filter(|_| !sc.dragging) {
+        rail_layout(&mut out, sc, t);
     }
     if !sc.dragging {
         let fs = 12.5 * s;
@@ -346,113 +398,109 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
 }
 
 fn hints(sc: &Scene<'_>) -> &'static [(&'static str, &'static str)] {
-    if sc.confirmed { &HINTS_DRAW } else { &HINTS }
+    let t = sc.tools.as_ref();
+    let painting = t.is_some_and(|t| t.tool.is_some());
+    match (t.is_some_and(|t| t.lasso_mode), sc.confirmed) {
+        (_, false) if painting => &HINTS_PAINT,
+        (true, true) if !painting => &HINTS_LASSO_DONE,
+        (true, false) => &HINTS_LASSO,
+        (_, true) => &HINTS_SELECTED,
+        _ => &HINTS,
+    }
 }
 
-/// Vertical tool strip beside the selection and the options bar after the action toolbar.
-fn editor_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>, sel: Rect, bar: Rect) {
+/// Tool rail at the monitor's edge and the options of the active tool beside it.
+/// The rail moves to the other edge when a selection would sit under it.
+fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
     let s = sc.scale;
-    let mon = sc.monitor;
-    let gap = 14.0 * s;
-    let n = TOOLS.len() as f32;
-    let sw = (BTN + 2.0 * BAR_PAD) * s;
-    let sh = 2.0 * BAR_PAD * s + (n + 2.0) * BTN * s + 9.0 * s + (n + 2.0) * GAP * s;
-    let (ml, mr) = (mon.left as f32, mon.right() as f32);
-    let x = if sel.right() as f32 + gap + sw <= mr {
-        sel.right() as f32 + gap
-    } else if sel.left as f32 - gap - sw >= ml {
-        sel.left as f32 - gap - sw
+    let mon = t.monitor;
+    let (bw, bh) = (RAIL_BTN.0 * s, RAIL_BTN.1 * s);
+    let (pad, gap, sep) = (6.0 * s, 2.0 * s, 13.0 * s);
+    let items: Vec<Option<Control>> = [Some(Control::Select), Some(Control::Lasso), None]
+        .into_iter()
+        .chain(TOOLS.iter().map(|&t| Some(Control::Tool(t))))
+        .chain([None, Some(Control::Undo), Some(Control::Redo)])
+        .collect();
+    let sw = RAIL_W * s;
+    let sh = 2.0 * pad
+        + items
+            .iter()
+            .map(|c| if c.is_some() { bh } else { sep })
+            .sum::<f32>()
+        + (items.len() - 1) as f32 * gap;
+    let edge = 24.0 * s;
+    let left = mon.left as f32 + edge;
+    let reach = left + sw + 12.0 * s + OPTS_W * s;
+    let covered = sc.selection.is_some_and(|sel| (sel.left as f32) < reach);
+    let x = if covered {
+        mon.right() as f32 - edge - sw
     } else {
-        sel.right() as f32 - sw - gap
+        left
     };
-    let y = (sel.top as f32)
-        .min(mon.bottom() as f32 - sh - gap)
-        .max(mon.top as f32 + gap);
-    // Narrow selections: the strip would run through the action toolbar; step past it.
-    let x = if y < bar.bottom() as f32
-        && y + sh > bar.top as f32
-        && x < bar.right() as f32 + gap
-        && x + sw > bar.left as f32
-    {
-        bar.right() as f32 + gap
-    } else {
-        x
-    };
-    let strip = r(x, y, sw, sh);
-    let mut by = y + BAR_PAD * s;
-    let bx = x + BAR_PAD * s;
-    let items = TOOLS.iter().map(|&t| Some(Control::Tool(t))).chain([
-        None,
-        Some(Control::Undo),
-        Some(Control::Redo),
-    ]);
+    let y = mon.top as f32 + (mon.height as f32 - sh) / 2.0;
+    let rail = r(x, y, sw, sh);
+    let bx = x + pad;
+    let mut by = y + pad;
+    let mut first_tool = y;
     for c in items {
-        let h = if c.is_some() { BTN } else { 9.0 } * s;
         match c {
-            Some(c) => out.buttons.push((r(bx, by, BTN * s, h), c)),
-            None => out
-                .dividers
-                .push(r(bx + 9.0 * s, by + 4.0 * s, 22.0 * s, s)),
+            Some(c) => {
+                if c == Control::Tool(TOOLS[0]) {
+                    first_tool = by;
+                }
+                out.buttons.push((r(bx, by, bw, bh), c));
+                by += bh + gap;
+            }
+            None => {
+                out.dividers
+                    .push(r(bx + 8.0 * s, by + 6.0 * s, 28.0 * s, s));
+                by += sep + gap;
+            }
         }
-        by += h + GAP * s;
     }
-    out.bounds = union(out.bounds, inflate(strip, (40.0 * s) as i32));
-    out.strip = Some(strip);
+    out.bounds = union(out.bounds, inflate(rail, (40.0 * s) as i32));
+    out.strip = Some(rail);
 
     let Some(tool) = t.tool else { return };
-    let items: Vec<Option<Control>> = if tool == Tool::Blur {
-        [
-            Some(Control::Gauss(false)),
-            Some(Control::Gauss(true)),
-            None,
+    let rows: Vec<(Vec<Control>, f32)> = if tool == Tool::Blur {
+        vec![
+            (vec![Control::Gauss(false), Control::Gauss(true)], 36.0),
+            ((0..3).map(Control::Strength).collect(), 32.0),
+            ((0..3).map(Control::Size).collect(), 28.0),
         ]
-        .into_iter()
-        .chain((0..3).map(|i| Some(Control::Strength(i))))
-        .chain([None])
-        .chain((0..3).map(|i| Some(Control::Size(i))))
-        .collect()
     } else {
-        (0..COLORS.len())
-            .map(|i| Some(Control::Color(i)))
-            .chain([None])
-            .chain((0..3).map(|i| Some(Control::Size(i))))
-            .collect()
+        vec![
+            ((0..4).map(Control::Color).collect(), 26.0),
+            ((4..8).map(Control::Color).collect(), 26.0),
+            ((0..3).map(Control::Size).collect(), 28.0),
+        ]
     };
-    let width = |c: &Option<Control>| match c {
-        Some(Control::Gauss(_)) => BTN,
-        Some(_) => 32.0,
-        None => 9.0,
-    } * s;
-    let ow = 2.0 * BAR_PAD * s
-        + items.iter().map(width).sum::<f32>()
-        + (items.len() - 1) as f32 * GAP * s;
-    let oh = bar.height as f32;
-    let mut ox = bar.left as f32;
-    let mut oy = bar.bottom() as f32 + 8.0 * s;
-    if oy + oh > mon.bottom() as f32 - gap {
-        oy = bar.top as f32 - 8.0 * s - oh;
-    }
-    if oy < strip.bottom() as f32
-        && oy + oh > strip.top as f32
-        && ox + ow > strip.left as f32
-        && ox < strip.right() as f32
-    {
-        ox = strip.right() as f32 + 8.0 * s;
-    }
-    let ox = ox.min(mr - ow).max(ml);
-    let opts = r(ox, oy, ow, oh);
-    let mut cx = ox + BAR_PAD * s;
-    let cy = oy + BAR_PAD * s;
-    for c in &items {
-        let w = width(c);
-        match c {
-            Some(c) => out.buttons.push((r(cx, cy, w, BTN * s), *c)),
-            None => out
-                .dividers
-                .push(r(cx + 4.0 * s, cy + 9.0 * s, s, 22.0 * s)),
+    let ow = OPTS_W * s;
+    let ox = if covered {
+        x - 12.0 * s - ow
+    } else {
+        x + sw + 12.0 * s
+    };
+    let inner = ow - 24.0 * s;
+    let mut cy = first_tool + 6.0 * s;
+    let top = first_tool - 6.0 * s;
+    for (i, (row, cell)) in rows.iter().enumerate() {
+        let cell = cell * s;
+        let step = (inner - cell) / (row.len() - 1) as f32;
+        for (k, c) in row.iter().enumerate() {
+            let cx = ox + 12.0 * s + k as f32 * step;
+            out.buttons.push((r(cx, cy, cell, cell), *c));
         }
-        cx += w + GAP * s;
+        cy += cell;
+        let next = rows.get(i + 1);
+        if next.is_some_and(|(n, _)| !matches!(n[0], Control::Color(_))) {
+            out.dividers.push(r(ox + 12.0 * s, cy + 9.0 * s, inner, s));
+            cy += 19.0 * s;
+        } else if next.is_some() {
+            cy += 8.0 * s;
+        }
     }
+    let opts = r(ox, top, ow, cy + 12.0 * s - top);
     out.bounds = union(out.bounds, inflate(opts, (40.0 * s) as i32));
     out.options = Some(opts);
 }
@@ -643,6 +691,16 @@ const CUBES: [&str; 5] = [
     "M 5 15 H 9 V 19 H 5 Z",
     "M 15 15 H 19 V 19 H 15 Z",
 ];
+const SELECT: [&str; 4] = [
+    "M 4 8 V 5 H 7",
+    "M 17 5 H 20 V 8",
+    "M 20 16 V 19 H 17",
+    "M 7 19 H 4 V 16",
+];
+const LASSO: [&str; 2] = [
+    "M 12 4 C 17 4 20 6.2 20 9.5 C 20 12.8 16 15 12 15 C 8 15 4 12.8 4 9.5 C 4 6.2 7 4 12 4 Z",
+    "M 7 14 C 6 16 6 18 8 19 C 9.5 19.7 11 19 11 17.5",
+];
 const DROP: [&str; 1] =
     ["M 12 4 C 12 4 6 11 6 15 C 6 18.3 8.7 21 12 21 C 15.3 21 18 18.3 18 15 C 18 11 12 4 12 4 Z"];
 
@@ -818,56 +876,50 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             pm.stroke_path(&p, &paint(ORANGE), &stroke(2.0 * s), id, None);
         }
     }
-    if let Some(sel) = sc.selection {
-        let (x, y, w, h) = (
-            sel.left as f32,
-            sel.top as f32,
-            sel.width as f32,
-            sel.height as f32,
-        );
-        let ring = |d: f32| {
-            let f = fit(
-                r(x - d, y - d, w + 2.0 * d, h + 2.0 * d),
-                sc.monitor,
-                0.75 * s,
-            );
-            rr(f, 2.0 + d)
-        };
-        if let Some(p) = ring(2.25 * s) {
-            pm.stroke_path(&p, &paint([17, 24, 39, 140]), &stroke(1.5 * s), id, None);
+    let lasso = sc.tools.as_ref().and_then(|t| t.lasso);
+    if let Some(p) = lasso.and_then(annotate::polygon) {
+        let c = [255, 255, 255, 178];
+        pm.stroke_path(&p, &paint(c), &stroke(1.5 * s), id, None);
+    }
+    if let Some(sel) = sc.selection.filter(|_| lasso.is_none()) {
+        // Design «А»: a hairline, with corners that show where to pull.
+        let a = fit(sel, sc.monitor, 1.0 * s);
+        if let Some(p) = rr(a, 3.0 * s) {
+            pm.stroke_path(&p, &paint([255, 255, 255, 128]), &stroke(s), id, None);
         }
-        if let Some(p) = ring(0.75 * s) {
-            pm.stroke_path(&p, &paint([255, 255, 255, 255]), &stroke(1.5 * s), id, None);
-        }
-        if sc.confirmed {
-            for (hx, hy) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
-                if let Some(p) = PathBuilder::from_circle(hx, hy + 2.0 * s, 8.0 * s) {
-                    pm.fill_path(&p, &paint([0, 0, 0, 50]), FillRule::Winding, id, None);
-                }
-                if let Some(p) = PathBuilder::from_circle(hx, hy, 7.0 * s) {
-                    pm.fill_path(
-                        &p,
-                        &paint([255, 255, 255, 255]),
-                        FillRule::Winding,
-                        id,
-                        None,
-                    );
-                    pm.stroke_path(&p, &paint(BLUE), &stroke(2.0 * s), id, None);
-                }
+        let (x0, y0) = (a.left as f32, a.top as f32);
+        let (x1, y1) = (a.right() as f32, a.bottom() as f32);
+        let len = (14.0 * s)
+            .min(a.width as f32 / 2.0)
+            .min(a.height as f32 / 2.0);
+        let rad = (4.0 * s).min(len);
+        for (cx, cy, dx, dy) in [
+            (x0, y0, 1.0, 1.0),
+            (x1, y0, -1.0, 1.0),
+            (x0, y1, 1.0, -1.0),
+            (x1, y1, -1.0, -1.0),
+        ] {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy + dy * len);
+            pb.line_to(cx, cy + dy * rad);
+            pb.quad_to(cx, cy, cx + dx * rad, cy);
+            pb.line_to(cx + dx * len, cy);
+            if let Some(p) = pb.finish() {
+                pm.stroke_path(&p, &paint([255, 255, 255, 255]), &stroke(2.0 * s), id, None);
             }
         }
     }
     if let Some((pill, label)) = &lay.size_pill {
-        glass(pm, *pill, pill.height as f32 / 2.0, GLASS, 20.0 * s, false);
+        glass(pm, *pill, 7.0 * s, GLASS_HINT, 20.0 * s, false);
         let cy = pill.top as f32 + pill.height as f32 / 2.0;
         text(
             pm,
             &f.mono,
             label,
-            pill.left as f32 + 10.0 * s,
+            pill.left as f32 + 8.0 * s,
             cy,
-            12.0 * s,
-            TEXT,
+            11.0 * s,
+            [0xC9, 0xD2, 0xE3, 255],
         );
     }
     if let (Some(pill), Some(hv)) = (lay.hover_pill, &sc.hover) {
@@ -903,7 +955,7 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             [0xC9, 0xD2, 0xE3, 255],
         );
     }
-    for (panel, rad) in [(lay.toolbar, 16.0), (lay.strip, 16.0), (lay.options, 16.0)] {
+    for (panel, rad) in [(lay.toolbar, 14.0), (lay.strip, 16.0), (lay.options, 14.0)] {
         let Some(bar) = panel else { continue };
         glass(pm, bar, rad * s, GLASS, 24.0 * s, true);
         // Top highlight of the mockup's inset shadow.
@@ -931,6 +983,8 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
         let (cx, cy) = (bx + bw / 2.0, by + bh / 2.0);
         let selected = tools.is_some_and(|t| match c {
             Control::Tool(x) => t.tool == Some(x),
+            Control::Select => t.tool.is_none() && !t.lasso_mode,
+            Control::Lasso => t.tool.is_none() && t.lasso_mode,
             Control::Color(i) => t.color == COLORS[i],
             Control::Size(i) => t.size == SIZES[i],
             Control::Gauss(g) => t.blur.gauss == g,
@@ -946,35 +1000,39 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             } else {
                 BLUE
             };
-            if let Some(p) = rr(b_rect, 11.0 * s) {
+            if let Some(p) = rr(b_rect, 10.0 * s) {
                 pm.fill_path(&p, &paint(fill), FillRule::Winding, id, None);
             }
             let mut pb = PathBuilder::new();
-            pb.move_to(bx + 11.0 * s, by + 1.0);
-            pb.line_to(bx + bw - 11.0 * s, by + 1.0);
+            pb.move_to(bx + 10.0 * s, by + 1.0);
+            pb.line_to(bx + bw - 10.0 * s, by + 1.0);
             if let Some(top) = pb.finish() {
                 pm.stroke_path(&top, &paint([255, 255, 255, 46]), &stroke(1.0), id, None);
             }
             icon(
                 pm,
                 icon_data(Button::Copy),
-                bx + 21.0 * s,
+                bx + 18.5 * s,
                 cy,
-                18.0 * s,
+                17.0 * s,
                 [255; 4],
             );
             text(
                 pm,
                 &f.semibold,
                 "Копировать",
-                bx + 38.0 * s,
+                bx + 35.0 * s,
                 cy,
-                14.0 * s,
+                13.5 * s,
                 [255; 4],
             );
             continue;
         }
-        let fill = if selected && matches!(c, Control::Tool(_) | Control::Gauss(_)) {
+        let filled = matches!(
+            c,
+            Control::Tool(_) | Control::Gauss(_) | Control::Select | Control::Lasso
+        );
+        let fill = if selected && filled {
             Some(BLUE)
         } else if hovered && !disabled {
             Some([255, 255, 255, 20])
@@ -990,15 +1048,24 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
         match c {
             Control::Action(b) => {
                 let (size, col) = if b == Button::Cancel {
-                    (18.0, ICON_MUTED)
+                    (17.0, ICON_MUTED)
                 } else {
-                    (19.0, ICON)
+                    (18.0, ICON)
                 };
                 icon(pm, icon_data(b), cx, cy, size * s, col);
             }
             Control::Tool(t) => {
                 let col = if selected { [255; 4] } else { ICON };
                 icon(pm, tool_icon(t), cx, cy, 19.0 * s, col);
+            }
+            Control::Select | Control::Lasso => {
+                let col = if selected { [255; 4] } else { ICON };
+                let d: &[&str] = if c == Control::Select {
+                    &SELECT
+                } else {
+                    &LASSO
+                };
+                icon(pm, d, cx, cy, 19.0 * s, col);
             }
             Control::Undo | Control::Redo => {
                 let col = if disabled {
@@ -1011,12 +1078,12 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             }
             Control::Color(i) => {
                 let [r0, g0, b0] = COLORS[i];
-                if let Some(p) = PathBuilder::from_circle(cx, cy, 8.0 * s) {
+                if let Some(p) = PathBuilder::from_circle(cx, cy, 12.0 * s) {
                     pm.fill_path(&p, &paint([r0, g0, b0, 255]), FillRule::Winding, id, None);
                     pm.stroke_path(&p, &paint([255, 255, 255, 40]), &stroke(1.0), id, None);
                 }
                 if (selected || hovered)
-                    && let Some(p) = PathBuilder::from_circle(cx, cy, 11.5 * s)
+                    && let Some(p) = PathBuilder::from_circle(cx, cy, 15.0 * s)
                 {
                     let a = if selected { 255 } else { 110 };
                     pm.stroke_path(&p, &paint([255, 255, 255, a]), &stroke(1.5 * s), id, None);
@@ -1061,6 +1128,29 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             x += 18.0 * s;
         }
     }
+}
+
+/// Copies `src` into the buffer inside the outline: the freeform selection stays undimmed.
+/// A hard edge, the same one the exported image gets.
+pub fn paint_region(pm: &mut PixmapMut<'_>, src: PixmapRef<'_>, pts: &[Pt]) {
+    let Some(path) = annotate::polygon(pts) else {
+        return;
+    };
+    let id = Transform::identity();
+    let shader = tiny_skia::Pattern::new(
+        src,
+        tiny_skia::SpreadMode::Pad,
+        tiny_skia::FilterQuality::Nearest,
+        1.0,
+        id,
+    );
+    let p = Paint {
+        shader,
+        blend_mode: BlendMode::Source,
+        anti_alias: false,
+        ..Paint::default()
+    };
+    pm.fill_path(&path, &p, FillRule::Winding, id, None);
 }
 
 pub fn button_at(lay: &Layout, p: Point) -> Option<Control> {
@@ -1114,11 +1204,11 @@ mod tests {
         };
         let lay = layout(&scene(Some(sel), true));
         let bar = lay.toolbar.unwrap();
-        assert_eq!((bar.left, bar.top, bar.height), (368, 442, 52));
+        assert_eq!((bar.left, bar.top, bar.height), (368, 438, 46));
         assert_eq!(lay.buttons.len(), 6);
         assert_eq!(lay.buttons[0].1, Control::Action(Button::Copy));
         let pill = lay.size_pill.as_ref().unwrap();
-        assert_eq!((pill.0.left, pill.0.top), (368, 172));
+        assert_eq!((pill.0.left, pill.0.top), (368, 182));
         assert_eq!(pill.1, "488 × 214");
         let p = Point {
             x: lay.buttons[1].0.left + 5,
@@ -1164,10 +1254,69 @@ mod tests {
             "blue as BGRA"
         );
         assert_eq!(
-            px(sel.left as u32 - 3, sel.top as u32),
+            px(sel.left as u32, sel.top as u32 + 8),
             [255, 255, 255],
-            "white handle"
+            "white corner"
         );
+        assert_ne!(
+            px(sel.left as u32, sel.top as u32 + 80),
+            [255, 255, 255],
+            "only a hairline between corners"
+        );
+    }
+
+    #[test]
+    fn paint_region_copies_inside_the_outline_only() {
+        let (w, h) = (20u32, 20u32);
+        let src = vec![200u8; (w * h * 4) as usize];
+        let mut buf = vec![10u8; (w * h * 4) as usize];
+        let pt = |x, y| Pt { x, y };
+        let pts = [pt(5.0, 5.0), pt(15.0, 5.0), pt(15.0, 15.0), pt(5.0, 15.0)];
+        let from = PixmapRef::from_bytes(&src, w, h).unwrap();
+        let mut pm = PixmapMut::from_bytes(&mut buf, w, h).unwrap();
+        paint_region(&mut pm, from, &pts);
+        let at = |x: u32, y: u32| buf[((y * w + x) * 4) as usize];
+        assert_eq!(at(10, 10), 200);
+        assert_eq!(at(2, 2), 10);
+    }
+
+    #[test]
+    fn rail_leaves_room_for_a_selection_on_the_left() {
+        let mon = Rect {
+            left: 0,
+            top: 0,
+            width: 1440,
+            height: 900,
+        };
+        let draw = |tool| Draw {
+            monitor: mon,
+            lasso_mode: false,
+            lasso: None,
+            tool,
+            color: COLORS[0],
+            size: SIZES[1],
+            blur: annotate::BlurStyle::default(),
+            can_undo: false,
+            can_redo: false,
+            live: None,
+            caret: None,
+        };
+        let mut sc = scene(None, false);
+        sc.tools = Some(draw(Some(Tool::Arrow)));
+        let lay = layout(&sc);
+        assert_eq!(lay.strip.unwrap().left, 24);
+        assert!(lay.options.is_some());
+        assert_eq!(lay.buttons[0].1, Control::Select);
+        let sel = Rect {
+            left: 60,
+            top: 200,
+            width: 300,
+            height: 200,
+        };
+        let mut sc = scene(Some(sel), true);
+        sc.tools = Some(draw(None));
+        let rail = layout(&sc).strip.unwrap();
+        assert_eq!(rail.right(), 1440 - 24);
     }
 
     #[test]
@@ -1185,7 +1334,13 @@ mod tests {
             }
         }
         for t in TOOLS {
-            for d in tool_icon(t).iter().chain(&UNDO).chain(&REDO).chain(&DROP) {
+            let more = UNDO
+                .iter()
+                .chain(&REDO)
+                .chain(&DROP)
+                .chain(&SELECT)
+                .chain(&LASSO);
+            for d in tool_icon(t).iter().chain(more) {
                 assert!(svg_path(d, 0.0, 0.0, 1.0).is_some(), "{t:?}: {d}");
             }
         }
@@ -1243,7 +1398,11 @@ mod preview {
             height: 900,
         };
         let live = annotate::Element {
-            kind: annotate::Kind::Arrow(Pt { x: 420.0, y: 380.0 }, Pt { x: 700.0, y: 280.0 }),
+            kind: annotate::Kind::Arrow(
+                Pt { x: 420.0, y: 380.0 },
+                Pt { x: 700.0, y: 280.0 },
+                annotate::Head::Sharp,
+            ),
             color: COLORS[0],
             size: SIZES[1],
         };
@@ -1260,6 +1419,9 @@ mod preview {
                     hover: None,
                     hover_button: Some(Control::Action(Button::Edit)),
                     tools: Some(Draw {
+                        monitor: mon,
+                        lasso_mode: false,
+                        lasso: None,
                         tool: Some(Tool::Blur),
                         color: COLORS[0],
                         size: SIZES[1],
@@ -1313,6 +1475,63 @@ mod preview {
             )
             .unwrap();
             println!("{}", path.display());
+        }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// `cargo test --release -p snapling-scene bench_frame -- --ignored --nocapture`:
+    /// one overlay frame on the widest screen, panels and glass included.
+    #[test]
+    #[ignore]
+    fn bench_frame() {
+        let (w, h) = (4480u32, 1527u32);
+        let mon = Rect {
+            left: 0,
+            top: 0,
+            width: 2560,
+            height: 1527,
+        };
+        let sel = Rect {
+            left: 600,
+            top: 300,
+            width: 900,
+            height: 500,
+        };
+        let mut buf = vec![70u8; (w * h * 4) as usize];
+        let sc = Scene {
+            scale: 1.0,
+            monitor: mon,
+            cursor_monitor: mon,
+            selection: Some(sel),
+            confirmed: true,
+            dragging: false,
+            hover: None,
+            hover_button: None,
+            tools: Some(Draw {
+                monitor: mon,
+                lasso_mode: false,
+                lasso: None,
+                tool: Some(Tool::Arrow),
+                color: COLORS[0],
+                size: SIZES[1],
+                blur: annotate::BlurStyle::default(),
+                can_undo: true,
+                can_redo: false,
+                live: None,
+                caret: None,
+            }),
+        };
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            let lay = layout(&sc);
+            let laid = t0.elapsed().as_micros();
+            let mut pm = PixmapMut::from_bytes(&mut buf, w, h).unwrap();
+            draw(&mut pm, &sc, &lay);
+            println!("layout {laid} us, frame {} us", t0.elapsed().as_micros());
         }
     }
 }

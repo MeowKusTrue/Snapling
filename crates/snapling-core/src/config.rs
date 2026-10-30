@@ -128,6 +128,8 @@ language = "en"
 theme = "system"
 # Значок в трее: "auto" — под цвет панели задач, "white", "black".
 tray_icon = "auto"
+# С какой стороны выезжают настройки: "right" или "left".
+panel_side = "right"
 # Экран приветствия уже показан.
 welcomed = false
 "#;
@@ -219,6 +221,7 @@ pub struct Ui {
     pub language: String,
     pub theme: Theme,
     pub tray_icon: TrayIcon,
+    pub panel_side: PanelSide,
     pub welcomed: bool,
 }
 
@@ -228,9 +231,19 @@ impl Default for Ui {
             language: "en".into(),
             theme: Theme::default(),
             tray_icon: TrayIcon::default(),
+            panel_side: PanelSide::default(),
             welcomed: false,
         }
     }
+}
+
+/// Side the settings panel slides in from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelSide {
+    Left,
+    #[default]
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]

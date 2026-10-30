@@ -10,7 +10,7 @@ use egui_phosphor::regular as icon;
 use snapling_core::history::{self, Entry};
 use snapling_core::i18n::{t, tf};
 use snapling_core::storage;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -76,6 +76,13 @@ fn fit(area: Rect, size: [usize; 2]) -> Rect {
     Rect::from_center_size(area.center(), vec2(w, h) * k)
 }
 
+/// A header button that the page cannot serve by itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Wish {
+    Settings,
+    About,
+}
+
 pub struct History {
     hooks: Hooks,
     /// Newest first.
@@ -85,6 +92,8 @@ pub struct History {
     now: String,
     status: String,
     tex: HashMap<String, Option<TextureHandle>>,
+    /// Files that gave no picture: they get a mark, not a skeleton.
+    broken: HashSet<String>,
     ask: Sender<String>,
     got: Receiver<Picture>,
     /// Index into `entries`.
@@ -98,6 +107,7 @@ pub struct History {
     scroll: (f32, f32),
     scroll_to: Option<f32>,
     columns: usize,
+    wish: Option<Wish>,
     /// Recognized text of a shot, while recognition runs.
     reading: Option<Receiver<(Entry, Result<String, String>)>>,
 }
@@ -132,6 +142,7 @@ impl History {
             period: 0,
             status: String::new(),
             tex: HashMap::new(),
+            broken: HashSet::new(),
             ask,
             got,
             selected: None,
@@ -143,6 +154,7 @@ impl History {
             scroll: (0.0, 0.0),
             scroll_to: None,
             columns: 1,
+            wish: None,
             reading: None,
         }
     }
@@ -186,11 +198,17 @@ impl History {
             if self.tex.len() >= MAX_PICTURES {
                 self.tex.clear();
             }
+            if img.is_none() {
+                self.broken.insert(path.clone());
+            }
             let tex = img.map(|i| ctx.load_texture(&path, i, TextureOptions::LINEAR));
             self.tex.insert(path, tex);
         }
         while let Ok((path, img)) = self.got_full.try_recv() {
             if let Some(f) = self.full.as_mut().filter(|f| f.0 == path) {
+                if img.is_none() {
+                    self.broken.insert(path.clone());
+                }
                 f.1 = img.map(|i| ctx.load_texture("full", i, TextureOptions::LINEAR));
             }
         }
@@ -336,6 +354,27 @@ impl History {
         Some(Act::Select(visible[to].0))
     }
 
+    /// A skeleton while the picture loads; a recording or a lost file shows what it is.
+    fn placeholder(&self, ui: &egui::Ui, rect: Rect, e: &Entry) {
+        let p = ui::pal(ui.ctx());
+        let known = !Self::is_recording(e) || e.path.ends_with(".gif");
+        if known && !self.broken.contains(&e.path) {
+            return ui::skeleton(ui, rect, 9.0);
+        }
+        let glyph = if Self::is_recording(e) {
+            icon::VIDEO_CAMERA
+        } else {
+            icon::IMAGE_BROKEN
+        };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            ui::icon_font(30.0),
+            p.muted,
+        );
+    }
+
     fn card(&mut self, ui: &mut egui::Ui, rect: Rect, index: usize) -> Option<Act> {
         let ctx = ui.ctx().clone();
         let p = ui::pal(&ctx);
@@ -362,7 +401,7 @@ impl History {
                 area.set_clip_rect(shot.shrink(10.0).intersect(ui.clip_rect()));
                 area.label(RichText::new(&e.text).size(12.5).color(p.muted));
             }
-            None => {}
+            None => self.placeholder(ui, shot, &e),
         }
         let text = Rect::from_min_max(
             pos2(rect.left() + 10.0, shot.bottom() + 4.0),
@@ -451,10 +490,14 @@ impl History {
         ui.spacing_mut().item_spacing.y = 10.0;
         let (area, r) = ui.allocate_exact_size(vec2(ui.available_width(), 176.0), Sense::click());
         ui.painter().rect_filled(area, 10.0, p.well);
-        if let Some(t) = self.thumb(&e.path) {
-            egui::Image::new((t.id(), area.size()))
-                .corner_radius(8)
-                .paint_at(ui, fit(area, t.size()));
+        match self.thumb(&e.path) {
+            Some(t) => {
+                egui::Image::new((t.id(), area.size()))
+                    .corner_radius(8)
+                    .paint_at(ui, fit(area, t.size()));
+            }
+            None if e.path.is_empty() => {}
+            None => self.placeholder(ui, area, &e),
         }
         if r.double_clicked() {
             *act = Some(Act::Big(index));
@@ -552,15 +595,7 @@ impl History {
                             .corner_radius(6)
                             .paint_at(ui, fit(area, t.size()));
                     }
-                    None => {
-                        ui.painter().text(
-                            area.center(),
-                            egui::Align2::CENTER_CENTER,
-                            t("Загружаю…"),
-                            egui::FontId::proportional(14.0),
-                            p.muted,
-                        );
-                    }
+                    None => self.placeholder(ui, area, &e),
                 }
                 if r.double_clicked() {
                     self.big = false;
@@ -575,11 +610,16 @@ impl History {
         self.big
     }
 
-    /// Draws the page into the free space of `ui`.
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// What the header buttons asked for since the last call.
+    pub fn wish(&mut self) -> Option<Wish> {
+        self.wish.take()
+    }
+
+    /// Draws the page into the free space of `ui`. `active`: nothing covers it, keys are its own.
+    pub fn show(&mut self, ui: &mut egui::Ui, active: bool) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
-        if self.big && ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if active && self.big && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.big = false;
         }
         let p = ui::pal(&ctx);
@@ -588,7 +628,11 @@ impl History {
             self.big &= self.selected.is_none();
             self.selected = visible.first().map(|v| v.0);
         }
-        let mut act = self.keys(&ctx, &visible);
+        let mut act = if active {
+            self.keys(&ctx, &visible)
+        } else {
+            None
+        };
         if self.big
             && let Some(i) = self.selected
         {
@@ -628,7 +672,13 @@ impl History {
                         self.period = i;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::tone(ui, t("Открыть папку"), None, 36.0).clicked() {
+                        if ui::ghost_text(ui, t("О программе"), 36.0).clicked() {
+                            self.wish = Some(Wish::About);
+                        }
+                        if ui::tone(ui, t("Настройки"), None, 36.0).clicked() {
+                            self.wish = Some(Wish::Settings);
+                        }
+                        if ui::ghost_text(ui, t("Открыть папку"), 36.0).clicked() {
                             (self.hooks.open_folder)();
                         }
                         Frame::new()

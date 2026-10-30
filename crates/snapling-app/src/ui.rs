@@ -705,6 +705,16 @@ pub fn caption(ui: &mut Ui, text: &str) {
     });
 }
 
+/// Placeholder of something still loading: a calm pulse, the frames only while it is on screen.
+pub fn skeleton(ui: &Ui, rect: Rect, radius: f32) {
+    let ctx = ui.ctx();
+    let p = pal(ctx);
+    let phase = (ctx.input(|i| i.time) * 2.4).sin() as f32 * 0.5 + 0.5;
+    let fill = p.ghost.gamma_multiply(0.45 + 0.55 * phase);
+    ui.painter().rect_filled(rect, radius, fill);
+    ctx.request_repaint_after(std::time::Duration::from_millis(33));
+}
+
 /// Hairline on top of an image or a field.
 pub fn outline(ui: &Ui, rect: Rect, radius: f32) {
     ui.painter().rect_stroke(

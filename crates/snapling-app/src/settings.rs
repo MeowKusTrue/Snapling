@@ -1,13 +1,14 @@
 //! Settings window, its own process (`snapling --settings`). Every change goes straight into
 //! config.toml, comments kept; the tray picks it up by mtime, like a hand edit.
 
-use crate::history_ui::History;
+use crate::history_ui::{History, Wish};
 use crate::ui::{self, caption, card, divider, row, segmented, toggle};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, Sense, TextEdit, vec2};
 use egui_phosphor::regular as icon;
 use snapling_core::color::ColorFormat;
 use snapling_core::config::{
-    Action, Config, Engine, Format, Online, RecordFormat, SoundCfg, SoundPack, Theme, TrayIcon,
+    Action, Config, Engine, Format, Online, PanelSide, RecordFormat, SoundCfg, SoundPack, Theme,
+    TrayIcon,
 };
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n;
@@ -62,7 +63,6 @@ pub enum Page {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
-    Gallery,
     General,
     Capture,
     Hotkeys,
@@ -72,9 +72,8 @@ enum Tab {
     About,
 }
 
-const TABS: [(Tab, &str, &str); 8] = [
-    (Tab::Gallery, icon::IMAGES, n("Галерея")),
-    (Tab::General, icon::SLIDERS_HORIZONTAL, n("Основные")),
+const TABS: [(Tab, &str, &str); 7] = [
+    (Tab::General, icon::GEAR_SIX, n("Основные")),
     (Tab::Capture, icon::CORNERS_OUT, n("Снимки")),
     (Tab::Hotkeys, icon::KEYBOARD, n("Горячие клавиши")),
     (Tab::Text, icon::TRANSLATE, n("Текст и перевод")),
@@ -83,8 +82,8 @@ const TABS: [(Tab, &str, &str); 8] = [
     (Tab::About, icon::INFO, n("О программе")),
 ];
 
-const NAV_ROW: f32 = 38.0;
-const NAV_GAP: f32 = 2.0;
+/// Width of the settings panel.
+const PANEL_W: f32 = 860.0;
 const REPO: &str = "https://github.com/MeowKusTrue/Snapling";
 const RECORD_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -99,7 +98,7 @@ pub fn run(hooks: Hooks, page: Page) {
         viewport: if welcome {
             ui::viewport("Snapling", [600.0, 640.0], [480.0, 480.0])
         } else {
-            ui::viewport("Snapling", [1240.0, 760.0], [860.0, 520.0])
+            ui::viewport("Snapling", [1160.0, 760.0], [860.0, 520.0])
         },
         ..Default::default()
     };
@@ -125,7 +124,7 @@ fn first_tab() -> Tab {
         .flatten();
     wanted
         .and_then(|i| TABS.get(i))
-        .map_or(Tab::Gallery, |t| t.0)
+        .map_or(Tab::General, |t| t.0)
 }
 
 /// Writes keys and remembers the last failure for the status line.
@@ -150,6 +149,8 @@ struct Settings {
     store: Store,
     hooks: Hooks,
     tab: Tab,
+    /// The settings panel is out over the gallery.
+    panel_open: bool,
     welcome: bool,
     autostart: bool,
     recording: Option<(Action, std::time::Instant)>,
@@ -182,11 +183,8 @@ impl Settings {
             autostart: (hooks.autostart)(),
             proxy: (hooks.get_proxy)().unwrap_or_default(),
             hooks,
-            tab: if page == Page::Gallery {
-                Tab::Gallery
-            } else {
-                first_tab()
-            },
+            tab: first_tab(),
+            panel_open: page == Page::Settings,
             welcome: page == Page::Welcome,
             recording: None,
             refused: None,
@@ -199,10 +197,9 @@ impl Settings {
         }
     }
 
-    /// One sidebar row; `indent` puts it under «Настройки».
-    fn nav_row(ui: &mut egui::Ui, glyph: &str, label: &str, on: bool, indent: f32) -> bool {
+    fn nav_row(ui: &mut egui::Ui, glyph: &str, label: &str, on: bool) -> bool {
         let p = ui::pal(ui.ctx());
-        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), NAV_ROW), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
         let fill = if on {
             p.tone
         } else if r.hovered() {
@@ -210,23 +207,23 @@ impl Settings {
         } else {
             Color32::TRANSPARENT
         };
-        ui.painter().rect_filled(rect, 10.0, fill);
+        ui.painter().rect_filled(rect, 9.0, fill);
         let color = if on { p.tone_text } else { p.soft };
         let font = if on {
-            ui::semi(14.0)
+            ui::semi(13.5)
         } else {
-            egui::FontId::proportional(14.0)
+            egui::FontId::proportional(13.5)
         };
         let y = rect.center().y;
         ui.painter().text(
-            egui::pos2(rect.left() + 12.0 + indent, y),
+            egui::pos2(rect.left() + 10.0, y),
             egui::Align2::LEFT_CENTER,
             glyph,
-            ui::icon_font(18.0),
+            ui::icon_font(17.0),
             color,
         );
         ui.painter().text(
-            egui::pos2(rect.left() + 40.0 + indent, y),
+            egui::pos2(rect.left() + 36.0, y),
             egui::Align2::LEFT_CENTER,
             label,
             font,
@@ -235,49 +232,105 @@ impl Settings {
         r.clicked()
     }
 
-    fn open_tab(&mut self, tab: Tab) {
-        self.tab = tab;
+    fn close_panel(&mut self) {
+        self.panel_open = false;
         self.stop_recording();
     }
 
-    /// Gallery on top; settings and «О программе» at the bottom. Sections of the settings show
-    /// while one of them is open.
     fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing.y = NAV_GAP;
-        let is_section = |t: Tab| !matches!(t, Tab::Gallery | Tab::About);
-        let open = is_section(self.tab);
-        if Self::nav_row(
-            ui,
-            icon::IMAGES,
-            t("Галерея"),
-            self.tab == Tab::Gallery,
-            0.0,
-        ) {
-            self.open_tab(Tab::Gallery);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        if ui::ghost_icon(ui, icon::X, 34.0, t("Закрыть")).clicked() {
+            self.close_panel();
         }
-        let sections: Vec<_> = TABS.iter().filter(|x| is_section(x.0)).collect();
-        let rows = 2 + if open { sections.len() } else { 0 };
-        let high = rows as f32 * (NAV_ROW + NAV_GAP);
-        ui.add_space((ui.available_height() - high).max(0.0));
-        if Self::nav_row(ui, icon::GEAR_SIX, t("Настройки"), false, 0.0) && !open {
-            self.open_tab(Tab::General);
-        }
-        if open {
-            for (tab, glyph, label) in sections {
-                if Self::nav_row(ui, glyph, t(label), self.tab == *tab, 14.0) {
-                    self.open_tab(*tab);
-                }
+        ui.add_space(6.0);
+        for (tab, glyph, label) in TABS {
+            if Self::nav_row(ui, glyph, t(label), self.tab == tab) {
+                self.tab = tab;
+                self.stop_recording();
             }
         }
-        if Self::nav_row(
-            ui,
-            icon::INFO,
-            t("О программе"),
-            self.tab == Tab::About,
-            0.0,
-        ) {
-            self.open_tab(Tab::About);
+    }
+
+    fn page(&mut self, ui: &mut egui::Ui) {
+        let p = ui::pal(ui.ctx());
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            Frame::new()
+                .inner_margin(Margin::symmetric(24, 22))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 14.0;
+                    match self.tab {
+                        Tab::General => self.general(ui),
+                        Tab::Capture => {
+                            self.capture(ui);
+                            self.record_card(ui);
+                        }
+                        Tab::Hotkeys => self.hotkeys(ui),
+                        Tab::Text => self.text(ui),
+                        Tab::Models => self.models_tab(ui),
+                        Tab::Privacy => self.privacy(ui),
+                        Tab::About => self.about(ui),
+                    }
+                    if !self.store.error.is_empty() {
+                        let e = &self.store.error;
+                        ui.label(RichText::new(e).size(13.0).color(p.warn));
+                    }
+                });
+        });
+    }
+
+    /// The panel over the gallery, sliding in from the side of the settings.
+    fn panel(&mut self, ctx: &egui::Context) {
+        let shown = ctx.animate_bool_with_time(egui::Id::new("panel"), self.panel_open, 0.16);
+        if shown <= 0.0 {
+            return;
         }
+        let p = ui::pal(ctx);
+        let top = 44.0;
+        let full = ctx.content_rect();
+        let body = egui::Rect::from_min_max(egui::pos2(full.left(), top), full.max);
+        let dim = egui::Area::new(egui::Id::new("panel-dim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(body.min)
+            .show(ctx, |ui| {
+                let r = ui.allocate_response(body.size(), Sense::click());
+                let a = (150.0 * shown) as u8;
+                ui.painter()
+                    .rect_filled(body, 0.0, Color32::from_black_alpha(a));
+                r
+            });
+        if dim.inner.clicked() {
+            self.close_panel();
+        }
+        let width = PANEL_W.min(body.width() - 56.0);
+        let x = match self.cfg.ui.panel_side {
+            PanelSide::Right => body.right() - width * shown,
+            PanelSide::Left => body.left() - width * (1.0 - shown),
+        };
+        egui::Area::new(egui::Id::new("panel"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(x, top))
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(p.main)
+                    .stroke(egui::Stroke::new(1.0, p.line))
+                    .show(ui, |ui| {
+                        ui.set_min_size(vec2(width, body.height()));
+                        ui.set_max_size(vec2(width, body.height()));
+                        ui.horizontal_top(|ui| {
+                            ui.vertical(|ui| {
+                                Frame::new().inner_margin(10).show(ui, |ui| {
+                                    ui.set_width(186.0);
+                                    self.nav(ui);
+                                });
+                            });
+                            ui.vertical(|ui| {
+                                ui.set_height(body.height());
+                                self.page(ui);
+                            });
+                        });
+                    });
+            });
     }
 
     fn flag(
@@ -373,6 +426,21 @@ impl Settings {
         });
         card(ui, |ui| {
             Self::language_row(ui, &mut self.cfg.ui.language, store);
+            divider(ui);
+            row(
+                ui,
+                t("Панель настроек"),
+                t("С какой стороны она выезжает"),
+                |ui| {
+                    let side = &mut self.cfg.ui.panel_side;
+                    let items = [t("Слева"), t("Справа")];
+                    let now = usize::from(*side == PanelSide::Right);
+                    if let Some(i) = segmented(ui, &items, now, 30.0) {
+                        *side = [PanelSide::Left, PanelSide::Right][i];
+                        store.set("ui", "panel_side", ["left", "right"][i]);
+                    }
+                },
+            );
             divider(ui);
             row(ui, t("Значок в трее"), "", |ui| {
                 let modes = [
@@ -1516,10 +1584,13 @@ impl eframe::App for Settings {
         ui::preview(&ctx);
         self.poll_recording(&ctx);
         self.poll_jobs();
-        let viewing =
-            self.tab == Tab::Gallery && self.gallery.as_ref().is_some_and(History::is_big);
-        if self.recording.is_none() && !viewing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        if self.recording.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            let big = self.gallery.as_ref().is_some_and(History::is_big);
+            if self.panel_open {
+                self.close_panel();
+            } else if !big {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
         let p = ui::pal(&ctx);
         if self.welcome {
@@ -1549,64 +1620,25 @@ impl eframe::App for Settings {
             return;
         }
         ui::title_bar(ui, "Snapling");
-        egui::Panel::left("nav")
-            .exact_size(236.0)
-            .show_separator_line(false)
-            .frame(Frame::new().fill(p.bg).inner_margin(Margin {
-                left: 12,
-                right: 12,
-                top: 8,
-                bottom: 16,
-            }))
-            .show(ui, |ui| self.nav(ui));
+        let (hooks, ctx2) = (self.hooks.gallery, self.ctx.clone());
+        let active = !self.panel_open;
+        let gallery = self
+            .gallery
+            .get_or_insert_with(|| History::new(hooks(), ctx2));
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(p.bg).inner_margin(Margin {
-                left: 0,
-                right: 8,
-                top: 0,
-                bottom: 8,
-            }))
-            .show(ui, |ui| {
-                Frame::new()
-                    .fill(p.main)
-                    .stroke(egui::Stroke::new(1.0, p.line))
-                    .corner_radius(14)
-                    .show(ui, |ui| {
-                        ui.set_min_size(ui.available_size());
-                        if self.tab == Tab::Gallery {
-                            let hooks = self.hooks.gallery;
-                            let ctx = self.ctx.clone();
-                            self.gallery
-                                .get_or_insert_with(|| History::new(hooks(), ctx))
-                                .show(ui);
-                            return;
-                        }
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            Frame::new()
-                                .inner_margin(Margin::symmetric(32, 26))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.spacing_mut().item_spacing.y = 14.0;
-                                    match self.tab {
-                                        Tab::Gallery => {}
-                                        Tab::General => self.general(ui),
-                                        Tab::Capture => {
-                                            self.capture(ui);
-                                            self.record_card(ui);
-                                        }
-                                        Tab::Hotkeys => self.hotkeys(ui),
-                                        Tab::Text => self.text(ui),
-                                        Tab::Models => self.models_tab(ui),
-                                        Tab::Privacy => self.privacy(ui),
-                                        Tab::About => self.about(ui),
-                                    }
-                                    if !self.store.error.is_empty() {
-                                        let e = &self.store.error;
-                                        ui.label(RichText::new(e).size(13.0).color(p.warn));
-                                    }
-                                });
-                        });
-                    });
-            });
+            .frame(Frame::new().fill(p.bg))
+            .show(ui, |ui| gallery.show(ui, active));
+        match gallery.wish() {
+            Some(Wish::Settings) => {
+                self.tab = Tab::General;
+                self.panel_open = true;
+            }
+            Some(Wish::About) => {
+                self.tab = Tab::About;
+                self.panel_open = true;
+            }
+            None => {}
+        }
+        self.panel(&ctx);
     }
 }

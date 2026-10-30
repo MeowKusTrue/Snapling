@@ -45,6 +45,8 @@ copy = true
 open_editor = false
 # Выделил — сразу скопировано и закрыто, без панели действий.
 instant_copy = false
+# Лупа у курсора, пока выбираешь область. Клавиша I копирует цвет под курсором.
+loupe = true
 # Уведомление после снимка: миниатюра и кнопки.
 toast = true
 
@@ -163,6 +165,7 @@ pub struct Capture {
     pub copy: bool,
     pub open_editor: bool,
     pub instant_copy: bool,
+    pub loupe: bool,
     pub toast: bool,
 }
 
@@ -172,6 +175,7 @@ impl Default for Capture {
             copy: true,
             open_editor: false,
             instant_copy: false,
+            loupe: true,
             toast: true,
         }
     }

@@ -686,6 +686,17 @@ fn capture_region(auto: Option<Outcome>) {
     let grab = t0.elapsed().as_millis();
     let shown = snapling_win::overlay::show(img, auto, move |res| {
         let Some((img, outcome)) = res else { return };
+        if outcome == Outcome::Color {
+            let hex = snapling_scene::color_hex(&img.bgra);
+            info!("color {hex}");
+            return match snapling_win::copy_text(&hex) {
+                Ok(()) => play(Sound::Copy),
+                Err(e) => {
+                    error!("clipboard: {e}");
+                    play(Sound::Error);
+                }
+            };
+        }
         LAST_REGION.set(Some(Rect {
             left: img.x,
             top: img.y,
@@ -704,6 +715,7 @@ fn capture_region(auto: Option<Outcome>) {
             }
             Outcome::Text => recognize(img),
             Outcome::Translate => translate(img),
+            Outcome::Color => {}
         }
     });
     match shown {
@@ -779,6 +791,7 @@ fn apply_config(cfg: &Config) {
     EDITOR_ON_CAPTURE.set(cfg.capture.open_editor);
     TOAST.set(cfg.capture.toast);
     snapling_win::overlay::set_instant_copy(cfg.capture.instant_copy);
+    snapling_win::overlay::set_loupe(cfg.capture.loupe);
     snapling_win::overlay::set_blur(cfg.blur.gauss, cfg.blur.strength.min(2));
     apply_ocr(&cfg.ocr.language);
     OCR_PADDLE.set(cfg.ocr.engine == Engine::Paddle);

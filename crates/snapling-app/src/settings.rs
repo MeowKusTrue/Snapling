@@ -567,6 +567,10 @@ impl Settings {
                 &mut c.instant_copy,
                 key,
             );
+            divider(ui);
+            let key = ("capture", "loupe");
+            let hint = t("Пока выбираешь область. Клавиша I копирует цвет под курсором.");
+            Self::flag(ui, store, t("Лупа у курсора"), hint, &mut c.loupe, key);
         });
     }
 

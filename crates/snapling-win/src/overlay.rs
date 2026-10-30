@@ -13,7 +13,7 @@ use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt}
 use snapling_core::i18n::t;
 use snapling_core::selection::{Corner, Hit, HoverChain, MIN_SELECTION_PX, Point, Rect, Selection};
 use snapling_scene::{
-    Button, COLORS, Control, Draw, Hover, Layout, SIZES, Scene, TOOLS, Target, Tool,
+    Button, COLORS, Control, Draw, Hover, Layout, Loupe, SIZES, Scene, TOOLS, Target, Tool,
 };
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc::Sender;
@@ -54,6 +54,8 @@ pub enum Outcome {
     Edit,
     Text,
     Translate,
+    /// `I`: the image is the one pixel under the cursor.
+    Color,
 }
 
 struct State {
@@ -135,6 +137,8 @@ thread_local! {
     static HWND_OVERLAY: Cell<HWND> = Cell::new(HWND::default());
     /// `[capture] instant_copy`.
     static INSTANT: Cell<bool> = const { Cell::new(false) };
+    /// `[capture] loupe`.
+    static LOUPE: Cell<bool> = const { Cell::new(true) };
     /// `[blur]`, the brush a new overlay starts with.
     static BLUR: Cell<BlurStyle> = const {
         Cell::new(BlurStyle {
@@ -385,7 +389,21 @@ fn finish(hwnd: HWND, out: Option<Outcome>) {
         return;
     };
     snapling_scene::drop_cache();
-    let result = if let Some(out) = out {
+    let result = if out == Some(Outcome::Color) {
+        let len = s.width as usize * s.height as usize * 4;
+        let src = unsafe { std::slice::from_raw_parts(s.annot_bits, len) };
+        let at = (s.mouse.y as usize * s.width as usize + s.mouse.x as usize) * 4;
+        src.get(at..at + 4).map(|px| {
+            let img = Image {
+                x: s.mouse.x + s.origin.0,
+                y: s.mouse.y + s.origin.1,
+                width: 1,
+                height: 1,
+                bgra: px.to_vec(),
+            };
+            (img, Outcome::Color)
+        })
+    } else if let Some(out) = out {
         s.sel.rect().filter(|_| s.sel.confirmed()).and_then(|r| {
             let len = s.width as usize * s.height as usize * 4;
             let src = unsafe { std::slice::from_raw_parts(s.annot_bits, len) };
@@ -477,6 +495,12 @@ fn union(a: RECT, b: RECT) -> RECT {
 }
 
 /// Scene for the current state; the caller lays it out and draws it.
+/// While aiming: before the selection is done, off the rail, with no tool in hand.
+fn loupe_on(s: &State) -> bool {
+    let aiming = !s.sel.confirmed() || s.sel.is_dragging();
+    LOUPE.get() && aiming && s.pen.tool.is_none() && !s.pen.lasso_mode && s.hover_btn.is_none()
+}
+
 fn scene(s: &State) -> Scene<'_> {
     let drawing = !s.stroke.is_empty();
     let free = s.pen.tool.is_none() && !s.pen.lasso_mode;
@@ -503,6 +527,15 @@ fn scene(s: &State) -> Scene<'_> {
         });
     let (monitor, scale) = monitor_at(s.origin, anchor);
     let lasso = if drawing { &s.stroke } else { &s.lasso };
+    let loupe = loupe_on(s).then(|| {
+        let len = s.width as usize * s.height as usize * 4;
+        Loupe {
+            at: s.mouse,
+            frame: unsafe { std::slice::from_raw_parts(s.annot_bits, len) },
+            width: s.width,
+            height: s.height,
+        }
+    });
     Scene {
         scale,
         monitor,
@@ -512,6 +545,7 @@ fn scene(s: &State) -> Scene<'_> {
         dragging: s.sel.is_dragging() || drawing,
         hover,
         hover_button: s.hover_btn,
+        loupe,
         tools: Some(Draw {
             monitor: s.rail,
             lasso_mode: s.pen.lasso_mode,
@@ -978,10 +1012,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     return Some(false);
                 }
                 let hover = button_at(s, p);
-                (hover != s.hover_btn).then(|| {
-                    s.hover_btn = hover;
-                    false
-                })
+                let changed = hover != s.hover_btn;
+                s.hover_btn = hover;
+                (changed || loupe_on(s)).then_some(false)
             })
             .flatten();
             if let Some(full) = repaint {
@@ -1083,6 +1116,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 0x56 if down && !ctrl_down() => control(hwnd, Control::Select),
                 0x4C if down && !ctrl_down() => control(hwnd, Control::Lasso),
+                0x49 if down && !ctrl_down() => finish(hwnd, Some(Outcome::Color)),
                 v if down && confirmed && v == VK_RETURN.0 => finish(hwnd, Some(Outcome::Copy)),
                 // S and Ctrl+S both save, as EiSen does.
                 v if down && confirmed && outcome_key(v).is_some() => {
@@ -1124,6 +1158,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 /// Starting style of the blur brush.
 pub fn set_blur(gauss: bool, strength: u8) {
     BLUR.set(BlurStyle { gauss, strength });
+}
+
+/// Magnifier at the cursor while aiming.
+pub fn set_loupe(on: bool) {
+    LOUPE.set(on);
 }
 
 /// Selecting copies and closes at once, skipping the action toolbar.

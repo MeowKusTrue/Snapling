@@ -139,7 +139,30 @@ pub struct Scene<'a> {
     pub dragging: bool,
     pub hover: Option<Hover<'a>>,
     pub hover_button: Option<Control>,
+    pub loupe: Option<Loupe<'a>>,
     pub tools: Option<Draw<'a>>,
+}
+
+/// Magnified pixels around the cursor.
+pub struct Loupe<'a> {
+    pub at: Point,
+    /// The whole frame, BGRA.
+    pub frame: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+}
+
+/// `#RRGGBB` of a BGRA pixel.
+pub fn color_hex(px: &[u8]) -> String {
+    format!("#{:02X}{:02X}{:02X}", px[2], px[1], px[0])
+}
+
+fn loupe_px<'a>(l: &Loupe<'a>, x: i32, y: i32) -> Option<&'a [u8]> {
+    let inside = x >= 0 && y >= 0 && x < l.width as i32 && y < l.height as i32;
+    inside.then(|| {
+        let i = (y as usize * l.width as usize + x as usize) * 4;
+        &l.frame[i..i + 4]
+    })
 }
 
 #[derive(Debug, Default, Clone)]
@@ -154,6 +177,7 @@ pub struct Layout {
     size_pill: Option<(Rect, String)>,
     hover_pill: Option<Rect>,
     hint_bar: Option<Rect>,
+    loupe: Option<Rect>,
 }
 
 // Mockup tokens.
@@ -194,11 +218,12 @@ const HINTS_SELECTED: [(&str, &str); 8] = [
     ("Esc", n("отмена")),
 ];
 
-const HINTS: [(&str, &str); 6] = [
+const HINTS: [(&str, &str); 7] = [
     (n("Мышь"), n("выделить")),
     (n("Клик"), n("окно")),
     ("Shift", n("квадрат")),
     ("L", n("произвольная")),
+    ("I", n("цвет")),
     ("1–9", n("рисовать")),
     ("Esc", n("отмена")),
 ];
@@ -399,7 +424,36 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
             out.hint_bar = Some(bar);
         }
     }
+    if let Some(l) = &sc.loupe {
+        let (side, mon) = (loupe_side(s), sc.cursor_monitor);
+        let (w, h) = (side + 12.0 * s, side + 38.0 * s);
+        let off = 22.0 * s;
+        let (x, y) = (l.at.x as f32, l.at.y as f32);
+        let px = if x + off + w > mon.right() as f32 {
+            x - off - w
+        } else {
+            x + off
+        };
+        let py = if y + off + h > mon.bottom() as f32 {
+            y - off - h
+        } else {
+            y + off
+        };
+        let panel = r(px, py, w, h);
+        out.bounds = union(out.bounds, inflate(panel, 2));
+        out.loupe = Some(panel);
+    }
     out
+}
+
+const LOUPE_CELLS: i32 = 11;
+
+fn loupe_cell(s: f32) -> f32 {
+    (13.0 * s).round()
+}
+
+fn loupe_side(s: f32) -> f32 {
+    loupe_cell(s) * LOUPE_CELLS as f32
 }
 
 fn hints(sc: &Scene<'_>) -> &'static [(&'static str, &'static str)] {
@@ -1192,6 +1246,60 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             x += 18.0 * s;
         }
     }
+    if let (Some(panel), Some(l)) = (lay.loupe, &sc.loupe) {
+        draw_loupe(pm, panel, l, s);
+    }
+}
+
+fn draw_loupe(pm: &mut PixmapMut<'_>, panel: Rect, l: &Loupe<'_>, s: f32) {
+    let f = fonts();
+    let id = Transform::identity();
+    if let Some(p) = rr(panel, 12.0 * s) {
+        pm.fill_path(&p, &paint([22, 27, 39, 245]), FillRule::Winding, id, None);
+        pm.stroke_path(&p, &paint([255, 255, 255, 40]), &stroke(1.0), id, None);
+    }
+    let c = loupe_cell(s);
+    let (x0, y0) = (panel.left as f32 + 6.0 * s, panel.top as f32 + 6.0 * s);
+    let half = LOUPE_CELLS / 2;
+    for dy in -half..=half {
+        for dx in -half..=half {
+            let Some(px) = loupe_px(l, l.at.x + dx, l.at.y + dy) else {
+                continue;
+            };
+            let cell = tiny_skia::Rect::from_xywh(
+                x0 + (dx + half) as f32 * c,
+                y0 + (dy + half) as f32 * c,
+                c,
+                c,
+            );
+            if let Some(cell) = cell {
+                pm.fill_rect(cell, &paint([px[2], px[1], px[0], 255]), id, None);
+            }
+        }
+    }
+    let mid = half as f32 * c;
+    if let Some(p) = rrect(x0 + mid, y0 + mid, c, c, 0.0) {
+        pm.stroke_path(&p, &paint([0, 0, 0, 200]), &stroke(3.0), id, None);
+        pm.stroke_path(&p, &paint([255, 255, 255, 255]), &stroke(1.0), id, None);
+    }
+    if let Some(px) = loupe_px(l, l.at.x, l.at.y) {
+        let cy = panel.bottom() as f32 - 16.0 * s;
+        if let Some(p) = PathBuilder::from_circle(x0 + 8.0 * s, cy, 7.0 * s) {
+            pm.fill_path(
+                &p,
+                &paint([px[2], px[1], px[0], 255]),
+                FillRule::Winding,
+                id,
+                None,
+            );
+            pm.stroke_path(&p, &paint([255, 255, 255, 90]), &stroke(1.0), id, None);
+        }
+        let hex = color_hex(px);
+        text(pm, &f.mono, &hex, x0 + 22.0 * s, cy, 13.0 * s, TEXT);
+        let key = text_w(&f.semibold, "I", 12.5 * s);
+        let right = panel.right() as f32 - 8.0 * s - key;
+        text(pm, &f.semibold, "I", right, cy, 12.5 * s, ICON_MUTED);
+    }
 }
 
 /// Button of the notification after a shot.
@@ -1594,6 +1702,7 @@ mod tests {
             dragging: false,
             hover: None,
             hover_button: None,
+            loupe: None,
             tools: None,
         }
     }
@@ -1667,6 +1776,56 @@ mod tests {
             [255, 255, 255],
             "only a hairline between corners"
         );
+    }
+
+    #[test]
+    fn loupe_stays_on_the_monitor_and_shows_the_pixel() {
+        let (w, h) = (400u32, 300u32);
+        let mon = Rect {
+            left: 0,
+            top: 0,
+            width: 400,
+            height: 300,
+        };
+        let mut frame = [10u8, 20, 30, 255].repeat((w * h) as usize);
+        let i = ((295 * w + 395) * 4) as usize;
+        frame[i..i + 4].copy_from_slice(&[0x33, 0x22, 0x11, 255]);
+        let at = Point { x: 395, y: 295 };
+        let sc = Scene {
+            scale: 1.0,
+            monitor: mon,
+            cursor_monitor: mon,
+            selection: None,
+            confirmed: false,
+            dragging: false,
+            hover: None,
+            hover_button: None,
+            loupe: Some(Loupe {
+                at,
+                frame: &frame,
+                width: w,
+                height: h,
+            }),
+            tools: None,
+        };
+        let lay = layout(&sc);
+        let panel = lay.loupe.unwrap();
+        assert!(panel.right() < at.x && panel.bottom() < at.y, "{panel:?}");
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        let mut pm = PixmapMut::from_bytes(&mut buf, w, h).unwrap();
+        draw(&mut pm, &sc, &lay);
+        let c = loupe_cell(1.0) as i32;
+        let (x, y) = (
+            panel.left + 6 + 5 * c + c / 2,
+            panel.top + 6 + 5 * c + c / 2,
+        );
+        let i = ((y as u32 * w + x as u32) * 4) as usize;
+        assert_eq!(
+            buf[i..i + 3],
+            [0x33, 0x22, 0x11],
+            "the middle cell is the pixel"
+        );
+        assert_eq!(color_hex(&[0x33, 0x22, 0x11, 255]), "#112233");
     }
 
     #[test]
@@ -1841,6 +2000,58 @@ mod preview {
 
     #[test]
     #[ignore]
+    fn render_loupe() {
+        let dir = std::path::PathBuf::from(std::env::var("SNAP_PREVIEW").expect("SNAP_PREVIEW"));
+        let (w, h) = (420u32, 300u32);
+        let mon = Rect {
+            left: 0,
+            top: 0,
+            width: 420,
+            height: 300,
+        };
+        let mut frame = [54u8, 36, 26, 255].repeat((w * h) as usize);
+        for y in 60..180u32 {
+            for x in 80..300u32 {
+                let i = ((y * w + x) * 4) as usize;
+                let v = if (x + y) % 9 < 3 { 250 } else { 49 };
+                frame[i..i + 4].copy_from_slice(&[v, v / 2 + 40, 255 - v / 2, 255]);
+            }
+        }
+        let sc = Scene {
+            scale: 1.0,
+            monitor: mon,
+            cursor_monitor: mon,
+            selection: None,
+            confirmed: false,
+            dragging: false,
+            hover: None,
+            hover_button: None,
+            loupe: Some(Loupe {
+                at: Point { x: 120, y: 90 },
+                frame: &frame,
+                width: w,
+                height: h,
+            }),
+            tools: None,
+        };
+        let lay = layout(&sc);
+        let mut buf = frame.clone();
+        let mut pm = PixmapMut::from_bytes(&mut buf, w, h).unwrap();
+        draw(&mut pm, &sc, &lay);
+        snapling_core::storage::save_bgra(
+            &buf,
+            w,
+            h,
+            &dir,
+            std::path::Path::new("loupe"),
+            snapling_core::config::Format::Png,
+            90,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore]
     fn render_tray_menu() {
         let dir = std::path::PathBuf::from(std::env::var("SNAP_PREVIEW").expect("SNAP_PREVIEW"));
         let item = |i, a: &str, b: &str| MenuRow::Item(i, a.into(), b.into());
@@ -1942,6 +2153,7 @@ mod preview {
                     dragging: false,
                     hover: None,
                     hover_button: Some(Control::Action(Button::Edit)),
+                    loupe: None,
                     tools: Some(Draw {
                         monitor: mon,
                         lasso_mode: false,
@@ -1980,6 +2192,7 @@ mod preview {
                         app: "Firefox",
                     }),
                     hover_button: None,
+                    loupe: None,
                     tools: None,
                 },
             ),
@@ -2035,6 +2248,7 @@ mod bench {
             dragging: false,
             hover: None,
             hover_button: None,
+            loupe: None,
             tools: Some(Draw {
                 monitor: mon,
                 lasso_mode: false,
@@ -2089,6 +2303,7 @@ mod fullscreen {
                 app: "Valorant",
             }),
             hover_button: None,
+            loupe: None,
             tools: None,
         };
         let lay = layout(&sc);

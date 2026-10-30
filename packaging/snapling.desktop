@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Snapling
+Comment=Screenshots with annotation, OCR and translation
+Exec=snapling
+Icon=snapling
+Categories=Utility;Graphics;
+StartupNotify=false

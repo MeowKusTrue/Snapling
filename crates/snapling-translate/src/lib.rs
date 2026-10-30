@@ -286,6 +286,7 @@ pub fn online(
     reply(service, &json).ok_or_else(|| tf("{0}: неожиданный ответ", &[("0", &name)]))
 }
 
+const SETUP: &str = "Snapling-Setup.exe";
 const RELEASES: &str = "https://api.github.com/repos/MeowKusTrue/Snapling/releases/latest";
 
 /// `tag` is a later version than `current`; both like `v1.2.3`.
@@ -299,9 +300,34 @@ pub fn is_newer(tag: &str, current: &str) -> bool {
     parts(tag) > parts(current)
 }
 
-/// Latest published version and its page, `None` when nothing is published.
+/// A published version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    pub tag: String,
+    pub page: String,
+    /// Address of the Windows installer and of its SHA-256 file.
+    pub setup: Option<(String, String)>,
+}
+
+fn parse_release(json: &serde_json::Value) -> Option<Release> {
+    let asset = |name: &str| {
+        json["assets"]
+            .as_array()?
+            .iter()
+            .find(|a| a["name"] == name)?["browser_download_url"]
+            .as_str()
+            .map(str::to_string)
+    };
+    Some(Release {
+        tag: json["tag_name"].as_str()?.to_string(),
+        page: json["html_url"].as_str()?.to_string(),
+        setup: asset(SETUP).zip(asset(&format!("{SETUP}.sha256"))),
+    })
+}
+
+/// Latest published version, `None` when nothing is published.
 /// Sends nothing but the request itself; call only on the user's click.
-pub fn latest_release() -> Result<Option<(String, String)>, String> {
+pub fn latest_release() -> Result<Option<Release>, String> {
     let resp = agent_via(None)
         .get(RELEASES)
         .header("User-Agent", "Snapling")
@@ -314,8 +340,27 @@ pub fn latest_release() -> Result<Option<(String, String)>, String> {
     };
     let json: serde_json::Value =
         serde_json::from_str(&resp.body_mut().read_to_string().map_err(err)?).map_err(err)?;
-    let field = |k: &str| json[k].as_str().map(str::to_string);
-    Ok(field("tag_name").zip(field("html_url")))
+    Ok(parse_release(&json))
+}
+
+/// Downloads the installer into `dir` and checks it against the SHA-256 file of the release.
+// ponytail: both come from the same release page; signing the hash needs a key the user holds.
+pub fn download_setup(setup: &(String, String), dir: &Path) -> Result<PathBuf, String> {
+    let mut sums = agent_via(None).get(&setup.1).call().map_err(err)?;
+    let text = sums.body_mut().read_to_string().map_err(err)?;
+    let want = text
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    if want.len() != 64 {
+        return Err(t("нет контрольной суммы").into());
+    }
+    std::fs::create_dir_all(dir).map_err(err)?;
+    let dest = dir.join(SETUP);
+    let _ = std::fs::remove_file(&dest);
+    fetch_file(&setup.0, &dest, &want)?;
+    Ok(dest)
 }
 
 /// Fetches the model files from Hugging Face, checking each against its pinned SHA-256.
@@ -551,6 +596,22 @@ mod tests {
         assert_eq!(target_for("ru", "ru"), "en");
         assert_eq!(target_for("en", "en"), "ru");
         assert_eq!(target_for("de", "xx"), "ru");
+    }
+
+    #[test]
+    fn a_release_finds_its_installer() {
+        let json = serde_json::json!({
+            "tag_name": "v0.1.0",
+            "html_url": "https://github.com/x/y/releases/v0.1.0",
+            "assets": [
+                { "name": "Snapling-Setup.exe", "browser_download_url": "https://a/s.exe" },
+                { "name": "Snapling-Setup.exe.sha256", "browser_download_url": "https://a/s.sha" },
+            ],
+        });
+        let r = parse_release(&json).unwrap();
+        assert_eq!(r.setup.unwrap().1, "https://a/s.sha");
+        let bare = serde_json::json!({ "tag_name": "v1", "html_url": "https://h", "assets": [] });
+        assert_eq!(parse_release(&bare).unwrap().setup, None);
     }
 
     #[test]

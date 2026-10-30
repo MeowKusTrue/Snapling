@@ -1,0 +1,16 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: choco install innosetup --no-progress -y
+      - run: python tools/package.py
+      - run: gh release create "$env:GITHUB_REF_NAME" target/dist/Snapling-Setup.exe target/dist/Snapling-Setup.exe.sha256 target/dist/Snapling-portable.zip --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

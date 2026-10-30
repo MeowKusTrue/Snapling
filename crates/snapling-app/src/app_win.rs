@@ -585,6 +585,24 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         snipping_owns: snapling_win::snipping_owns_printscreen,
         free_printscreen: snapling_win::free_printscreen,
         models: models_dir(),
+        can_update: std::env::current_exe().is_ok_and(|e| crate::portable_dir(&e).is_none()),
+        ask: snapling_win::ask,
+        run_update: |setup| {
+            // The installer waits two seconds: it refuses while Snapling runs, and this process
+            // is one of them.
+            let line = format!(
+                "timeout /t 2 /nobreak >nul & start \"\" \"{}\" /SILENT",
+                setup.display()
+            );
+            std::process::Command::new("cmd")
+                .args(["/c", &line])
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/IM", "snapling.exe"])
+                .spawn();
+            Ok(())
+        },
         get_proxy: || snapling_win::secret::get(DEEPL_PROXY),
         set_proxy: |url| {
             if url.is_empty() {

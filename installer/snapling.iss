@@ -55,6 +55,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\snapling.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent
+; An update runs silently and brings the app back.
+Filename: "{app}\snapling.exe"; Flags: nowait; Check: WizardSilent
 
 [Code]
 procedure CurUninstallStepChanged(Step: TUninstallStep);

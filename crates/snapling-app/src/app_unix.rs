@@ -504,6 +504,9 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         snipping_owns: || false,
         free_printscreen: || Ok(()),
         models: models_dir(),
+        can_update: false,
+        ask: unix::ask,
+        run_update: |_| Ok(()),
         get_proxy: || unix::secret_get(PROXY),
         set_proxy: |url| {
             if !url.is_empty() {

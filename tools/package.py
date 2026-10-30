@@ -1,4 +1,5 @@
 """Release build, then target/dist: Snapling-Setup.exe and Snapling-portable.zip."""
+import hashlib
 import os
 import subprocess
 import zipfile
@@ -13,5 +14,9 @@ with zipfile.ZipFile(r"target\dist\Snapling-portable.zip", "w", zipfile.ZIP_DEFL
     z.write("LICENSE", r"Snapling\LICENSE.txt")
     z.write("THIRD_PARTY_NOTICES.md", r"Snapling\THIRD_PARTY_NOTICES.md")
     z.writestr(r"Snapling\portable.txt", "Settings and history live in the data folder next to the exe.\n")
+with open(r"target\dist\Snapling-Setup.exe", "rb") as f:
+    digest = hashlib.sha256(f.read()).hexdigest()
+with open(r"target\dist\Snapling-Setup.exe.sha256", "w") as f:
+    f.write(f"{digest}  Snapling-Setup.exe\n")
 for name in os.listdir(r"target\dist"):
     print(name, os.path.getsize(os.path.join(r"target\dist", name)) // 1024 // 1024, "MB")

@@ -29,6 +29,11 @@ pub struct Hooks {
     pub snipping_owns: fn() -> bool,
     pub free_printscreen: fn() -> Result<(), String>,
     pub models: PathBuf,
+    /// An installed copy can replace itself; portable and Unix ones only show the page.
+    pub can_update: bool,
+    pub ask: fn(&str) -> bool,
+    /// Starts the downloaded installer and closes Snapling.
+    pub run_update: fn(&Path) -> Result<(), String>,
     /// Proxy of online translation, kept in Credential Manager: it may hold a password.
     pub get_proxy: fn() -> Option<String>,
     pub set_proxy: fn(&str) -> Result<(), String>,
@@ -137,9 +142,12 @@ struct Settings {
     update: Option<Receiver<UpdateReply>>,
     update_text: String,
     update_page: Option<String>,
+    /// Installer to fetch, and the running download.
+    update_setup: Option<(String, String)>,
+    installing: Option<Receiver<Result<PathBuf, String>>>,
 }
 
-type UpdateReply = Result<Option<(String, String)>, String>;
+type UpdateReply = Result<Option<snapling_translate::Release>, String>;
 
 impl Settings {
     fn new(path: PathBuf, cfg: Config, hooks: Hooks, welcome: bool) -> Self {
@@ -160,6 +168,8 @@ impl Settings {
             update: None,
             update_text: String::new(),
             update_page: None,
+            update_setup: None,
+            installing: None,
         }
     }
 
@@ -1154,8 +1164,27 @@ impl Settings {
             if !self.update_text.is_empty() {
                 ui.label(RichText::new(&self.update_text).size(13.0).color(p.muted));
             }
+            if self.hooks.can_update
+                && let Some(setup) = self.update_setup.clone()
+                && self.installing.is_none()
+                && ui::primary(ui, t("Скачать и установить"), None, 38.0).clicked()
+                && (self.hooks.ask)(t(
+                    "Все окна Snapling закроются, версия обновится и он запустится снова. \
+                     Несохранённые правки в редакторе пропадут.",
+                ))
+            {
+                let (tx, rx) = channel();
+                let ctx = ui.ctx().clone();
+                let dir = self.hooks.models.join("update");
+                std::thread::spawn(move || {
+                    let _ = tx.send(snapling_translate::download_setup(&setup, &dir));
+                    ctx.request_repaint();
+                });
+                self.installing = Some(rx);
+                self.update_text = t("Скачиваю…").into();
+            }
             if let Some(page) = &self.update_page
-                && ui::primary(ui, t("Открыть страницу выпуска"), None, 38.0).clicked()
+                && ui::tone(ui, t("Открыть страницу выпуска"), None, 38.0).clicked()
             {
                 (self.hooks.open)(Path::new(page));
             }
@@ -1166,15 +1195,22 @@ impl Settings {
         if let Some(reply) = self.update.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.update = None;
             self.update_text = match reply {
-                Ok(Some((tag, page)))
-                    if snapling_translate::is_newer(&tag, snapling_core::VERSION) =>
-                {
-                    self.update_page = page.starts_with("https://github.com/").then_some(page);
-                    tf("Есть версия {0}", &[("0", &tag)])
+                Ok(Some(r)) if snapling_translate::is_newer(&r.tag, snapling_core::VERSION) => {
+                    self.update_page = r.page.starts_with("https://github.com/").then_some(r.page);
+                    self.update_setup = r.setup;
+                    tf("Есть версия {0}", &[("0", &r.tag)])
                 }
                 Ok(Some(_)) => t("Установлена последняя версия").into(),
                 Ok(None) => t("Выпусков пока нет").into(),
                 Err(e) => e,
+            };
+        }
+        if let Some(done) = self.installing.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.installing = None;
+            let run = self.hooks.run_update;
+            self.update_text = match done.and_then(|path| run(&path)) {
+                Ok(()) => String::new(),
+                Err(e) => tf("Не получилось: {e}", &[("e", &e)]),
             };
         }
         if let Some(done) = self.fetching.as_ref().and_then(|f| f.1.try_recv().ok()) {

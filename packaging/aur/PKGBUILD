@@ -1,0 +1,50 @@
+# Maintainer: MeowKusTrue
+pkgname=snapling-git
+pkgver=0.0.1
+pkgrel=1
+pkgdesc='Screenshots with annotation, OCR and translation'
+arch=('x86_64')
+url='https://github.com/MeowKusTrue/Snapling'
+license=('MIT')
+depends=('grim' 'wl-clipboard' 'libxkbcommon' 'openssl' 'pipewire')
+makedepends=('cargo' 'git')
+optdepends=(
+  'wf-recorder: screen recording on Wayland'
+  'ffmpeg: GIF recording, recording on X11'
+  'wlrctl: long screenshots on Wayland'
+  'xclip: clipboard on X11'
+  'xdotool: long screenshots on X11'
+  'libnotify: notifications'
+  'libsecret: API keys in the system keyring'
+  'zenity: file dialogs and questions'
+)
+provides=('snapling')
+conflicts=('snapling')
+source=('git+https://github.com/MeowKusTrue/Snapling.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd Snapling
+  printf '0.0.1.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd Snapling
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd Snapling
+  export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p snapling-app
+}
+
+package() {
+  cd Snapling
+  install -Dm755 target/release/snapling "$pkgdir/usr/bin/snapling"
+  install -Dm644 packaging/snapling.desktop "$pkgdir/usr/share/applications/snapling.desktop"
+  install -Dm644 assets/brand/app-icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/snapling.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 THIRD_PARTY_NOTICES.md "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_NOTICES.md"
+}

@@ -74,7 +74,7 @@ enum Tab {
 
 const TABS: [(Tab, &str, &str); 8] = [
     (Tab::Gallery, icon::IMAGES, n("Галерея")),
-    (Tab::General, icon::GEAR_SIX, n("Основные")),
+    (Tab::General, icon::SLIDERS_HORIZONTAL, n("Основные")),
     (Tab::Capture, icon::CORNERS_OUT, n("Снимки")),
     (Tab::Hotkeys, icon::KEYBOARD, n("Горячие клавиши")),
     (Tab::Text, icon::TRANSLATE, n("Текст и перевод")),
@@ -83,6 +83,8 @@ const TABS: [(Tab, &str, &str); 8] = [
     (Tab::About, icon::INFO, n("О программе")),
 ];
 
+const NAV_ROW: f32 = 38.0;
+const NAV_GAP: f32 = 2.0;
 const REPO: &str = "https://github.com/MeowKusTrue/Snapling";
 const RECORD_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -197,46 +199,84 @@ impl Settings {
         }
     }
 
-    fn nav(&mut self, ui: &mut egui::Ui) {
+    /// One sidebar row; `indent` puts it under «Настройки».
+    fn nav_row(ui: &mut egui::Ui, glyph: &str, label: &str, on: bool, indent: f32) -> bool {
         let p = ui::pal(ui.ctx());
-        ui.spacing_mut().item_spacing.y = 2.0;
-        for (tab, glyph, label) in TABS {
-            let (rect, r) =
-                ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
-            let on = self.tab == tab;
-            let fill = if on {
-                p.tone
-            } else if r.hovered() {
-                p.ghost
-            } else {
-                Color32::TRANSPARENT
-            };
-            ui.painter().rect_filled(rect, 10.0, fill);
-            let color = if on { p.tone_text } else { p.soft };
-            let font = if on {
-                ui::semi(14.0)
-            } else {
-                egui::FontId::proportional(14.0)
-            };
-            let y = rect.center().y;
-            ui.painter().text(
-                egui::pos2(rect.left() + 12.0, y),
-                egui::Align2::LEFT_CENTER,
-                glyph,
-                ui::icon_font(18.0),
-                color,
-            );
-            ui.painter().text(
-                egui::pos2(rect.left() + 40.0, y),
-                egui::Align2::LEFT_CENTER,
-                t(label),
-                font,
-                color,
-            );
-            if r.clicked() {
-                self.tab = tab;
-                self.stop_recording();
+        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), NAV_ROW), Sense::click());
+        let fill = if on {
+            p.tone
+        } else if r.hovered() {
+            p.ghost
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, 10.0, fill);
+        let color = if on { p.tone_text } else { p.soft };
+        let font = if on {
+            ui::semi(14.0)
+        } else {
+            egui::FontId::proportional(14.0)
+        };
+        let y = rect.center().y;
+        ui.painter().text(
+            egui::pos2(rect.left() + 12.0 + indent, y),
+            egui::Align2::LEFT_CENTER,
+            glyph,
+            ui::icon_font(18.0),
+            color,
+        );
+        ui.painter().text(
+            egui::pos2(rect.left() + 40.0 + indent, y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font,
+            color,
+        );
+        r.clicked()
+    }
+
+    fn open_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.stop_recording();
+    }
+
+    /// Gallery on top; settings and «О программе» at the bottom. Sections of the settings show
+    /// while one of them is open.
+    fn nav(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.y = NAV_GAP;
+        let is_section = |t: Tab| !matches!(t, Tab::Gallery | Tab::About);
+        let open = is_section(self.tab);
+        if Self::nav_row(
+            ui,
+            icon::IMAGES,
+            t("Галерея"),
+            self.tab == Tab::Gallery,
+            0.0,
+        ) {
+            self.open_tab(Tab::Gallery);
+        }
+        let sections: Vec<_> = TABS.iter().filter(|x| is_section(x.0)).collect();
+        let rows = 2 + if open { sections.len() } else { 0 };
+        let high = rows as f32 * (NAV_ROW + NAV_GAP);
+        ui.add_space((ui.available_height() - high).max(0.0));
+        if Self::nav_row(ui, icon::GEAR_SIX, t("Настройки"), false, 0.0) && !open {
+            self.open_tab(Tab::General);
+        }
+        if open {
+            for (tab, glyph, label) in sections {
+                if Self::nav_row(ui, glyph, t(label), self.tab == *tab, 14.0) {
+                    self.open_tab(*tab);
+                }
             }
+        }
+        if Self::nav_row(
+            ui,
+            icon::INFO,
+            t("О программе"),
+            self.tab == Tab::About,
+            0.0,
+        ) {
+            self.open_tab(Tab::About);
         }
     }
 

@@ -24,6 +24,8 @@ pub struct Hooks {
     pub recorded_combo: fn() -> Option<String>,
     pub hotkey_free: fn(&Hotkey) -> bool,
     pub autostart_blocked: fn() -> bool,
+    /// Windows gives PrtScn to its own screen capture.
+    pub snipping_owns: fn() -> bool,
     /// Proxy of online translation, kept in Credential Manager: it may hold a password.
     pub get_proxy: fn() -> Option<String>,
     pub set_proxy: fn(&str) -> Result<(), String>,
@@ -58,14 +60,19 @@ const TABS: [(Tab, &str, &str); 6] = [
 
 const RECORD_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-pub fn run(hooks: Hooks) {
+/// `welcome`: the first-run screen instead of the tabs.
+pub fn run(hooks: Hooks, welcome: bool) {
     let path = ui::config_path();
     let cfg = match Config::load_or_create(&path) {
         Ok(c) => c,
         Err(e) => return (hooks.warn)(&tf("Ошибка в config.toml.\n{e}", &[("e", &e)])),
     };
     let options = eframe::NativeOptions {
-        viewport: ui::viewport(t("Snapling — настройки"), [1040.0, 700.0], [760.0, 480.0]),
+        viewport: if welcome {
+            ui::viewport("Snapling", [600.0, 640.0], [480.0, 480.0])
+        } else {
+            ui::viewport(t("Snapling — настройки"), [1040.0, 700.0], [760.0, 480.0])
+        },
         ..Default::default()
     };
     let warn = hooks.warn;
@@ -74,7 +81,7 @@ pub fn run(hooks: Hooks) {
         options,
         Box::new(move |cc| {
             ui::init(cc);
-            Ok(Box::new(Settings::new(path, cfg, hooks)))
+            Ok(Box::new(Settings::new(path, cfg, hooks, welcome)))
         }),
     );
     if let Err(e) = res {
@@ -111,6 +118,7 @@ struct Settings {
     store: Store,
     hooks: Hooks,
     tab: Tab,
+    welcome: bool,
     autostart: bool,
     recording: Option<(Action, std::time::Instant)>,
     /// Why the last pressed combo was refused.
@@ -119,7 +127,7 @@ struct Settings {
 }
 
 impl Settings {
-    fn new(path: PathBuf, cfg: Config, hooks: Hooks) -> Self {
+    fn new(path: PathBuf, cfg: Config, hooks: Hooks, welcome: bool) -> Self {
         Self {
             cfg,
             store: Store {
@@ -130,6 +138,7 @@ impl Settings {
             proxy: (hooks.get_proxy)().unwrap_or_default(),
             hooks,
             tab: first_tab(),
+            welcome,
             recording: None,
             refused: None,
         }
@@ -193,29 +202,32 @@ impl Settings {
         });
     }
 
+    fn autostart_row(ui: &mut egui::Ui, hooks: &Hooks, on: &mut bool, store: &mut Store) {
+        let hint = if (hooks.autostart_blocked)() {
+            t("Выключено в диспетчере задач. Этот переключатель вернёт автозапуск.")
+        } else {
+            ""
+        };
+        row(
+            ui,
+            t("Запускать вместе с Windows"),
+            hint,
+            |ui| {
+                if toggle(ui, on).changed()
+                    && let Err(e) = (hooks.set_autostart)(*on)
+                {
+                    store.error = e;
+                    *on = (hooks.autostart)();
+                }
+            },
+        );
+    }
+
     fn general(&mut self, ui: &mut egui::Ui) {
         let store = &mut self.store;
         ui::heading(ui, t("Основные"), 24.0);
         card(ui, |ui| {
-            let blocked = (self.hooks.autostart_blocked)();
-            let hint = if blocked {
-                t("Выключено в диспетчере задач. Этот переключатель вернёт автозапуск.")
-            } else {
-                ""
-            };
-            row(
-                ui,
-                t("Запускать вместе с Windows"),
-                hint,
-                |ui| {
-                    if toggle(ui, &mut self.autostart).changed()
-                        && let Err(e) = (self.hooks.set_autostart)(self.autostart)
-                    {
-                        store.error = e;
-                        self.autostart = (self.hooks.autostart)();
-                    }
-                },
-            );
+            Self::autostart_row(ui, &self.hooks, &mut self.autostart, store);
             divider(ui);
             row(ui, t("Тема"), "", |ui| {
                 let now = match self.cfg.ui.theme {
@@ -616,6 +628,78 @@ impl Settings {
         self.store.set("hotkeys", action.key(), combo);
     }
 
+    /// One action with its combo; says whether the combo or its cross was pressed.
+    fn hotkey_row(&self, ui: &mut egui::Ui, a: Action, problems: &[String]) -> (bool, bool) {
+        let p = ui::pal(ui.ctx());
+        let (mut clicked, mut cleared) = (false, false);
+        let problem = problems
+            .iter()
+            .find(|m| m.starts_with(&format!("«{}»", a.title())));
+        let recording = self.recording.is_some_and(|r| r.0 == a);
+        let combo = self.cfg.hotkeys.combo(a);
+        let label = match (recording, combo.is_empty()) {
+            (true, _) => t("Нажми сочетание…"),
+            (_, true) => t("Не задано"),
+            _ => combo,
+        };
+        let (fill, text) = if recording {
+            (p.tone, p.tone_text)
+        } else if problem.is_some() {
+            (p.warn_bg, p.warn)
+        } else {
+            (p.ghost, p.text)
+        };
+        Frame::new()
+            .inner_margin(Margin::symmetric(16, 12))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                let size = vec2(ui.available_width(), 30.0);
+                let center = Layout::left_to_right(Align::Center);
+                ui.allocate_ui_with_layout(size, center, |ui| {
+                    ui.label(a.title());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if !combo.is_empty()
+                            && ui::ghost_icon(ui, icon::X, 30.0, t("Убрать сочетание")).clicked()
+                        {
+                            cleared = true;
+                        }
+                        let g =
+                            ui.painter()
+                                .layout_no_wrap(label.to_string(), ui::mono(13.0), text);
+                        let size = vec2(g.size().x + 24.0, 30.0);
+                        let (rect, r) = ui.allocate_exact_size(size, Sense::click());
+                        ui.painter().rect_filled(rect, 15.0, fill);
+                        if recording {
+                            ui::outline(ui, rect, 15.0);
+                        }
+                        ui.painter().galley(rect.center() - g.size() / 2.0, g, text);
+                        if r.clicked() {
+                            clicked = true;
+                        }
+                    });
+                });
+                if let Some((_, why)) = self.refused.as_ref().filter(|r| r.0 == a) {
+                    ui.label(RichText::new(why).size(12.5).color(p.warn));
+                } else if let Some(m) = problem {
+                    let text = m.split_once(": ").map_or(m.as_str(), |(_, t)| t);
+                    ui.label(RichText::new(text).size(12.5).color(p.warn));
+                }
+            });
+        (clicked, cleared)
+    }
+
+    fn hotkey_pressed(&mut self, click: Option<Action>, clear: Option<Action>) {
+        if let Some(a) = click {
+            self.refused = None;
+            self.start_recording(a);
+        }
+        if let Some(a) = clear {
+            self.stop_recording();
+            self.cfg.hotkeys.set_combo(a, String::new());
+            self.store.set("hotkeys", a.key(), "");
+        }
+    }
+
     fn hotkeys(&mut self, ui: &mut egui::Ui) {
         let p = ui::pal(ui.ctx());
         ui::heading(ui, t("Горячие клавиши"), 24.0);
@@ -627,73 +711,16 @@ impl Settings {
                 if i > 0 {
                     divider(ui);
                 }
-                let problem = problems
-                    .iter()
-                    .find(|m| m.starts_with(&format!("«{}»", a.title())));
-                let recording = self.recording.is_some_and(|r| r.0 == a);
-                let combo = self.cfg.hotkeys.combo(a);
-                let label = match (recording, combo.is_empty()) {
-                    (true, _) => t("Нажми сочетание…"),
-                    (_, true) => t("Не задано"),
-                    _ => combo,
-                };
-                let (fill, text) = if recording {
-                    (p.tone, p.tone_text)
-                } else if problem.is_some() {
-                    (p.warn_bg, p.warn)
-                } else {
-                    (p.ghost, p.text)
-                };
-                Frame::new()
-                    .inner_margin(Margin::symmetric(16, 12))
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 6.0;
-                        let size = vec2(ui.available_width(), 30.0);
-                        let center = Layout::left_to_right(Align::Center);
-                        ui.allocate_ui_with_layout(size, center, |ui| {
-                            ui.label(a.title());
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if !combo.is_empty()
-                                    && ui::ghost_icon(ui, icon::X, 30.0, t("Убрать сочетание"))
-                                        .clicked()
-                                {
-                                    clear = Some(a);
-                                }
-                                let g = ui.painter().layout_no_wrap(
-                                    label.to_string(),
-                                    ui::mono(13.0),
-                                    text,
-                                );
-                                let size = vec2(g.size().x + 24.0, 30.0);
-                                let (rect, r) = ui.allocate_exact_size(size, Sense::click());
-                                ui.painter().rect_filled(rect, 15.0, fill);
-                                if recording {
-                                    ui::outline(ui, rect, 15.0);
-                                }
-                                ui.painter().galley(rect.center() - g.size() / 2.0, g, text);
-                                if r.clicked() {
-                                    click = Some(a);
-                                }
-                            });
-                        });
-                        if let Some((_, why)) = self.refused.as_ref().filter(|r| r.0 == a) {
-                            ui.label(RichText::new(why).size(12.5).color(p.warn));
-                        } else if let Some(m) = problem {
-                            let text = m.split_once(": ").map_or(m.as_str(), |(_, t)| t);
-                            ui.label(RichText::new(text).size(12.5).color(p.warn));
-                        }
-                    });
+                let (clicked, cleared) = self.hotkey_row(ui, a, &problems);
+                if clicked {
+                    click = Some(a);
+                }
+                if cleared {
+                    clear = Some(a);
+                }
             }
         });
-        if let Some(a) = click {
-            self.refused = None;
-            self.start_recording(a);
-        }
-        if let Some(a) = clear {
-            self.stop_recording();
-            self.cfg.hotkeys.set_combo(a, String::new());
-            self.store.set("hotkeys", a.key(), "");
-        }
+        self.hotkey_pressed(click, clear);
         ui.label(
             RichText::new(t(
                 "Нажми на сочетание, затем нужные клавиши: Windows и другие программы на них \
@@ -703,6 +730,54 @@ impl Settings {
             .size(13.0)
             .color(p.muted),
         );
+    }
+
+    /// First run: what matters before the first shot, on one screen.
+    fn welcome(&mut self, ui: &mut egui::Ui) {
+        let p = ui::pal(ui.ctx());
+        ui::heading(ui, t("Snapling уже работает"), 24.0);
+        ui.label(
+            RichText::new(t(
+                "Он живёт в трее, рядом с часами. Проверь три вещи, остальное есть в настройках.",
+            ))
+            .color(p.soft),
+        );
+        let a = Action::CaptureRegion;
+        let (_, problems) = hotkey::check(&self.cfg.hotkeys, self.hooks.reserved);
+        caption(ui, t("Сочетание для снимка"));
+        let (clicked, cleared) = card(ui, |ui| self.hotkey_row(ui, a, &problems));
+        self.hotkey_pressed(clicked.then_some(a), cleared.then_some(a));
+        let prtscn = Hotkey::parse(self.cfg.hotkeys.combo(a))
+            .is_ok_and(|h| Hotkey::parse("PrintScreen").is_ok_and(|k| k == h));
+        if prtscn && (self.hooks.snipping_owns)() {
+            Frame::new()
+                .fill(p.warn_bg)
+                .corner_radius(14)
+                .inner_margin(14)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 10.0;
+                    ui.label(
+                        RichText::new(t(
+                            "PrtScn сейчас открывает «Ножницы» Windows. Выключи в параметрах \
+                             пункт про клавишу Print Screen.",
+                        ))
+                        .color(p.warn),
+                    );
+                    if ui::tone(ui, t("Открыть параметры Windows"), None, 34.0).clicked()
+                    {
+                        (self.hooks.open)(Path::new("ms-settings:easeofaccess-keyboard"));
+                    }
+                });
+        }
+        caption(ui, t("Папка снимков"));
+        self.folder_card(ui);
+        card(ui, |ui| {
+            Self::autostart_row(ui, &self.hooks, &mut self.autostart, &mut self.store);
+        });
+        if ui::primary(ui, t("Готово"), Some(ui.available_width()), 42.0).clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     fn text(&mut self, ui: &mut egui::Ui) {
@@ -899,6 +974,32 @@ impl eframe::App for Settings {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         let p = ui::pal(&ctx);
+        if self.welcome {
+            ui::title_bar(ui, "Snapling");
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(p.main))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        Frame::new()
+                            .inner_margin(Margin {
+                                left: 28,
+                                right: 28,
+                                top: 12,
+                                bottom: 24,
+                            })
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 12.0;
+                                self.welcome(ui);
+                                if !self.store.error.is_empty() {
+                                    let e = &self.store.error;
+                                    ui.label(RichText::new(e).size(13.0).color(p.warn));
+                                }
+                            });
+                    });
+                });
+            return;
+        }
         ui::title_bar(ui, t("Snapling — настройки"));
         egui::Panel::left("nav")
             .exact_size(236.0)

@@ -152,18 +152,18 @@ fn menu_rows(cfg: &Config) -> Vec<MenuRow> {
         let keys = cfg.hotkeys.combo(a).trim().replace("PrintScreen", "PrtScn");
         MenuRow::Item(i, a.title().to_string(), keys)
     };
-    let item = |i, s: &'static str| MenuRow::Item(i, t(s).to_string(), String::new());
+    let item = |i, s: &str| MenuRow::Item(i, s.to_string(), String::new());
     vec![
         act(MenuIcon::Region, Action::CaptureRegion),
         act(MenuIcon::Screen, Action::CaptureScreen),
         act(MenuIcon::Repeat, Action::RepeatRegion),
         act(MenuIcon::Text, Action::RecognizeText),
         MenuRow::Line,
-        item(MenuIcon::History, "История"),
-        item(MenuIcon::Folder, "Папка снимков"),
-        item(MenuIcon::Settings, "Настройки"),
+        item(MenuIcon::History, t("История")),
+        item(MenuIcon::Folder, t("Папка снимков")),
+        item(MenuIcon::Settings, t("Настройки")),
         MenuRow::Line,
-        item(MenuIcon::Quit, "Выход"),
+        item(MenuIcon::Quit, t("Выход")),
     ]
 }
 
@@ -584,6 +584,7 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         recorded_combo: snapling_win::recorded_combo,
         hotkey_free: snapling_win::hotkey_free,
         autostart_blocked: snapling_win::autostart_blocked,
+        snipping_owns: snapling_win::snipping_owns_printscreen,
         get_proxy: || snapling_win::secret::get(DEEPL_PROXY),
         set_proxy: |url| {
             if url.is_empty() {
@@ -962,6 +963,13 @@ pub fn run() {
     unsafe { SetTimer(None, 0, CONFIG_POLL_MS, None) };
     let mut settings_window = Window::default();
     let mut history_window = Window::default();
+    let mut welcome_window = Window::default();
+    if !cfg.ui.welcomed {
+        welcome_window.open("--welcome");
+        if let Err(e) = Config::update(&cfg_path, "ui", "welcomed", true) {
+            warn!("welcome: {e}");
+        }
+    }
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {

@@ -93,6 +93,8 @@ language = "auto"
 theme = "system"
 # Значок в трее: "auto" — под цвет панели задач, "white", "black".
 tray_icon = "auto"
+# Экран приветствия уже показан.
+welcomed = false
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -132,6 +134,7 @@ pub struct Ui {
     pub language: String,
     pub theme: Theme,
     pub tray_icon: TrayIcon,
+    pub welcomed: bool,
 }
 
 impl Default for Ui {
@@ -140,6 +143,7 @@ impl Default for Ui {
             language: "auto".into(),
             theme: Theme::default(),
             tray_icon: TrayIcon::default(),
+            welcomed: false,
         }
     }
 }

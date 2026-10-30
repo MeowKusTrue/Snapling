@@ -45,7 +45,10 @@ fn main() {
         return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), true);
     }
     if args.len() == 2 && args[1] == "--settings" {
-        return settings::run(settings_hooks());
+        return settings::run(settings_hooks(), false);
+    }
+    if args.len() == 2 && args[1] == "--welcome" {
+        return settings::run(settings_hooks(), true);
     }
     if args.len() == 2 && args[1] == "--history" {
         return history_ui::run(history_hooks());
@@ -91,6 +94,7 @@ fn settings_hooks() -> settings::Hooks {
         get_proxy: || None,
         set_proxy: |_| Err(t("пока только Windows").into()),
         reserved: |_| None,
+        snipping_owns: || false,
         open: |_| {},
         log: std::path::PathBuf::new(),
         default_dir: || None,

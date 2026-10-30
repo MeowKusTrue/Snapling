@@ -117,6 +117,38 @@ pub fn single_instance() -> bool {
     handle.is_ok() && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS
 }
 
+/// The window belongs to a `snapling.exe`, not to a folder or an editor named the same.
+fn from_snapling(hwnd: HWND) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    use windows::core::PWSTR;
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+    else {
+        return false;
+    };
+    let mut path = [0u16; 512];
+    let mut len = path.len() as u32;
+    let read = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(path.as_mut_ptr()),
+            &mut len,
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    read.is_ok()
+        && String::from_utf16_lossy(&path[..len as usize])
+            .to_lowercase()
+            .ends_with("snapling.exe")
+}
+
 /// Brings an open Snapling window to the front; `false` when none is on screen.
 pub fn focus_app_window() -> bool {
     use windows::Win32::Foundation::{LPARAM, TRUE};
@@ -129,7 +161,7 @@ pub fn focus_app_window() -> bool {
         let mut title = [0u16; 16];
         let len = unsafe { GetWindowTextW(hwnd, &mut title) } as usize;
         let ours = String::from_utf16_lossy(&title[..len]) == "Snapling";
-        if !ours || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        if !ours || !unsafe { IsWindowVisible(hwnd) }.as_bool() || !from_snapling(hwnd) {
             return TRUE;
         }
         unsafe {

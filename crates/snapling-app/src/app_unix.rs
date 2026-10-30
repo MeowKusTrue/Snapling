@@ -335,8 +335,8 @@ fn after(cfg: &Config, cap: &unix::Capture, img: Shot, outcome: Outcome) -> Resu
             deliver(cfg, &long, "long", false);
         }
         Outcome::Color => {
-            let hex = format!("#{:02X}{:02X}{:02X}", img.bgra[2], img.bgra[1], img.bgra[0]);
-            unix::copy_text(&hex)?;
+            let rgb = [img.bgra[2], img.bgra[1], img.bgra[0]];
+            unix::copy_text(&cfg.capture.color_format.text(rgb))?;
             play(cfg, Sound::Copy);
         }
     }
@@ -350,14 +350,32 @@ fn region(cfg: &Config, auto: Option<Outcome>) -> Result<(), String> {
         auto,
         instant: cfg.capture.instant_copy,
         loupe: cfg.capture.loupe,
+        picker: cfg.capture.picker,
+        color_format: cfg.capture.color_format,
         blur: annotate::BlurStyle {
             gauss: cfg.blur.gauss,
             strength: cfg.blur.strength.min(2),
         },
         targets: cap.targets.clone(),
     };
-    match snapling_overlay::run(cap.shot.clone(), opts)? {
-        Some((img, outcome)) => after(cfg, &cap, img, outcome),
+    let ended = snapling_overlay::run(cap.shot.clone(), opts)?;
+    let path = crate::ui::config_path();
+    if ended.picker != cfg.capture.picker {
+        Config::update(&path, "capture", "picker", ended.picker)?;
+    }
+    if ended.color_format != cfg.capture.color_format {
+        Config::update(&path, "capture", "color_format", ended.color_format.key())?;
+    }
+    if ended.blur.gauss != cfg.blur.gauss {
+        Config::update(&path, "blur", "gauss", ended.blur.gauss)?;
+    }
+    if ended.blur.strength != cfg.blur.strength {
+        Config::update(&path, "blur", "strength", i64::from(ended.blur.strength))?;
+    }
+    let mut cfg = cfg.clone();
+    cfg.capture.color_format = ended.color_format;
+    match ended.result {
+        Some((img, outcome)) => after(&cfg, &cap, img, outcome),
         None => Ok(()),
     }
 }
@@ -376,6 +394,15 @@ pub fn run_flag(flag: &str) -> bool {
                 cfg.capture.delay.clamp(1, 60),
             )));
             region(&cfg, None)
+        }
+        "--record-cancel" => {
+            if let Some(run) = unix::recording() {
+                let file = unix::stop_recording(run);
+                if let Ok(path) = file {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            Ok(())
         }
         "--record" => match unix::recording() {
             Some(run) => {
@@ -431,10 +458,11 @@ pub fn run_tray() {
             row(Action::CaptureScreen, "--screen"),
             row(Action::DelayedRegion, "--delay"),
             row(Action::Record, "--record"),
+            Some((t("Отменить запись").to_string(), "--record-cancel")),
             row(Action::LongShot, "--long"),
             row(Action::RecognizeText, "--ocr"),
             None,
-            Some((t("Галерея").to_string(), "--history")),
+            Some((t("Галерея").to_string(), "--gallery")),
             Some((t("Настройки").to_string(), "--settings")),
             None,
             Some((t("Выход").to_string(), "--quit")),
@@ -511,6 +539,7 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         models: models_dir(),
         can_update: false,
         ask: unix::ask,
+        gallery: history_hooks,
         run_update: |_| Ok(()),
         get_proxy: || unix::secret_get(PROXY),
         set_proxy: |url| {
@@ -532,7 +561,6 @@ pub fn settings_hooks() -> crate::settings::Hooks {
 
 pub fn history_hooks() -> crate::history_ui::Hooks {
     crate::history_ui::Hooks {
-        warn: unix::warn,
         file: history_file(),
         now: || history::time_string(stamp()),
         copy_image: |path| {

@@ -1,4 +1,5 @@
 pub mod annotate;
+pub mod color;
 pub mod config;
 pub mod history;
 pub mod hotkey;

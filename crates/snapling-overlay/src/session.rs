@@ -2,6 +2,7 @@
 //! come out. Same behavior as `snapling-win/overlay.rs`, which keeps its own Win32 copy.
 
 use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
+use snapling_core::color::ColorFormat;
 use snapling_core::selection::{Corner, Hit, MIN_SELECTION_PX, Point, Rect, Selection};
 use snapling_scene::{
     Button, COLORS, Control, Draw, Hover, Layout, Loupe, SIZES, Scene, TOOLS, Target, Tool,
@@ -45,6 +46,8 @@ pub struct Options {
     /// Selecting copies at once, skipping the action toolbar.
     pub instant: bool,
     pub loupe: bool,
+    pub picker: bool,
+    pub color_format: ColorFormat,
     pub blur: BlurStyle,
     /// Windows under the overlay, topmost first, with their app names.
     pub targets: Vec<(Rect, String)>,
@@ -86,6 +89,8 @@ struct Pen {
     history: History,
     live: Option<Element>,
     typing: Option<(Pt, String)>,
+    picker: bool,
+    color_format: ColorFormat,
 }
 
 pub struct Session {
@@ -133,6 +138,8 @@ impl Session {
                 history: History::default(),
                 live: None,
                 typing: None,
+                picker: opts.picker,
+                color_format: opts.color_format,
             },
             armed: false,
             lasso: Vec::new(),
@@ -172,7 +179,8 @@ impl Session {
 
     fn loupe_on(&self) -> bool {
         let aiming = !self.sel.confirmed() || self.sel.is_dragging();
-        self.opts.loupe && aiming && self.free() && self.hover_btn.is_none()
+        let on = self.pen.picker || (self.opts.loupe && aiming);
+        on && self.free() && self.hover_btn.is_none()
     }
 
     fn scene(&self) -> Scene<'_> {
@@ -196,6 +204,7 @@ impl Session {
                 frame: &self.annot,
                 width: self.shot.width,
                 height: self.shot.height,
+                format: self.pen.color_format,
             }),
             tools: Some(Draw {
                 monitor: bounds,
@@ -213,6 +222,8 @@ impl Session {
                     .typing
                     .as_ref()
                     .map(|(at, text)| (*at, text.as_str())),
+                picker: self.pen.picker,
+                color_format: self.pen.color_format,
             }),
         }
     }
@@ -350,7 +361,17 @@ impl Session {
         }
     }
 
+    /// Blur style, eyedropper and color format as the panels left them.
+    pub fn prefs(&self) -> (BlurStyle, bool, ColorFormat) {
+        (self.pen.blur, self.pen.picker, self.pen.color_format)
+    }
+
     fn control(&mut self, c: Control) -> Step {
+        let c = if c == Control::Action(Button::Blur) {
+            Control::Tool(Tool::Blur)
+        } else {
+            c
+        };
         match c {
             Control::Action(b) => {
                 return match b {
@@ -362,6 +383,7 @@ impl Session {
                     Button::Pin => Step::Done(Outcome::Pin),
                     Button::Record => Step::Done(Outcome::Record),
                     Button::Scroll => Step::Done(Outcome::Scroll),
+                    Button::Blur => Step::Stay,
                     Button::Cancel => Step::Cancel,
                 };
             }
@@ -371,6 +393,8 @@ impl Session {
             Control::Size(i) => self.pen.size = SIZES[i],
             Control::Gauss(g) => self.pen.blur.gauss = g,
             Control::Strength(i) => self.pen.blur.strength = i,
+            Control::Picker => self.pen.picker = !self.pen.picker,
+            Control::ColorFormat(i) => self.pen.color_format = ColorFormat::ALL[i],
             Control::Undo | Control::Redo => {
                 self.pen.typing = None;
                 let changed = if c == Control::Undo {
@@ -390,6 +414,9 @@ impl Session {
         self.mouse = p;
         if let Some(c) = snapling_scene::button_at(&self.layout, p) {
             return self.control(c);
+        }
+        if self.pen.picker && self.pen.tool.is_none() {
+            return Step::Done(Outcome::Color);
         }
         let hs = self.handle_size();
         let corner = self.lasso.is_empty() && matches!(self.sel.hit(p, hs), Hit::Corner(_));
@@ -771,6 +798,30 @@ mod tests {
             (px.x, px.y, px.bgra.as_slice()),
             (105, 56, &[10, 20, 30, 255][..])
         );
+    }
+
+    #[test]
+    fn the_picker_takes_the_color_on_a_click_and_remembers_the_format() {
+        let mut s = session(Options {
+            picker: true,
+            color_format: ColorFormat::Rgb,
+            ..Options::default()
+        });
+        assert!(s.loupe_on(), "the loupe comes with the picker");
+        s.moved(pt(5, 6), NONE);
+        assert_eq!(s.press(pt(5, 6), NONE), Step::Done(Outcome::Color));
+        assert_eq!(s.prefs().2, ColorFormat::Rgb);
+        s.control(Control::ColorFormat(4));
+        assert_eq!(s.prefs().2, ColorFormat::Cmyk);
+        s.control(Control::Picker);
+        assert!(!s.prefs().1);
+    }
+
+    #[test]
+    fn the_blur_button_picks_the_blur_brush() {
+        let mut s = session(Options::default());
+        assert_eq!(s.control(Control::Action(Button::Blur)), Step::Stay);
+        assert_eq!(s.pen.tool, Some(Tool::Blur));
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Gallery window, its own process (`snapling --history`): a grid of shots, a panel for the
-//! selected one and a view over the whole window.
+//! Gallery page of the app window: a grid of shots, a panel for the selected one and a view
+//! over the whole page.
 
 use crate::ui;
 use eframe::egui::{
@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub struct Hooks {
-    pub warn: fn(&str),
     pub file: PathBuf,
     /// Current local time as `history::time_string`.
     pub now: fn() -> String,
@@ -43,25 +42,6 @@ const PANEL_W: f32 = 312.0;
 const THUMB_SIDE: u32 = 480;
 /// Previews kept in the GPU, about 200 MB; the ones on screen come back on the next frame.
 const MAX_PICTURES: usize = 400;
-
-pub fn run(hooks: Hooks) {
-    let options = eframe::NativeOptions {
-        viewport: ui::viewport(t("Snapling — галерея"), [1100.0, 720.0], [760.0, 480.0]),
-        ..Default::default()
-    };
-    let warn = hooks.warn;
-    let res = eframe::run_native(
-        "Snapling gallery",
-        options,
-        Box::new(move |cc| {
-            ui::init(cc);
-            Ok(Box::new(History::new(hooks, cc.egui_ctx.clone())))
-        }),
-    );
-    if let Err(e) = res {
-        warn(&tf("Окно галереи не запустилось.\n{e}", &[("e", &e)]));
-    }
-}
 
 type Picture = (String, Option<ColorImage>);
 
@@ -96,7 +76,7 @@ fn fit(area: Rect, size: [usize; 2]) -> Rect {
     Rect::from_center_size(area.center(), vec2(w, h) * k)
 }
 
-struct History {
+pub struct History {
     hooks: Hooks,
     /// Newest first.
     entries: Vec<Entry>,
@@ -134,7 +114,7 @@ enum Act {
 }
 
 impl History {
-    fn new(hooks: Hooks, ctx: egui::Context) -> Self {
+    pub fn new(hooks: Hooks, ctx: egui::Context) -> Self {
         let (ask, wrx) = channel();
         let (wtx, got) = channel();
         let worker = ctx.clone();
@@ -535,8 +515,6 @@ impl History {
             .show_separator_line(false)
             .frame(Frame::new().fill(p.well).inner_margin(12))
             .show(ui, |ui| {
-                let bar = Rect::from_min_size(ui.max_rect().min, vec2(ui.available_width(), 38.0));
-                ui::drag_area(ui, bar);
                 ui.horizontal(|ui| {
                     if ui::ghost_icon(ui, icon::ARROW_LEFT, 38.0, t("Назад")).clicked() {
                         self.big = false;
@@ -554,9 +532,6 @@ impl History {
                     ui.label(RichText::new(Self::title(&e)).font(ui::semi(14.0)));
                     ui.label(RichText::new(self.meta(&e)).size(12.5).color(p.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::ghost_icon(ui, icon::X, 38.0, t("Закрыть")).clicked() {
-                            self.big = false;
-                        }
                         if ui::tone(ui, t("Редактор"), None, 38.0).clicked() {
                             *act = Some(Act::Edit(index));
                         }
@@ -594,19 +569,19 @@ impl History {
     }
 }
 
-impl eframe::App for History {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl History {
+    /// The big view is open: Esc belongs to it.
+    pub fn is_big(&self) -> bool {
+        self.big
+    }
+
+    /// Draws the page into the free space of `ui`.
+    pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        ui::preview(&ctx);
         self.poll(&ctx);
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            if self.big {
-                self.big = false;
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+        if self.big && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.big = false;
         }
-        ui::frame_edges(&ctx);
         let p = ui::pal(&ctx);
         let visible = self.visible();
         if !visible.iter().any(|v| Some(v.0) == self.selected) {
@@ -645,8 +620,6 @@ impl eframe::App for History {
                 bottom: 12,
             }))
             .show(ui, |ui| {
-                let top = Rect::from_min_size(ui.max_rect().min, vec2(ui.available_width(), 36.0));
-                ui::drag_area(ui, top);
                 ui.horizontal(|ui| {
                     ui::heading(ui, t("Галерея"), 20.0);
                     ui.add_space(8.0);
@@ -655,9 +628,6 @@ impl eframe::App for History {
                         self.period = i;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::ghost_icon(ui, icon::X, 36.0, t("Закрыть")).clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
                         if ui::tone(ui, t("Открыть папку"), None, 36.0).clicked() {
                             (self.hooks.open_folder)();
                         }

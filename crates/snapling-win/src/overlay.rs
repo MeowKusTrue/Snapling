@@ -10,6 +10,7 @@
 
 use crate::{Image, crop_bgra, dib_header, lparam_point, targets, uia};
 use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
+use snapling_core::color::ColorFormat;
 use snapling_core::i18n::t;
 use snapling_core::selection::{Corner, Hit, HoverChain, MIN_SELECTION_PX, Point, Rect, Selection};
 use snapling_scene::{
@@ -104,6 +105,14 @@ struct State {
     on_done: Option<Done>,
 }
 
+/// What the panels change and the next overlay should remember.
+#[derive(Clone, Copy, Debug)]
+pub struct Prefs {
+    pub blur: BlurStyle,
+    pub picker: bool,
+    pub color_format: ColorFormat,
+}
+
 /// In-overlay editor state.
 struct Pen {
     tool: Option<Tool>,
@@ -117,6 +126,8 @@ struct Pen {
     live: Option<Element>,
     /// Text being typed and where.
     typing: Option<(Pt, String)>,
+    picker: bool,
+    color_format: ColorFormat,
 }
 
 impl Default for Pen {
@@ -130,6 +141,8 @@ impl Default for Pen {
             history: History::default(),
             live: None,
             typing: None,
+            picker: COLOR.get().0,
+            color_format: COLOR.get().1,
         }
     }
 }
@@ -142,6 +155,10 @@ thread_local! {
     static INSTANT: Cell<bool> = const { Cell::new(false) };
     /// `[capture] loupe`.
     static LOUPE: Cell<bool> = const { Cell::new(true) };
+    /// Color settings a new overlay starts with.
+    static COLOR: Cell<(bool, ColorFormat)> = const { Cell::new((false, ColorFormat::Hex)) };
+    /// Told about what the panels changed, to keep it for the next time.
+    static ON_PREFS: Cell<Option<fn(Prefs)>> = const { Cell::new(None) };
     /// `[blur]`, the brush a new overlay starts with.
     static BLUR: Cell<BlurStyle> = const {
         Cell::new(BlurStyle {
@@ -501,7 +518,8 @@ fn union(a: RECT, b: RECT) -> RECT {
 /// While aiming: before the selection is done, off the rail, with no tool in hand.
 fn loupe_on(s: &State) -> bool {
     let aiming = !s.sel.confirmed() || s.sel.is_dragging();
-    LOUPE.get() && aiming && s.pen.tool.is_none() && !s.pen.lasso_mode && s.hover_btn.is_none()
+    let free = s.pen.tool.is_none() && !s.pen.lasso_mode && s.hover_btn.is_none();
+    free && (s.pen.picker || (LOUPE.get() && aiming))
 }
 
 fn scene(s: &State) -> Scene<'_> {
@@ -537,6 +555,7 @@ fn scene(s: &State) -> Scene<'_> {
             frame: unsafe { std::slice::from_raw_parts(s.annot_bits, len) },
             width: s.width,
             height: s.height,
+            format: s.pen.color_format,
         }
     });
     Scene {
@@ -561,6 +580,8 @@ fn scene(s: &State) -> Scene<'_> {
             can_redo: s.pen.history.can_redo(),
             live: s.pen.live.as_ref(),
             caret: s.pen.typing.as_ref().map(|(p, t)| (*p, t.as_str())),
+            picker: s.pen.picker,
+            color_format: s.pen.color_format,
         }),
     }
 }
@@ -720,6 +741,8 @@ fn act(hwnd: HWND, b: Button) {
         Button::Pin => Some(Outcome::Pin),
         Button::Record => Some(Outcome::Record),
         Button::Scroll => Some(Outcome::Scroll),
+        // Handled in `control`: it picks a tool, it does not end the overlay.
+        Button::Blur => None,
         Button::Cancel => None,
     };
     finish(hwnd, out);
@@ -827,6 +850,11 @@ fn pen_down(s: &mut State, tool: Tool, p: Point) {
 }
 
 fn control(hwnd: HWND, c: Control) {
+    let c = if c == Control::Action(Button::Blur) {
+        Control::Tool(Tool::Blur)
+    } else {
+        c
+    };
     if let Control::Action(b) = c {
         return act(hwnd, b);
     }
@@ -841,6 +869,8 @@ fn control(hwnd: HWND, c: Control) {
             Control::Size(i) => pen.size = SIZES[i],
             Control::Gauss(g) => pen.blur.gauss = g,
             Control::Strength(i) => pen.blur.strength = i,
+            Control::Picker => pen.picker = !pen.picker,
+            Control::ColorFormat(i) => pen.color_format = ColorFormat::ALL[i],
             Control::Undo | Control::Redo => {
                 pen.typing = None;
                 let changed = if c == Control::Undo {
@@ -853,6 +883,13 @@ fn control(hwnd: HWND, c: Control) {
                 }
             }
             Control::Action(_) | Control::Select | Control::Lasso => {}
+        }
+        if let Some(sink) = ON_PREFS.get() {
+            sink(Prefs {
+                blur: s.pen.blur,
+                picker: s.pen.picker,
+                color_format: s.pen.color_format,
+            });
         }
     });
     invalidate(
@@ -952,6 +989,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         }
         WM_LBUTTONDOWN => {
             let p = lparam_point(lp);
+            let pick = with(|s| {
+                s.mouse = p;
+                s.pen.picker && s.pen.tool.is_none() && button_at(s, p).is_none()
+            });
+            if pick == Some(true) {
+                finish(hwnd, Some(Outcome::Color));
+                return LRESULT(0);
+            }
             let clicked = with(|s| {
                 s.mouse = p;
                 if let Some(c) = button_at(s, p) {
@@ -1169,6 +1214,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 /// Starting style of the blur brush.
 pub fn set_blur(gauss: bool, strength: u8) {
     BLUR.set(BlurStyle { gauss, strength });
+}
+
+/// Eyedropper and color format a new overlay starts with.
+pub fn set_color(picker: bool, format: ColorFormat) {
+    COLOR.set((picker, format));
+}
+
+/// Called with the panel settings whenever they change.
+pub fn on_prefs(sink: fn(Prefs)) {
+    ON_PREFS.set(Some(sink));
+}
+
+/// Format of a picked color.
+pub fn color_format() -> ColorFormat {
+    COLOR.get().1
 }
 
 /// Magnifier at the cursor while aiming.

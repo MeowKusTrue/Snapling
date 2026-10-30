@@ -3,6 +3,7 @@
 //! selection) into a BGRA buffer, then calls [`draw`]. Colors are written as BGRA.
 
 use snapling_core::annotate::{self, FontRef, Pt};
+use snapling_core::color::ColorFormat;
 use snapling_core::i18n::{n, t};
 use snapling_core::selection::{Point, Rect};
 use std::cell::RefCell;
@@ -22,6 +23,7 @@ pub enum Button {
     Pin,
     Record,
     Scroll,
+    Blur,
     Cancel,
 }
 
@@ -83,6 +85,10 @@ pub enum Control {
     /// Blur kind: `true` = Gaussian, `false` = cubes.
     Gauss(bool),
     Strength(u8),
+    /// Eyedropper on or off.
+    Picker,
+    /// Text format of a picked color, an index into `ColorFormat::ALL`.
+    ColorFormat(usize),
 }
 
 /// Tool rail and annotations, on screen from the first frame.
@@ -103,6 +109,9 @@ pub struct Draw<'a> {
     pub live: Option<&'a annotate::Element>,
     /// Text being typed and where.
     pub caret: Option<(Pt, &'a str)>,
+    /// Eyedropper is on: a click takes the color.
+    pub picker: bool,
+    pub color_format: ColorFormat,
 }
 
 /// What the cursor highlights before anything is selected.
@@ -153,11 +162,12 @@ pub struct Loupe<'a> {
     pub frame: &'a [u8],
     pub width: u32,
     pub height: u32,
+    pub format: ColorFormat,
 }
 
-/// `#RRGGBB` of a BGRA pixel.
-pub fn color_hex(px: &[u8]) -> String {
-    format!("#{:02X}{:02X}{:02X}", px[2], px[1], px[0])
+/// A BGRA pixel as text.
+pub fn color_text(px: &[u8], format: ColorFormat) -> String {
+    format.text([px[2], px[1], px[0]])
 }
 
 fn loupe_px<'a>(l: &Loupe<'a>, x: i32, y: i32) -> Option<&'a [u8]> {
@@ -200,7 +210,7 @@ const RAIL_BTN: (f32, f32) = (44.0, 40.0);
 const OPTS_W: f32 = 160.0;
 
 /// Toolbar buttons in mockup order; `None` is the divider.
-const BAR: [Option<Button>; 10] = [
+const BAR: [Option<Button>; 11] = [
     Some(Button::Copy),
     Some(Button::Save),
     Some(Button::Edit),
@@ -209,6 +219,7 @@ const BAR: [Option<Button>; 10] = [
     Some(Button::Pin),
     Some(Button::Record),
     Some(Button::Scroll),
+    Some(Button::Blur),
     None,
     Some(Button::Cancel),
 ];
@@ -495,6 +506,7 @@ fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
     let items: Vec<Option<Control>> = [Some(Control::Select), Some(Control::Lasso), None]
         .into_iter()
         .chain(TOOLS.iter().map(|&t| Some(Control::Tool(t))))
+        .chain([None, Some(Control::Picker)])
         .chain([None, Some(Control::Undo), Some(Control::Redo)])
         .collect();
     let sw = RAIL_W * s;
@@ -518,11 +530,15 @@ fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
     let bx = x + pad;
     let mut by = y + pad;
     let mut first_tool = y;
+    let mut picker_y = y;
     for c in items {
         match c {
             Some(c) => {
                 if c == Control::Tool(TOOLS[0]) {
                     first_tool = by;
+                }
+                if c == Control::Picker {
+                    picker_y = by;
                 }
                 out.buttons.push((r(bx, by, bw, bh), c));
                 by += bh + gap;
@@ -537,6 +553,31 @@ fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
     out.bounds = union(out.bounds, inflate(rail, (40.0 * s) as i32));
     out.strip = Some(rail);
 
+    let ow = OPTS_W * s;
+    let ox = if covered {
+        x - 12.0 * s - ow
+    } else {
+        x + sw + 12.0 * s
+    };
+    if t.picker {
+        let row = 30.0 * s;
+        let rows = ColorFormat::ALL.len() as f32;
+        let h = rows * row + 16.0 * s;
+        let top = (picker_y - h / 2.0).min(mon.bottom() as f32 - h - 12.0 * s);
+        for i in 0..ColorFormat::ALL.len() {
+            let cell = r(
+                ox + 8.0 * s,
+                top + 8.0 * s + i as f32 * row,
+                ow - 16.0 * s,
+                row,
+            );
+            out.buttons.push((cell, Control::ColorFormat(i)));
+        }
+        let opts = r(ox, top, ow, h);
+        out.bounds = union(out.bounds, inflate(opts, (40.0 * s) as i32));
+        out.options = Some(opts);
+        return;
+    }
     let Some(tool) = t.tool else { return };
     let rows: Vec<(Vec<Control>, f32)> = if tool == Tool::Blur {
         vec![
@@ -550,12 +591,6 @@ fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
             ((4..8).map(Control::Color).collect(), 26.0),
             ((0..3).map(Control::Size).collect(), 28.0),
         ]
-    };
-    let ow = OPTS_W * s;
-    let ox = if covered {
-        x - 12.0 * s - ow
-    } else {
-        x + sw + 12.0 * s
     };
     let inner = ow - 24.0 * s;
     let mut cy = first_tool + 6.0 * s;
@@ -836,6 +871,11 @@ const LASSO: [&str; 2] = [
     "M 12 4 C 17 4 20 6.2 20 9.5 C 20 12.8 16 15 12 15 C 8 15 4 12.8 4 9.5 C 4 6.2 7 4 12 4 Z",
     "M 7 14 C 6 16 6 18 8 19 C 9.5 19.7 11 19 11 17.5",
 ];
+const PIPETTE: [&str; 3] = [
+    "M 14 6 L 18 10",
+    "M 16 4 C 17 3 19 3 20 4 C 21 5 21 7 20 8 L 17 11 L 13 7 Z",
+    "M 14 9 L 6 17 L 5 20 L 8 19 L 16 11",
+];
 const DROP: [&str; 1] =
     ["M 12 4 C 12 4 6 11 6 15 C 6 18.3 8.7 21 12 21 C 15.3 21 18 18.3 18 15 C 18 11 12 4 12 4 Z"];
 
@@ -898,6 +938,7 @@ fn icon_data(b: Button) -> &'static [&'static str] {
             "M 12 18 V 22",
             "M 9 19 L 12 22 L 15 19",
         ],
+        Button::Blur => &CUBES,
         Button::Cancel => &["M 6 6 L 18 18", "M 18 6 L 6 18"],
     }
 }
@@ -1134,6 +1175,9 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             Control::Tool(x) => t.tool == Some(x),
             Control::Select => t.tool.is_none() && !t.lasso_mode,
             Control::Lasso => t.tool.is_none() && t.lasso_mode,
+            Control::Picker => t.picker,
+            Control::ColorFormat(i) => t.color_format.index() == i,
+            Control::Action(Button::Blur) => t.tool == Some(Tool::Blur),
             Control::Color(i) => t.color == COLORS[i],
             Control::Size(i) => t.size == SIZES[i],
             Control::Gauss(g) => t.blur.gauss == g,
@@ -1179,7 +1223,13 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
         }
         let filled = matches!(
             c,
-            Control::Tool(_) | Control::Gauss(_) | Control::Select | Control::Lasso
+            Control::Tool(_)
+                | Control::Gauss(_)
+                | Control::Select
+                | Control::Lasso
+                | Control::Picker
+                | Control::ColorFormat(_)
+                | Control::Action(Button::Blur)
         );
         let fill = if selected && filled {
             Some(BLUE)
@@ -1206,6 +1256,16 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             Control::Tool(t) => {
                 let col = if selected { [255; 4] } else { ICON };
                 icon(pm, tool_icon(t), cx, cy, 19.0 * s, col);
+            }
+            Control::Picker => {
+                let col = if selected { [255; 4] } else { ICON };
+                icon(pm, &PIPETTE, cx, cy, 19.0 * s, col);
+            }
+            Control::ColorFormat(i) => {
+                let label = ColorFormat::ALL[i].label();
+                let col = if selected { [255; 4] } else { ICON };
+                let w = text_w(&f.semibold, label, 13.0 * s);
+                text(pm, &f.semibold, label, cx - w / 2.0, cy, 13.0 * s, col);
             }
             Control::Select | Control::Lasso => {
                 let col = if selected { [255; 4] } else { ICON };
@@ -1325,11 +1385,10 @@ fn draw_loupe(pm: &mut PixmapMut<'_>, panel: Rect, l: &Loupe<'_>, s: f32) {
             );
             pm.stroke_path(&p, &paint([255, 255, 255, 90]), &stroke(1.0), id, None);
         }
-        let hex = color_hex(px);
-        text(pm, &f.mono, &hex, x0 + 22.0 * s, cy, 13.0 * s, TEXT);
-        let key = text_w(&f.semibold, "I", 12.5 * s);
-        let right = panel.right() as f32 - 8.0 * s - key;
-        text(pm, &f.semibold, "I", right, cy, 12.5 * s, ICON_MUTED);
+        let label = color_text(px, l.format);
+        let room = panel.right() as f32 - x0 - 30.0 * s;
+        let label = fit_text(&f.mono, &label, 11.5 * s, room);
+        text(pm, &f.mono, &label, x0 + 22.0 * s, cy, 11.5 * s, TEXT);
     }
 }
 
@@ -1532,10 +1591,12 @@ pub fn draw_element(pm: &mut PixmapMut<'_>, e: &annotate::Element) {
 }
 
 /// Size of the recording pill at scale 1.
-pub const PILL_SIZE: (f32, f32) = (230.0, 40.0);
+pub const PILL_SIZE: (f32, f32) = (300.0, 40.0);
+/// Share of the pill that stops the recording; the rest cancels it.
+pub const PILL_STOP: f32 = 0.62;
 
-/// Status pill of a recording or a long shot.
-pub fn draw_pill(pm: &mut PixmapMut<'_>, label: &str, s: f32) {
+/// Status pill of a recording or a long shot. `cancel`: a second half that drops the recording.
+pub fn draw_pill(pm: &mut PixmapMut<'_>, label: &str, cancel: Option<&str>, s: f32) {
     let (w, h) = (pm.width() as f32, pm.height() as f32);
     let id = Transform::identity();
     if let Some(p) = rrect(0.5, 0.5, w - 1.0, h - 1.0, h / 2.0) {
@@ -1543,9 +1604,27 @@ pub fn draw_pill(pm: &mut PixmapMut<'_>, label: &str, s: f32) {
         pm.stroke_path(&p, &paint([255, 255, 255, 40]), &stroke(1.0), id, None);
     }
     let font = &fonts().semibold;
-    let label = fit_text(font, label, 13.5 * s, w - 24.0 * s);
+    let main = if cancel.is_some() { w * PILL_STOP } else { w };
+    let label = fit_text(font, label, 13.5 * s, main - 24.0 * s);
     let width = text_w(font, &label, 13.5 * s);
-    text(pm, font, &label, (w - width) / 2.0, h / 2.0, 13.5 * s, TEXT);
+    text(
+        pm,
+        font,
+        &label,
+        (main - width) / 2.0,
+        h / 2.0,
+        13.5 * s,
+        TEXT,
+    );
+    if let Some(cancel) = cancel {
+        let line = tiny_skia::Rect::from_xywh(main, h * 0.25, s.max(1.0), h * 0.5);
+        if let Some(line) = line {
+            pm.fill_rect(line, &paint([255, 255, 255, 40]), id, None);
+        }
+        let width = text_w(font, cancel, 13.5 * s);
+        let x = main + (w - main - width) / 2.0;
+        text(pm, font, cancel, x, h / 2.0, 13.5 * s, ICON_MUTED);
+    }
 }
 
 /// Red frame around what is being recorded.
@@ -1812,7 +1891,7 @@ mod tests {
         let lay = layout(&scene(Some(sel), true));
         let bar = lay.toolbar.unwrap();
         assert_eq!((bar.left, bar.top, bar.height), (368, 438, 46));
-        assert_eq!(lay.buttons.len(), 9);
+        assert_eq!(lay.buttons.len(), 10);
         assert_eq!(lay.buttons[0].1, Control::Action(Button::Copy));
         let pill = lay.size_pill.as_ref().unwrap();
         assert_eq!((pill.0.left, pill.0.top), (368, 182));
@@ -1899,6 +1978,7 @@ mod tests {
                 frame: &frame,
                 width: w,
                 height: h,
+                format: ColorFormat::Hex,
             }),
             tools: None,
         };
@@ -1919,7 +1999,10 @@ mod tests {
             [0x33, 0x22, 0x11],
             "the middle cell is the pixel"
         );
-        assert_eq!(color_hex(&[0x33, 0x22, 0x11, 255]), "#112233");
+        assert_eq!(
+            color_text(&[0x33, 0x22, 0x11, 255], ColorFormat::Hex),
+            "#112233"
+        );
     }
 
     #[test]
@@ -2041,6 +2124,8 @@ mod tests {
             can_redo: false,
             live: None,
             caret: None,
+            picker: false,
+            color_format: ColorFormat::Hex,
         };
         let mut sc = scene(None, false);
         sc.tools = Some(draw(Some(Tool::Arrow)));
@@ -2071,6 +2156,7 @@ mod tests {
             Button::Pin,
             Button::Record,
             Button::Scroll,
+            Button::Blur,
             Button::Cancel,
         ] {
             for d in icon_data(b) {
@@ -2128,6 +2214,7 @@ mod preview {
                 frame: &frame,
                 width: w,
                 height: h,
+                format: ColorFormat::Hex,
             }),
             tools: None,
         };
@@ -2266,6 +2353,8 @@ mod preview {
                         can_redo: false,
                         live: Some(&live),
                         caret: Some((Pt { x: 400.0, y: 230.0 }, "Привет")),
+                        picker: false,
+                        color_format: ColorFormat::Hex,
                     }),
                 },
             ),
@@ -2358,6 +2447,8 @@ mod bench {
                 can_redo: false,
                 live: None,
                 caret: None,
+                picker: false,
+                color_format: ColorFormat::Hex,
             }),
         };
         let frame = buf.clone();

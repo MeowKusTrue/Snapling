@@ -1,10 +1,11 @@
 //! What shows during a recording or a long shot: a frame around the area and a pill with the
 //! time. Both stay out of the capture; a click on the pill stops the recording.
 
+use crate::lparam_point;
 use crate::toast::{blit, helper_window, under_cursor};
 use snapling_core::i18n::{t, tf};
 use snapling_core::selection::Rect;
-use snapling_scene::{PILL_SIZE, draw_pill, draw_rec_frame};
+use snapling_scene::{PILL_SIZE, PILL_STOP, draw_pill, draw_rec_frame};
 use std::cell::Cell;
 use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -16,13 +17,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Stop,
+    Cancel,
+}
+
 /// Frame thickness outside the area, so it never lands in a frame.
 const EDGE: i32 = 4;
 
 thread_local! {
     static FRAME: Cell<HWND> = Cell::new(HWND::default());
     static PILL: Cell<HWND> = Cell::new(HWND::default());
-    static STOP: Cell<bool> = const { Cell::new(false) };
+    static ASKED: Cell<Option<Ask>> = const { Cell::new(None) };
     static SCROLLING: Cell<bool> = const { Cell::new(false) };
     static SCALE: Cell<f32> = const { Cell::new(1.0) };
     static BEGIN: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -56,7 +63,8 @@ fn render_pill() {
     let hwnd = PILL.get();
     let s = SCALE.get();
     let (w, h) = ((PILL_SIZE.0 * s) as u32, (PILL_SIZE.1 * s) as u32);
-    blit(hwnd, w, h, |pm| draw_pill(pm, &label(), s));
+    let cancel = (!SCROLLING.get()).then(|| t("Отменить"));
+    blit(hwnd, w, h, |pm| draw_pill(pm, &label(), cancel, s));
 }
 
 /// Marks `area` (desktop pixels). `scrolling`: a long shot, nothing to click.
@@ -66,7 +74,7 @@ pub fn show(area: Rect, scrolling: bool) {
         return;
     }
     let (_, work, s) = under_cursor();
-    STOP.set(false);
+    ASKED.set(None);
     SCROLLING.set(scrolling);
     SCALE.set(s);
     BEGIN.set(Some(Instant::now()));
@@ -105,17 +113,54 @@ pub fn hide() {
     }
 }
 
-/// The pill was clicked since the last call.
-pub fn stop_asked() -> bool {
-    STOP.take()
+/// What the pill was clicked for since the last call.
+pub fn asked() -> Option<Ask> {
+    ASKED.take()
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_TIMER => render_pill(),
-        WM_LBUTTONUP => STOP.set(true),
+        WM_LBUTTONUP => {
+            let width = PILL_SIZE.0 * SCALE.get();
+            let stop = (lparam_point(lp).x as f32) < width * PILL_STOP;
+            ASKED.set(Some(if stop { Ask::Stop } else { Ask::Cancel }));
+        }
         _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
     LRESULT(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grab;
+
+    /// `cargo test -p snapling-win rec_ui -- --ignored --nocapture`: shows the frame and the pill
+    /// for a moment and looks at the screen through the capture a recording uses.
+    #[test]
+    #[ignore]
+    fn the_pill_stays_out_of_the_capture() {
+        init().unwrap();
+        let area = Rect {
+            left: 40,
+            top: 200,
+            width: 400,
+            height: 200,
+        };
+        let before = grab(area.left, 120, 400, 100, false).unwrap();
+        show(area, false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let during = grab(area.left, 120, 400, 100, false).unwrap();
+        hide();
+        let changed = before
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(during.as_chunks::<4>().0)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed < 2000, "{changed} pixels changed");
+    }
 }

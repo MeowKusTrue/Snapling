@@ -1,9 +1,11 @@
 //! Settings window, its own process (`snapling --settings`). Every change goes straight into
 //! config.toml, comments kept; the tray picks it up by mtime, like a hand edit.
 
+use crate::history_ui::History;
 use crate::ui::{self, caption, card, divider, row, segmented, toggle};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, Sense, TextEdit, vec2};
 use egui_phosphor::regular as icon;
+use snapling_core::color::ColorFormat;
 use snapling_core::config::{
     Action, Config, Engine, Format, Online, RecordFormat, SoundCfg, SoundPack, Theme, TrayIcon,
 };
@@ -32,6 +34,7 @@ pub struct Hooks {
     /// An installed copy can replace itself; portable and Unix ones only show the page.
     pub can_update: bool,
     pub ask: fn(&str) -> bool,
+    pub gallery: fn() -> crate::history_ui::Hooks,
     /// Starts the downloaded installer and closes Snapling.
     pub run_update: fn(&Path) -> Result<(), String>,
     /// Proxy of online translation, kept in Credential Manager: it may hold a password.
@@ -49,8 +52,17 @@ pub struct Hooks {
     pub preview: fn(&SoundCfg, Sound) -> Result<(), String>,
 }
 
+/// What the app window opens on.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Page {
+    Settings,
+    Gallery,
+    Welcome,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
+    Gallery,
     General,
     Capture,
     Hotkeys,
@@ -60,7 +72,8 @@ enum Tab {
     About,
 }
 
-const TABS: [(Tab, &str, &str); 7] = [
+const TABS: [(Tab, &str, &str); 8] = [
+    (Tab::Gallery, icon::IMAGES, n("Галерея")),
     (Tab::General, icon::GEAR_SIX, n("Основные")),
     (Tab::Capture, icon::CORNERS_OUT, n("Снимки")),
     (Tab::Hotkeys, icon::KEYBOARD, n("Горячие клавиши")),
@@ -70,10 +83,11 @@ const TABS: [(Tab, &str, &str); 7] = [
     (Tab::About, icon::INFO, n("О программе")),
 ];
 
+const REPO: &str = "https://github.com/MeowKusTrue/Snapling";
 const RECORD_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// `welcome`: the first-run screen instead of the tabs.
-pub fn run(hooks: Hooks, welcome: bool) {
+pub fn run(hooks: Hooks, page: Page) {
+    let welcome = page == Page::Welcome;
     let path = ui::config_path();
     let cfg = match Config::load_or_create(&path) {
         Ok(c) => c,
@@ -83,7 +97,7 @@ pub fn run(hooks: Hooks, welcome: bool) {
         viewport: if welcome {
             ui::viewport("Snapling", [600.0, 640.0], [480.0, 480.0])
         } else {
-            ui::viewport(t("Snapling — настройки"), [1040.0, 700.0], [760.0, 480.0])
+            ui::viewport("Snapling", [1240.0, 760.0], [860.0, 520.0])
         },
         ..Default::default()
     };
@@ -93,7 +107,8 @@ pub fn run(hooks: Hooks, welcome: bool) {
         options,
         Box::new(move |cc| {
             ui::init(cc);
-            Ok(Box::new(Settings::new(path, cfg, hooks, welcome)))
+            let ctx = cc.egui_ctx.clone();
+            Ok(Box::new(Settings::new(path, cfg, hooks, page, ctx)))
         }),
     );
     if let Err(e) = res {
@@ -108,7 +123,7 @@ fn first_tab() -> Tab {
         .flatten();
     wanted
         .and_then(|i| TABS.get(i))
-        .map_or(Tab::General, |t| t.0)
+        .map_or(Tab::Gallery, |t| t.0)
 }
 
 /// Writes keys and remembers the last failure for the status line.
@@ -126,6 +141,9 @@ impl Store {
 }
 
 struct Settings {
+    ctx: egui::Context,
+    /// Made on the first visit: it starts threads and reads the whole history.
+    gallery: Option<History>,
     cfg: Config,
     store: Store,
     hooks: Hooks,
@@ -150,8 +168,10 @@ struct Settings {
 type UpdateReply = Result<Option<snapling_translate::Release>, String>;
 
 impl Settings {
-    fn new(path: PathBuf, cfg: Config, hooks: Hooks, welcome: bool) -> Self {
+    fn new(path: PathBuf, cfg: Config, hooks: Hooks, page: Page, ctx: egui::Context) -> Self {
         Self {
+            ctx,
+            gallery: None,
             cfg,
             store: Store {
                 path,
@@ -160,8 +180,12 @@ impl Settings {
             autostart: (hooks.autostart)(),
             proxy: (hooks.get_proxy)().unwrap_or_default(),
             hooks,
-            tab: first_tab(),
-            welcome,
+            tab: if page == Page::Gallery {
+                Tab::Gallery
+            } else {
+                first_tab()
+            },
+            welcome: page == Page::Welcome,
             recording: None,
             refused: None,
             fetching: None,
@@ -652,6 +676,19 @@ impl Settings {
                 },
             );
             divider(ui);
+            let key = ("capture", "picker");
+            let hint = t("Клик в выделении копирует цвет. Включается и кнопкой на панели.");
+            Self::flag(ui, store, t("Пипетка"), hint, &mut c.picker, key);
+            divider(ui);
+            row(ui, t("Формат цвета"), "", |ui| {
+                let items = ColorFormat::ALL.map(ColorFormat::label);
+                let now = c.color_format.index();
+                if let Some(i) = segmented(ui, &items, now, 30.0) {
+                    c.color_format = ColorFormat::ALL[i];
+                    store.set("capture", "color_format", c.color_format.key());
+                }
+            });
+            divider(ui);
             let key = ("capture", "loupe");
             let hint = t("Пока выбираешь область. Клавиша I копирует цвет под курсором.");
             Self::flag(ui, store, t("Лупа у курсора"), hint, &mut c.loupe, key);
@@ -781,7 +818,11 @@ impl Settings {
         let rec = &mut self.cfg.record;
         caption(ui, t("Запись экрана"));
         card(ui, |ui| {
-            let hint = t("GIF сжимается до 960 пикселей по длинной стороне.");
+            let hint = if rec.format == RecordFormat::Gif {
+                t("Можно вставить куда угодно, но файл больше и цветов меньше. До 960 пикселей.")
+            } else {
+                t("Меньше весит и чётче, запись в полном размере. Подходит для длинных роликов.")
+            };
             row(ui, t("Формат"), hint, |ui| {
                 let now = usize::from(rec.format == RecordFormat::Mp4);
                 if let Some(i) = segmented(ui, &["GIF", "MP4"], now, 30.0) {
@@ -790,25 +831,67 @@ impl Settings {
                 }
             });
             divider(ui);
-            row(ui, t("Кадров в секунду"), "", |ui| {
-                let all = [10, 15, 30];
-                let now = all.iter().position(|v| *v == rec.fps).unwrap_or(1);
-                if let Some(i) = segmented(ui, &["10", "15", "30"], now, 30.0) {
-                    rec.fps = all[i];
-                    store.set("record", "fps", i64::from(all[i]));
-                }
-            });
+            row(
+                ui,
+                t("Кадров в секунду"),
+                t("Больше — плавнее, но файл тяжелее."),
+                |ui| {
+                    let all = [10, 15, 30];
+                    let now = all.iter().position(|v| *v == rec.fps).unwrap_or(1);
+                    if let Some(i) = segmented(ui, &["10", "15", "30"], now, 30.0) {
+                        rec.fps = all[i];
+                        store.set("record", "fps", i64::from(all[i]));
+                    }
+                },
+            );
             divider(ui);
-            row(ui, t("Останавливать через"), "", |ui| {
-                let all = [60, 120, 300];
-                let now = all.iter().position(|v| *v == rec.max_seconds).unwrap_or(1);
-                let items = [t("1 мин"), t("2 мин"), t("5 мин")];
-                if let Some(i) = segmented(ui, &items, now, 30.0) {
-                    rec.max_seconds = all[i];
-                    store.set("record", "max_seconds", i64::from(all[i]));
-                }
-            });
+            row(
+                ui,
+                t("Останавливать через"),
+                t("Запись закончится сама."),
+                |ui| {
+                    let all = [60, 120, 300];
+                    let now = all.iter().position(|v| *v == rec.max_seconds).unwrap_or(1);
+                    let items = [t("1 мин"), t("2 мин"), t("5 мин")];
+                    if let Some(i) = segmented(ui, &items, now, 30.0) {
+                        rec.max_seconds = all[i];
+                        store.set("record", "max_seconds", i64::from(all[i]));
+                    }
+                },
+            );
+            divider(ui);
+            row(
+                ui,
+                t("Отсчёт перед началом"),
+                t("Успеть открыть нужное окно."),
+                |ui| {
+                    let all = [0, 3, 5];
+                    let now = all.iter().position(|v| *v == rec.countdown).unwrap_or(0);
+                    let items = [t("Нет"), t("3 с"), t("5 с")];
+                    if let Some(i) = segmented(ui, &items, now, 30.0) {
+                        rec.countdown = all[i];
+                        store.set("record", "countdown", i64::from(all[i]));
+                    }
+                },
+            );
+            divider(ui);
+            Self::flag(
+                ui,
+                store,
+                t("Показывать курсор"),
+                "",
+                &mut rec.cursor,
+                ("record", "cursor"),
+            );
         });
+        ui.label(
+            RichText::new(t(
+                "Звук не записывается. Рамка, время и окна Snapling в файл не попадают. Отменить \
+                 можно кнопкой рядом со временем: файл не сохранится.",
+            ))
+            .size(13.0)
+            .color(ui::pal(ui.ctx()).muted),
+        );
     }
 
     fn hotkey_pressed(&mut self, click: Option<Action>, clear: Option<Action>) {
@@ -1140,6 +1223,31 @@ impl Settings {
             if ui::tone(ui, t("Открыть лог"), None, 38.0).clicked() {
                 (self.hooks.open)(&self.hooks.log);
             }
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(t(
+                    "Нравится Snapling? Поставь звёздочку на GitHub, это очень помогает.",
+                ))
+                .color(p.soft),
+            );
+            ui.horizontal(|ui| {
+                let width = 200.0;
+                ui.add_space((ui.available_width() - width * 2.0 - 8.0).max(0.0) / 2.0);
+                if ui::primary(ui, t("Звёздочка на GitHub"), Some(width), 38.0).clicked()
+                {
+                    (self.hooks.open)(Path::new(REPO));
+                }
+                if ui::tone(ui, t("Поделиться с другом"), Some(width), 38.0).clicked()
+                {
+                    let text = tf(
+                        "Попробуй Snapling, скриншоты с текстом и переводом: {0}",
+                        &[("0", &REPO)],
+                    );
+                    ui.ctx().copy_text(text);
+                    self.update_text = t("Ссылка скопирована, отправь её другу").into();
+                }
+            });
+            ui.add_space(8.0);
             let busy = self.update.is_some();
             let label = if busy {
                 t("Проверяю…")
@@ -1260,18 +1368,50 @@ impl Settings {
         ui::heading(ui, t("Модели"), 24.0);
         let root = self.hooks.models.clone();
         let mut action: Option<(Option<Lang>, bool)> = None;
-        caption(ui, t("Распознавание"));
+        let state = |installed: bool, mb: u32| {
+            if installed {
+                tf("Скачано · {0} МБ на диске", &[("0", &mb)])
+            } else {
+                tf("Не скачано · {0} МБ", &[("0", &mb)])
+            }
+        };
+        let used: u32 = DIRECTIONS
+            .iter()
+            .filter(|d| d.installed(&root))
+            .map(|d| d.mb)
+            .sum();
+        ui.label(
+            RichText::new(tf(
+                "Модели работают без интернета и занимают место на диске. Скачивай только то, \
+                 что нужно. Для перевода через DeepL, Яндекс или Google они не нужны. Сейчас \
+                 занято {0} МБ.",
+                &[("0", &used)],
+            ))
+            .color(p.soft),
+        );
+        caption(ui, t("Распознавание текста"));
         card(ui, |ui| {
-            let hint = tf("Офлайн, ~{0} МБ", &[("0", &paddle::DOWNLOAD_MB)]);
+            let installed = paddle::installed(&root);
+            let hint = format!(
+                "{}. {}",
+                state(installed, paddle::DOWNLOAD_MB),
+                t("Запасной движок: встроенный в Windows обычно быстрее и точнее.")
+            );
             row(ui, "PaddleOCR", &hint, |ui| {
-                if let Some(remove) =
-                    self.model_button(ui, paddle::FOLDER, paddle::installed(&root))
-                {
+                if let Some(remove) = self.model_button(ui, paddle::FOLDER, installed) {
                     action = Some((None, remove));
                 }
             });
         });
         caption(ui, t("Перевод без интернета"));
+        ui.label(
+            RichText::new(t(
+                "Скачай язык, с которого или на который переводишь. Перевод с немецкого на \
+                 русский требует двух языков: немецкого и русского, он идёт через английский.",
+            ))
+            .size(13.0)
+            .color(p.muted),
+        );
         card(ui, |ui| {
             let langs = LANGS
                 .iter()
@@ -1286,12 +1426,13 @@ impl Settings {
                     .filter(|d| d.from == *code || d.to == *code)
                     .collect();
                 let mb: u32 = dirs.iter().map(|d| d.mb).sum();
-                let hint = if dirs.len() == 2 {
-                    tf("С английским в обе стороны, ~{0} МБ", &[("0", &mb)])
-                } else {
-                    tf("Только на английский, ~{0} МБ", &[("0", &mb)])
-                };
                 let installed = dirs.iter().all(|d| d.installed(&root));
+                let way = if dirs.len() == 2 {
+                    t("с английским в обе стороны")
+                } else {
+                    t("только на английский")
+                };
+                let hint = format!("{}, {way}", state(installed, mb));
                 row(ui, lang_name(code), &hint, |ui| {
                     if let Some(remove) = self.model_button(ui, code, installed) {
                         action = Some((Some(code), remove));
@@ -1299,14 +1440,6 @@ impl Settings {
                 });
             }
         });
-        ui.label(
-            RichText::new(t(
-                "Между двумя языками перевод идёт через английский: нужны модели обоих. \
-                 Остальные пары работают только через онлайн-сервис.",
-            ))
-            .size(13.0)
-            .color(p.muted),
-        );
         let ctx = ui.ctx().clone();
         match action {
             Some((None, false)) => {
@@ -1343,7 +1476,9 @@ impl eframe::App for Settings {
         ui::preview(&ctx);
         self.poll_recording(&ctx);
         self.poll_jobs();
-        if self.recording.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        let viewing =
+            self.tab == Tab::Gallery && self.gallery.as_ref().is_some_and(History::is_big);
+        if self.recording.is_none() && !viewing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         let p = ui::pal(&ctx);
@@ -1373,7 +1508,7 @@ impl eframe::App for Settings {
                 });
             return;
         }
-        ui::title_bar(ui, t("Snapling — настройки"));
+        ui::title_bar(ui, "Snapling");
         egui::Panel::left("nav")
             .exact_size(236.0)
             .show_separator_line(false)
@@ -1398,6 +1533,14 @@ impl eframe::App for Settings {
                     .corner_radius(14)
                     .show(ui, |ui| {
                         ui.set_min_size(ui.available_size());
+                        if self.tab == Tab::Gallery {
+                            let hooks = self.hooks.gallery;
+                            let ctx = self.ctx.clone();
+                            self.gallery
+                                .get_or_insert_with(|| History::new(hooks(), ctx))
+                                .show(ui);
+                            return;
+                        }
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             Frame::new()
                                 .inner_margin(Margin::symmetric(32, 26))
@@ -1405,6 +1548,7 @@ impl eframe::App for Settings {
                                     ui.set_width(ui.available_width());
                                     ui.spacing_mut().item_spacing.y = 14.0;
                                     match self.tab {
+                                        Tab::Gallery => {}
                                         Tab::General => self.general(ui),
                                         Tab::Capture => {
                                             self.capture(ui);

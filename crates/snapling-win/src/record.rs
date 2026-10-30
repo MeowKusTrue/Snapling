@@ -147,6 +147,8 @@ pub struct Finished {
 
 pub struct Recording {
     stop: Arc<AtomicBool>,
+    /// Stopped to throw the file away.
+    discard: AtomicBool,
     thread: std::thread::JoinHandle<Result<Finished, String>>,
     pub started: Instant,
 }
@@ -158,18 +160,28 @@ impl Recording {
         format: RecordFormat,
         fps: u32,
         max_seconds: u32,
+        cursor: bool,
         path: PathBuf,
         notify: u32,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let thread = std::thread::spawn(move || {
-            let res = record(area, format, fps.clamp(1, 60), max_seconds, path, &flag);
+            let res = record(
+                area,
+                format,
+                fps.clamp(1, 60),
+                max_seconds,
+                cursor,
+                path,
+                &flag,
+            );
             wake(notify);
             res
         });
         Self {
             stop,
+            discard: AtomicBool::new(false),
             thread,
             started: Instant::now(),
         }
@@ -177,6 +189,16 @@ impl Recording {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Stops; the caller drops the file when [`Recording::discarded`] says so.
+    pub fn cancel(&self) {
+        self.discard.store(true, Ordering::Relaxed);
+        self.stop();
+    }
+
+    pub fn discarded(&self) -> bool {
+        self.discard.load(Ordering::Relaxed)
     }
 
     pub fn finished(&self) -> bool {
@@ -195,6 +217,7 @@ fn record(
     format: RecordFormat,
     fps: u32,
     max_seconds: u32,
+    cursor: bool,
     path: PathBuf,
     stop: &AtomicBool,
 ) -> Result<Finished, String> {
@@ -215,7 +238,7 @@ fn record(
     let mut prev = begin;
     while !stop.load(Ordering::Relaxed) && begin.elapsed() < limit {
         let tick = Instant::now();
-        let frame = grab(area.left, area.top, area.width, area.height, true)?;
+        let frame = grab(area.left, area.top, area.width, area.height, cursor)?;
         let ms = prev.elapsed().as_millis().max(1) as u32;
         prev = tick;
         match &mut sink {

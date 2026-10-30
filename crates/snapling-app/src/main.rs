@@ -75,13 +75,13 @@ fn main() {
         return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), true);
     }
     if args.len() == 2 && args[1] == "--settings" {
-        return settings::run(settings_hooks(), false);
+        return settings::run(settings_hooks(), settings::Page::Settings);
     }
     if args.len() == 2 && args[1] == "--welcome" {
-        return settings::run(settings_hooks(), true);
+        return settings::run(settings_hooks(), settings::Page::Welcome);
     }
-    if args.len() == 2 && args[1] == "--history" {
-        return history_ui::run(history_hooks());
+    if args.len() == 2 && args[1] == "--gallery" {
+        return settings::run(settings_hooks(), settings::Page::Gallery);
     }
     #[cfg(windows)]
     app_win::run();
@@ -107,16 +107,6 @@ fn settings_hooks() -> settings::Hooks {
 #[cfg(not(windows))]
 fn settings_hooks() -> settings::Hooks {
     app_unix::settings_hooks()
-}
-
-#[cfg(windows)]
-fn history_hooks() -> history_ui::Hooks {
-    app_win::history_hooks()
-}
-
-#[cfg(not(windows))]
-fn history_hooks() -> history_ui::Hooks {
-    app_unix::history_hooks()
 }
 
 #[cfg(windows)]

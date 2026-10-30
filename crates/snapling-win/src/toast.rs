@@ -143,6 +143,11 @@ pub fn show(img: Image, title: String, sub: String, on_click: OnClick) {
     }
 }
 
+/// Takes the notification away: nothing of Snapling goes into a recording.
+pub fn close() {
+    hide(HWND_TOAST.get());
+}
+
 fn hide(hwnd: HWND) {
     unsafe {
         let _ = KillTimer(Some(hwnd), 1);

@@ -1,3 +1,4 @@
+use crate::color::ColorFormat;
 use crate::i18n::t;
 use serde::Deserialize;
 use std::path::Path;
@@ -55,6 +56,10 @@ instant_copy = false
 delay = 3
 # Лупа у курсора, пока выбираешь область. Клавиша I копирует цвет под курсором.
 loupe = true
+# Пипетка включена сразу: клик копирует цвет.
+picker = false
+# Формат цвета: "hex", "rgb", "hsl", "hsv", "cmyk".
+color_format = "hex"
 # Уведомление после снимка: миниатюра и кнопки.
 toast = true
 
@@ -70,6 +75,10 @@ format = "gif"
 fps = 15
 # Запись останавливается сама через столько секунд.
 max_seconds = 120
+# Показывать курсор на записи.
+cursor = true
+# Секунды отсчёта перед началом записи, 0 — сразу.
+countdown = 0
 
 [history]
 # Сколько дней хранить записи галереи, 0 — всегда.
@@ -162,6 +171,8 @@ pub struct Record {
     pub format: RecordFormat,
     pub fps: u32,
     pub max_seconds: u32,
+    pub cursor: bool,
+    pub countdown: u32,
 }
 
 impl Default for Record {
@@ -170,6 +181,8 @@ impl Default for Record {
             format: RecordFormat::Gif,
             fps: 15,
             max_seconds: 120,
+            cursor: true,
+            countdown: 0,
         }
     }
 }
@@ -237,6 +250,8 @@ pub struct Capture {
     pub instant_copy: bool,
     pub delay: u32,
     pub loupe: bool,
+    pub picker: bool,
+    pub color_format: ColorFormat,
     pub toast: bool,
 }
 
@@ -248,6 +263,8 @@ impl Default for Capture {
             instant_copy: false,
             delay: 3,
             loupe: true,
+            picker: false,
+            color_format: ColorFormat::Hex,
             toast: true,
         }
     }

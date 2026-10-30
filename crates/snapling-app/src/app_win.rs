@@ -9,6 +9,7 @@ use snapling_core::sound::{self, Sound};
 use snapling_core::{annotate, history, storage};
 use snapling_scene::{MenuIcon, MenuRow, ToastAction};
 use snapling_win::overlay::Outcome;
+use snapling_win::rec_ui::Ask;
 use snapling_win::record::Recording;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -23,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const DEEPL_PROXY: &str = "DeepLProxy";
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
-const CONFIG_POLL_MS: u32 = 1500;
+const CONFIG_POLL_MS: u32 = 400;
 
 /// Result of a long shot, from its thread.
 type LongDone = (Result<snapling_win::Image, String>, String);
@@ -78,6 +79,8 @@ thread_local! {
     static OCR_PADDLE: Cell<bool> = const { Cell::new(false) };
     /// `[record]`.
     static RECORD: Cell<RecordCfg> = Cell::new(RecordCfg::default());
+    /// Area and app of a recording waiting for its countdown.
+    static WAITING: RefCell<Option<(Rect, String)>> = const { RefCell::new(None) };
     /// The running recording and the app it started in.
     static RECORDING: RefCell<Option<(Recording, String)>> = const { RefCell::new(None) };
     /// `[capture] delay`.
@@ -585,6 +588,7 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         models: models_dir(),
         can_update: std::env::current_exe().is_ok_and(|e| crate::portable_dir(&e).is_none()),
         ask: snapling_win::ask,
+        gallery: history_hooks,
         run_update: |setup| {
             // The installer waits two seconds: it refuses while Snapling runs, and this process
             // is one of them.
@@ -639,7 +643,6 @@ fn load_image(path: &Path) -> Result<snapling_win::Image, String> {
 /// Clipboard, editor and folders for the history process.
 pub fn history_hooks() -> crate::history_ui::Hooks {
     crate::history_ui::Hooks {
-        warn: snapling_win::warn,
         file: history_file(),
         now: || history::time_string(snapling_win::local_stamp()),
         copy_image: |path| snapling_win::copy_image(&load_image(path)?),
@@ -724,9 +727,10 @@ fn capture_region(auto: Option<Outcome>) {
     let shown = snapling_win::overlay::show(img, auto, move |res| {
         let Some((img, outcome)) = res else { return };
         if outcome == Outcome::Color {
-            let hex = snapling_scene::color_hex(&img.bgra);
-            info!("color {hex}");
-            return match snapling_win::copy_text(&hex) {
+            let format = snapling_win::overlay::color_format();
+            let text = snapling_scene::color_text(&img.bgra, format);
+            info!("color {text}");
+            return match snapling_win::copy_text(&text) {
                 Ok(()) => play(Sound::Copy),
                 Err(e) => {
                     error!("clipboard: {e}");
@@ -795,13 +799,48 @@ fn area_of(img: &snapling_win::Image) -> Rect {
     }
 }
 
+/// Hotkey id the countdown sends to begin a recording.
+const RECORD_GO: i32 = 90;
+
+/// Starts now or after the countdown of the settings.
 fn start_recording(img: snapling_win::Image, app: String) {
+    snapling_win::toast::close();
+    let wait = RECORD.get().countdown;
+    if wait == 0 {
+        return begin_recording(area_of(&img), app);
+    }
+    WAITING.with(|w| *w.borrow_mut() = Some((area_of(&img), app)));
+    snapling_win::countdown::start(wait, RECORD_GO);
+}
+
+/// Keeps what the overlay panels changed for the next time.
+fn save_prefs(p: snapling_win::overlay::Prefs) {
+    snapling_win::overlay::set_blur(p.blur.gauss, p.blur.strength);
+    snapling_win::overlay::set_color(p.picker, p.color_format);
+    let path = crate::ui::config_path();
+    let Ok(cfg) = Config::load_or_create(&path) else {
+        return;
+    };
+    if cfg.capture.picker != p.picker {
+        let _ = Config::update(&path, "capture", "picker", p.picker);
+    }
+    if cfg.capture.color_format != p.color_format {
+        let _ = Config::update(&path, "capture", "color_format", p.color_format.key());
+    }
+    if cfg.blur.gauss != p.blur.gauss {
+        let _ = Config::update(&path, "blur", "gauss", p.blur.gauss);
+    }
+    if cfg.blur.strength != p.blur.strength {
+        let _ = Config::update(&path, "blur", "strength", i64::from(p.blur.strength));
+    }
+}
+
+fn begin_recording(area: Rect, app: String) {
     let rec = RECORD.get();
     let path = match record_path(&app, rec.format.extension()) {
         Ok(p) => p,
         Err(e) => return snapling_win::warn(&e),
     };
-    let area = area_of(&img);
     snapling_win::rec_ui::show(area, false);
     play(Sound::Capture);
     info!(
@@ -811,7 +850,15 @@ fn start_recording(img: snapling_win::Image, app: String) {
         path.display()
     );
     let thread = snapling_win::record::this_thread();
-    let run = Recording::start(area, rec.format, rec.fps, rec.max_seconds, path, thread);
+    let run = Recording::start(
+        area,
+        rec.format,
+        rec.fps,
+        rec.max_seconds,
+        rec.cursor,
+        path,
+        thread,
+    );
     RECORDING.with(|r| *r.borrow_mut() = Some((run, app)));
 }
 
@@ -835,7 +882,13 @@ fn finish_jobs() {
     });
     if let Some((run, app)) = ended {
         snapling_win::rec_ui::hide();
+        let discard = run.discarded();
         match run.join() {
+            Ok(done) if discard => {
+                info!("recording cancelled");
+                let _ = std::fs::remove_file(&done.path);
+                play(Sound::Error);
+            }
             Ok(done) => {
                 info!("recorded {} s: {}", done.seconds, done.path.display());
                 let entry = history::Entry::new(
@@ -954,6 +1007,7 @@ fn apply_config(cfg: &Config) {
     TOAST.set(cfg.capture.toast);
     snapling_win::overlay::set_instant_copy(cfg.capture.instant_copy);
     snapling_win::overlay::set_loupe(cfg.capture.loupe);
+    snapling_win::overlay::set_color(cfg.capture.picker, cfg.capture.color_format);
     DELAY.set(cfg.capture.delay.clamp(1, 60));
     RECORD.set(cfg.record);
     snapling_win::overlay::set_blur(cfg.blur.gauss, cfg.blur.strength.min(2));
@@ -1124,6 +1178,7 @@ pub fn run() {
     if let Err(e) = snapling_win::countdown::init() {
         error!("countdown init: {e}");
     }
+    snapling_win::overlay::on_prefs(save_prefs);
     if let Err(e) = snapling_win::rec_ui::init() {
         error!("recording init: {e}");
     }
@@ -1178,6 +1233,11 @@ pub fn run() {
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         match msg.message {
             snapling_win::record::WM_JOB_DONE => finish_jobs(),
+            WM_HOTKEY if msg.wParam.0 as i32 == RECORD_GO => {
+                if let Some((area, app)) = WAITING.with(|w| w.borrow_mut().take()) {
+                    begin_recording(area, app);
+                }
+            }
             WM_HOTKEY => {
                 if let Some(a) = Action::ALL
                     .into_iter()
@@ -1188,11 +1248,6 @@ pub fn run() {
             }
             // Live reload: a saved config.toml applies without restart.
             WM_TIMER if msg.hwnd.is_invalid() => {
-                let want = tray_white(tray_mode);
-                if want != white {
-                    white = want;
-                    let _ = tray.set_icon(Some(tray_icon(white)));
-                }
                 let now = modified(&cfg_path);
                 if now != cfg_mtime {
                     cfg_mtime = now;
@@ -1230,12 +1285,20 @@ pub fn run() {
                 snapling_win::menu::show(menu_rows(&cfg), menu_light(&cfg));
             }
         }
-        if snapling_win::rec_ui::stop_asked() {
+        if let Some(ask) = snapling_win::rec_ui::asked() {
             RECORDING.with(|r| {
                 if let Some((run, _)) = r.borrow().as_ref() {
-                    run.stop();
+                    match ask {
+                        Ask::Stop => run.stop(),
+                        Ask::Cancel => run.cancel(),
+                    }
                 }
             });
+        }
+        let want = tray_white(tray_mode);
+        if want != white {
+            white = want;
+            let _ = tray.set_icon(Some(tray_icon(white)));
         }
         match snapling_win::menu::picked() {
             Some(MenuIcon::Region) => run_action(Action::CaptureRegion),
@@ -1245,7 +1308,7 @@ pub fn run() {
             Some(MenuIcon::Record) => run_action(Action::Record),
             Some(MenuIcon::Scroll) => run_action(Action::LongShot),
             Some(MenuIcon::Text) => run_action(Action::RecognizeText),
-            Some(MenuIcon::History) => history_window.open("--history"),
+            Some(MenuIcon::History) => history_window.open("--gallery"),
             Some(MenuIcon::Folder) => open_shots_folder(),
             Some(MenuIcon::Settings) => settings_window.open("--settings"),
             Some(MenuIcon::Quit) => unsafe { PostQuitMessage(0) },

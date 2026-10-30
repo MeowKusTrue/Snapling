@@ -193,8 +193,16 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Shows the shot and blocks until the user is done: the outcome and its picture, or `None`.
-pub fn run(shot: Shot, opts: Options) -> Result<Option<(Shot, Outcome)>, String> {
+/// What an overlay ended with, and what its panels should keep for the next one.
+pub struct Ended {
+    pub result: Option<(Shot, Outcome)>,
+    pub blur: snapling_core::annotate::BlurStyle,
+    pub picker: bool,
+    pub color_format: snapling_core::color::ColorFormat,
+}
+
+/// Shows the shot and blocks until the user is done.
+pub fn run(shot: Shot, opts: Options) -> Result<Ended, String> {
     let (width, height) = (shot.width, shot.height);
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -210,8 +218,15 @@ pub fn run(shot: Shot, opts: Options) -> Result<Option<(Shot, Outcome)>, String>
         done: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
-    Ok(match app.done {
+    let (blur, picker, color_format) = app.session.prefs();
+    let result = match app.done {
         Some(Step::Done(out)) => app.session.result(out).map(|img| (img, out)),
         _ => None,
+    };
+    Ok(Ended {
+        result,
+        blur,
+        picker,
+        color_format,
     })
 }

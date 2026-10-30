@@ -69,6 +69,8 @@ thread_local! {
     static OCR_LANG: RefCell<String> = RefCell::new("auto".into());
     /// `[ocr] engine = "paddle"`.
     static OCR_PADDLE: Cell<bool> = const { Cell::new(false) };
+    /// `[capture] delay`.
+    static DELAY: Cell<u32> = const { Cell::new(3) };
     /// `[ocr] panel`.
     static OCR_PANEL: Cell<bool> = const { Cell::new(true) };
     /// What the last warning listed: the same problems are not shown again on every reload.
@@ -157,6 +159,7 @@ fn menu_rows(cfg: &Config) -> Vec<MenuRow> {
         act(MenuIcon::Region, Action::CaptureRegion),
         act(MenuIcon::Screen, Action::CaptureScreen),
         act(MenuIcon::Repeat, Action::RepeatRegion),
+        act(MenuIcon::Delay, Action::DelayedRegion),
         act(MenuIcon::Text, Action::RecognizeText),
         MenuRow::Line,
         item(MenuIcon::History, t("Галерея")),
@@ -697,6 +700,13 @@ fn capture_region(auto: Option<Outcome>) {
             }
             Outcome::Text => recognize(img),
             Outcome::Translate => translate(img),
+            Outcome::Pin => {
+                play(Sound::Capture);
+                if let Err(e) = snapling_win::pin::show(img) {
+                    error!("pin: {e}");
+                    play(Sound::Error);
+                }
+            }
             Outcome::Color => {}
         }
     });
@@ -712,6 +722,9 @@ fn capture_region(auto: Option<Outcome>) {
 fn run_action(a: Action) {
     match a {
         Action::CaptureRegion => capture_region(None),
+        Action::DelayedRegion => {
+            snapling_win::hotkey_after(hotkey_id(Action::CaptureRegion), DELAY.get());
+        }
         Action::RecognizeText => capture_region(Some(Outcome::Text)),
         Action::TranslateText => capture_region(Some(Outcome::Translate)),
         Action::CaptureScreen => capture_rect(None, "screen"),
@@ -774,6 +787,7 @@ fn apply_config(cfg: &Config) {
     TOAST.set(cfg.capture.toast);
     snapling_win::overlay::set_instant_copy(cfg.capture.instant_copy);
     snapling_win::overlay::set_loupe(cfg.capture.loupe);
+    DELAY.set(cfg.capture.delay.clamp(1, 60));
     snapling_win::overlay::set_blur(cfg.blur.gauss, cfg.blur.strength.min(2));
     apply_ocr(&cfg.ocr.language);
     OCR_PADDLE.set(cfg.ocr.engine == Engine::Paddle);
@@ -940,6 +954,25 @@ pub fn run() {
         error!("menu init: {e}");
     }
     apply_config(&cfg);
+    let now = history::time_string(snapling_win::local_stamp());
+    match history::prune(&history_file(), &now, cfg.history.keep_days) {
+        Ok(old) if old.is_empty() => {}
+        Ok(old) => {
+            info!("gallery: {} old entries dropped", old.len());
+            let files: Vec<String> = old
+                .into_iter()
+                .map(|e| e.path)
+                .filter(|p| !p.is_empty() && Path::new(p).is_file())
+                .collect();
+            if cfg.history.delete_files && !files.is_empty() {
+                std::thread::spawn(move || match snapling_win::to_recycle_bin(&files) {
+                    Ok(()) => info!("gallery: {} files to the recycle bin", files.len()),
+                    Err(e) => warn!("gallery: {e}"),
+                });
+            }
+        }
+        Err(e) => warn!("gallery: {e}"),
+    }
 
     let mut tray_mode = cfg.ui.tray_icon;
     let mut white = tray_white(tray_mode);
@@ -1025,6 +1058,7 @@ pub fn run() {
             Some(MenuIcon::Region) => run_action(Action::CaptureRegion),
             Some(MenuIcon::Screen) => run_action(Action::CaptureScreen),
             Some(MenuIcon::Repeat) => run_action(Action::RepeatRegion),
+            Some(MenuIcon::Delay) => run_action(Action::DelayedRegion),
             Some(MenuIcon::Text) => run_action(Action::RecognizeText),
             Some(MenuIcon::History) => history_window.open("--history"),
             Some(MenuIcon::Folder) => open_shots_folder(),

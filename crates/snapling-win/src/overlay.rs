@@ -54,6 +54,7 @@ pub enum Outcome {
     Edit,
     Text,
     Translate,
+    Pin,
     /// `I`: the image is the one pixel under the cursor.
     Color,
 }
@@ -734,6 +735,7 @@ fn act(hwnd: HWND, b: Button) {
         Button::Edit => Some(Outcome::Edit),
         Button::Text => Some(Outcome::Text),
         Button::Translate => Some(Outcome::Translate),
+        Button::Pin => Some(Outcome::Pin),
         Button::Cancel => None,
     };
     finish(hwnd, out);
@@ -949,6 +951,7 @@ fn outcome_key(vk: u16) -> Option<Outcome> {
         b'E' => Some(Outcome::Edit),
         b'O' => Some(Outcome::Text),
         b'R' => Some(Outcome::Translate),
+        b'P' => Some(Outcome::Pin),
         _ => None,
     }
 }

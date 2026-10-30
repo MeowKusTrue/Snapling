@@ -4,7 +4,7 @@
 use crate::ui;
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use egui_phosphor::regular as icon;
-use snapling_core::config::Online;
+use snapling_core::config::{Config, Online};
 use snapling_core::i18n::{t, tf};
 use snapling_translate::{Direction, LANGS, Lang, Model, detect, lang_name, route, target_for};
 use std::path::{Path, PathBuf};
@@ -509,6 +509,10 @@ impl eframe::App for Window {
                     let a = Self::lang_combo(ui, "from", &mut self.from, w);
                     let b = ui::ghost_icon(ui, icon::ARROWS_LEFT_RIGHT, 36.0, t("Поменять языки"));
                     let c = Self::lang_combo(ui, "to", &mut self.to, w);
+                    if c {
+                        let path = ui::config_path();
+                        let _ = Config::update(&path, "translate", "target", self.to);
+                    }
                     if b.clicked() {
                         self.swap();
                     } else if a || c {

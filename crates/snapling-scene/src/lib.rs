@@ -19,6 +19,7 @@ pub enum Button {
     Edit,
     Text,
     Translate,
+    Pin,
     Cancel,
 }
 
@@ -197,21 +198,23 @@ const RAIL_BTN: (f32, f32) = (44.0, 40.0);
 const OPTS_W: f32 = 160.0;
 
 /// Toolbar buttons in mockup order; `None` is the divider.
-const BAR: [Option<Button>; 7] = [
+const BAR: [Option<Button>; 8] = [
     Some(Button::Copy),
     Some(Button::Save),
     Some(Button::Edit),
     Some(Button::Text),
     Some(Button::Translate),
+    Some(Button::Pin),
     None,
     Some(Button::Cancel),
 ];
 
-const HINTS_SELECTED: [(&str, &str); 8] = [
+const HINTS_SELECTED: [(&str, &str); 9] = [
     ("Enter", n("копировать")),
     ("S", n("сохранить")),
     ("E", n("редактор")),
     ("O", n("текст")),
+    ("P", n("закрепить")),
     ("V", n("область")),
     ("L", n("произвольная")),
     ("1–9", n("рисовать")),
@@ -867,6 +870,11 @@ fn icon_data(b: Button) -> &'static [&'static str] {
             "M 13 20 L 17 11 L 21 20",
             "M 14.5 17 H 19.5",
         ],
+        Button::Pin => &[
+            "M 15 3 L 21 9",
+            "M 16 4 L 10 10 L 6 10 L 14 18 L 14 14 L 20 8",
+            "M 9 15 L 4 20",
+        ],
         Button::Cancel => &["M 6 6 L 18 18", "M 18 6 L 6 18"],
     }
 }
@@ -1506,6 +1514,7 @@ pub enum MenuIcon {
     Region,
     Screen,
     Repeat,
+    Delay,
     Text,
     History,
     Folder,
@@ -1540,6 +1549,12 @@ fn menu_icon(i: MenuIcon) -> &'static [&'static str] {
         MenuIcon::Repeat => &[
             "M 3 12 C 3 17 7 21 12 21 C 17 21 21 17 21 12 C 21 7 17 3 12 3 C 9.7 3 7.6 3.9 6 5.3 L 3 8",
             "M 3 3 V 8 H 8",
+        ],
+        MenuIcon::Delay => &[
+            "M 7 3 H 17",
+            "M 7 21 H 17",
+            "M 8 3 C 8 9 16 9 16 12 C 16 15 8 15 8 21",
+            "M 16 3 C 16 9 8 9 8 12 C 8 15 16 15 16 21",
         ],
         MenuIcon::Text => icon_data(Button::Text),
         MenuIcon::History => &[CIRCLE, "M 12 7 V 12 L 15 14"],
@@ -1711,7 +1726,7 @@ mod tests {
         let lay = layout(&scene(Some(sel), true));
         let bar = lay.toolbar.unwrap();
         assert_eq!((bar.left, bar.top, bar.height), (368, 438, 46));
-        assert_eq!(lay.buttons.len(), 6);
+        assert_eq!(lay.buttons.len(), 7);
         assert_eq!(lay.buttons[0].1, Control::Action(Button::Copy));
         let pill = lay.size_pill.as_ref().unwrap();
         assert_eq!((pill.0.left, pill.0.top), (368, 182));
@@ -1967,6 +1982,7 @@ mod tests {
             Button::Edit,
             Button::Text,
             Button::Translate,
+            Button::Pin,
             Button::Cancel,
         ] {
             for d in icon_data(b) {

@@ -590,6 +590,21 @@ impl Settings {
                 key,
             );
             divider(ui);
+            row(
+                ui,
+                t("Снимок с задержкой"),
+                t("Пункт в меню трея и своё сочетание"),
+                |ui| {
+                    let delays = [3, 5, 10];
+                    let now = delays.iter().position(|d| *d == c.delay).unwrap_or(0);
+                    let items = [t("3 с"), t("5 с"), t("10 с")];
+                    if let Some(i) = segmented(ui, &items, now, 30.0) {
+                        c.delay = delays[i];
+                        store.set("capture", "delay", i64::from(delays[i]));
+                    }
+                },
+            );
+            divider(ui);
             let key = ("capture", "loupe");
             let hint = t("Пока выбираешь область. Клавиша I копирует цвет под курсором.");
             Self::flag(ui, store, t("Лупа у курсора"), hint, &mut c.loupe, key);
@@ -971,6 +986,30 @@ impl Settings {
         let store = &mut self.store;
         card(ui, |ui| {
             let v = &mut self.cfg.privacy.hide_from_capture;
+            row(
+                ui,
+                t("Хранить записи галереи"),
+                "",
+                |ui| {
+                    let days = [0, 30, 90];
+                    let keep = &mut self.cfg.history.keep_days;
+                    let now = days.iter().position(|d| d == keep).unwrap_or(0);
+                    let items = [t("Всегда"), t("30 дней"), t("90 дней")];
+                    if let Some(i) = segmented(ui, &items, now, 30.0) {
+                        *keep = days[i];
+                        store.set("history", "keep_days", i64::from(days[i]));
+                    }
+                },
+            );
+            if self.cfg.history.keep_days > 0 {
+                divider(ui);
+                let title = t("Удалять и файлы снимков");
+                let hint =
+                    t("Когда срок вышел, файл уходит в корзину. Иначе он остаётся на диске.");
+                let v = &mut self.cfg.history.delete_files;
+                Self::flag(ui, store, title, hint, v, ("history", "delete_files"));
+            }
+            divider(ui);
             let title = t("Скрывать выделение в демонстрации экрана");
             let hint = t("Discord, OBS и Teams не увидят окно выделения.");
             Self::flag(ui, store, title, hint, v, ("privacy", "hide_from_capture"));

@@ -53,6 +53,7 @@ use windows::core::{HSTRING, w};
 pub mod menu;
 pub mod ocr;
 pub mod overlay;
+pub mod pin;
 pub mod secret;
 pub mod targets;
 pub mod toast;
@@ -469,6 +470,43 @@ pub fn snipping_owns_printscreen() -> bool {
         )
     };
     res.is_err() || value != 0
+}
+
+/// Moves files to the Recycle Bin, quietly: this runs by itself, not on a click.
+pub fn to_recycle_bin(paths: &[String]) -> Result<(), String> {
+    use windows::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NO_UI, SHFILEOPSTRUCTW, SHFileOperationW,
+    };
+    let mut from: Vec<u16> = Vec::new();
+    for p in paths {
+        from.extend(p.replace('/', "\\").encode_utf16());
+        from.push(0);
+    }
+    from.push(0);
+    let mut op = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: windows::core::PCWSTR(from.as_ptr()),
+        fFlags: (FOF_ALLOWUNDO | FOF_NO_UI).0 as u16,
+        ..Default::default()
+    };
+    match unsafe { SHFileOperationW(&mut op) } {
+        0 => Ok(()),
+        e => Err(format!("SHFileOperationW: {e:#x}")),
+    }
+}
+
+/// Sends this thread the hotkey `id` after `seconds`, for a delayed shot.
+pub fn hotkey_after(id: i32, seconds: u32) {
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_HOTKEY};
+    let thread = unsafe { GetCurrentThreadId() };
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(u64::from(seconds)));
+        let wp = windows::Win32::Foundation::WPARAM(id as usize);
+        let _ = unsafe {
+            PostThreadMessageW(thread, WM_HOTKEY, wp, windows::Win32::Foundation::LPARAM(0))
+        };
+    });
 }
 
 /// Gives PrtScn back, on the user's click. The value is per user: no elevation needed.

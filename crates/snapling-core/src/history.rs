@@ -68,6 +68,20 @@ pub fn set_text(file: &Path, e: &Entry, text: &str) -> Result<(), String> {
     write_all(file, &entries)
 }
 
+/// Drops entries older than `days`; 0 keeps everything. Returns the dropped ones.
+pub fn prune(file: &Path, now: &str, days: u32) -> Result<Vec<Entry>, String> {
+    if days == 0 {
+        return Ok(Vec::new());
+    }
+    let (old, kept): (Vec<Entry>, Vec<Entry>) = load(file)
+        .into_iter()
+        .partition(|e| days_ago(&e.time, now).is_some_and(|d| d > i64::from(days)));
+    if !old.is_empty() {
+        write_all(file, &kept)?;
+    }
+    Ok(old)
+}
+
 fn write_all(file: &Path, entries: &[Entry]) -> Result<(), String> {
     let mut text = String::new();
     for x in entries {
@@ -152,6 +166,30 @@ mod tests {
         assert_eq!(load(&f), vec![e.clone()]);
         set_text(&f, &e, "счёт").unwrap();
         assert_eq!(load(&f)[0].text, "счёт");
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn prune_drops_only_old_entries() {
+        let f = std::env::temp_dir()
+            .join(format!("snapling-prune-{}", std::process::id()))
+            .join("history.jsonl");
+        let at = |time: &str| Entry {
+            time: time.into(),
+            path: "p".into(),
+            width: 1,
+            height: 1,
+            app: String::new(),
+            kind: "region".into(),
+            text: String::new(),
+        };
+        append(&f, &at("2026-01-01T10:00:00")).unwrap();
+        append(&f, &at("2026-10-29T10:00:00")).unwrap();
+        append(&f, &at("not a date")).unwrap();
+        let now = "2026-10-30T10:00:00";
+        assert!(prune(&f, now, 0).unwrap().is_empty());
+        assert_eq!(prune(&f, now, 30).unwrap()[0].time, "2026-01-01T10:00:00");
+        assert_eq!(load(&f).len(), 2, "a broken date stays");
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 

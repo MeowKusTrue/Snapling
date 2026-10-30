@@ -19,6 +19,8 @@ capture_screen = "Shift+PrintScreen"
 capture_window = "Alt+PrintScreen"
 # Повторить последнюю выделенную область
 repeat_region = "Ctrl+PrintScreen"
+# Выделение откроется через [capture] delay секунд
+delayed = ""
 # Выделить область и сразу распознать текст
 recognize = ""
 # Выделить область и сразу распознать и перевести
@@ -45,6 +47,8 @@ copy = true
 open_editor = false
 # Выделил — сразу скопировано и закрыто, без панели действий.
 instant_copy = false
+# Секунды до снимка с задержкой.
+delay = 3
 # Лупа у курсора, пока выбираешь область. Клавиша I копирует цвет под курсором.
 loupe = true
 # Уведомление после снимка: миниатюра и кнопки.
@@ -54,6 +58,12 @@ toast = true
 # Размытие кистью при запуске: false — кубики, true — гаусс. Сила 0, 1 или 2.
 gauss = false
 strength = 0
+
+[history]
+# Сколько дней хранить записи галереи, 0 — всегда.
+keep_days = 0
+# Вместе с записью отправлять файл снимка в корзину.
+delete_files = false
 
 [sound]
 enabled = true
@@ -107,12 +117,20 @@ pub struct Config {
     pub hotkeys: Hotkeys,
     pub save: Save,
     pub capture: Capture,
+    pub history: HistoryCfg,
     pub sound: SoundCfg,
     pub privacy: Privacy,
     pub ocr: Ocr,
     pub translate: Translate,
     pub blur: Blur,
     pub ui: Ui,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryCfg {
+    pub keep_days: u32,
+    pub delete_files: bool,
 }
 
 /// Starting style of the blur brush.
@@ -169,6 +187,7 @@ pub struct Capture {
     pub copy: bool,
     pub open_editor: bool,
     pub instant_copy: bool,
+    pub delay: u32,
     pub loupe: bool,
     pub toast: bool,
 }
@@ -179,6 +198,7 @@ impl Default for Capture {
             copy: true,
             open_editor: false,
             instant_copy: false,
+            delay: 3,
             loupe: true,
             toast: true,
         }
@@ -357,6 +377,7 @@ pub struct Hotkeys {
     pub capture_screen: String,
     pub capture_window: String,
     pub repeat_region: String,
+    pub delayed: String,
     pub recognize: String,
     pub translate: String,
 }
@@ -368,6 +389,7 @@ impl Default for Hotkeys {
             capture_screen: "Shift+PrintScreen".into(),
             capture_window: "Alt+PrintScreen".into(),
             repeat_region: "Ctrl+PrintScreen".into(),
+            delayed: String::new(),
             recognize: String::new(),
             translate: String::new(),
         }
@@ -380,16 +402,18 @@ pub enum Action {
     CaptureScreen,
     CaptureWindow,
     RepeatRegion,
+    DelayedRegion,
     RecognizeText,
     TranslateText,
 }
 
 impl Action {
-    pub const ALL: [Action; 6] = [
+    pub const ALL: [Action; 7] = [
         Action::CaptureRegion,
         Action::CaptureScreen,
         Action::CaptureWindow,
         Action::RepeatRegion,
+        Action::DelayedRegion,
         Action::RecognizeText,
         Action::TranslateText,
     ];
@@ -401,6 +425,7 @@ impl Action {
             Action::CaptureScreen => "capture_screen",
             Action::CaptureWindow => "capture_window",
             Action::RepeatRegion => "repeat_region",
+            Action::DelayedRegion => "delayed",
             Action::RecognizeText => "recognize",
             Action::TranslateText => "translate",
         }
@@ -412,6 +437,7 @@ impl Action {
             Action::CaptureScreen => t("Весь экран"),
             Action::CaptureWindow => t("Активное окно"),
             Action::RepeatRegion => t("Повторить область"),
+            Action::DelayedRegion => t("Снимок с задержкой"),
             Action::RecognizeText => t("Распознать текст"),
             Action::TranslateText => t("Текст + перевод"),
         }
@@ -425,6 +451,7 @@ impl Hotkeys {
             Action::CaptureScreen => &self.capture_screen,
             Action::CaptureWindow => &self.capture_window,
             Action::RepeatRegion => &self.repeat_region,
+            Action::DelayedRegion => &self.delayed,
             Action::RecognizeText => &self.recognize,
             Action::TranslateText => &self.translate,
         }
@@ -436,6 +463,7 @@ impl Hotkeys {
             Action::CaptureScreen => &mut self.capture_screen,
             Action::CaptureWindow => &mut self.capture_window,
             Action::RepeatRegion => &mut self.repeat_region,
+            Action::DelayedRegion => &mut self.delayed,
             Action::RecognizeText => &mut self.recognize,
             Action::TranslateText => &mut self.translate,
         } = combo;

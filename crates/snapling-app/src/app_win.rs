@@ -1146,6 +1146,7 @@ pub fn run() {
     if !snapling_win::single_instance() {
         info!("already running: showing the window");
         if !snapling_win::focus_app_window()
+            && !snapling_win::signal_running()
             && let Ok(exe) = std::env::current_exe()
         {
             let _ = std::process::Command::new(exe).arg("--gallery").spawn();
@@ -1235,9 +1236,11 @@ pub fn run() {
         }
     }
 
+    snapling_win::watch_show();
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         match msg.message {
+            snapling_win::WM_SHOW => history_window.open("--gallery"),
             snapling_win::record::WM_JOB_DONE => finish_jobs(),
             WM_HOTKEY if msg.wParam.0 as i32 == RECORD_GO => {
                 if let Some((area, app)) = WAITING.with(|w| w.borrow_mut().take()) {

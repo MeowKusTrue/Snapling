@@ -178,6 +178,40 @@ pub fn focus_app_window() -> bool {
     found
 }
 
+pub const WM_SHOW: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 22;
+const SHOW_EVENT: windows::core::PCWSTR = w!("Local\\Snapling.Show");
+
+/// Second launch: asks the running instance to open its window. `false` when none listens.
+pub fn signal_running() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
+    let Ok(event) = (unsafe { OpenEventW(EVENT_MODIFY_STATE, false, SHOW_EVENT) }) else {
+        return false;
+    };
+    let ok = unsafe { SetEvent(event) }.is_ok();
+    let _ = unsafe { CloseHandle(event) };
+    ok
+}
+
+/// Posts `WM_SHOW` to the calling thread whenever a second launch signals.
+pub fn watch_show() {
+    use windows::Win32::System::Threading::{
+        CreateEventW, GetCurrentThreadId, INFINITE, WaitForSingleObject,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
+    let Ok(event) = (unsafe { CreateEventW(None, false, false, SHOW_EVENT) }) else {
+        return;
+    };
+    let event = event.0 as isize;
+    let thread = unsafe { GetCurrentThreadId() };
+    std::thread::spawn(move || {
+        let event = HANDLE(event as *mut _);
+        while unsafe { WaitForSingleObject(event, INFINITE) }.0 == 0 {
+            let _ = unsafe { PostThreadMessageW(thread, WM_SHOW, WPARAM(0), LPARAM(0)) };
+        }
+    });
+}
+
 static RECORD_HOOK: AtomicIsize = AtomicIsize::new(0);
 static RECORD_MODS: AtomicU8 = AtomicU8::new(0);
 static RECORDED: Mutex<Option<String>> = Mutex::new(None);

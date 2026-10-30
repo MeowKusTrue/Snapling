@@ -2,11 +2,14 @@
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained; build-time only, pulled by tray-icon deps" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained, no vulnerability; parses only the bundled fonts, pulled by ab_glyph and egui" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6, no vulnerability; pulled by ksni, Linux tray only" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6, no vulnerability; pulled by ksni, Linux tray only" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6, no vulnerability; pulled by ksni, Linux tray only" },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained, no vulnerability; compile-time macro pulled by tokenizers/ort" },
 ]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "OFL-1.1", "MPL-2.0", "BSL-1.0", "CC0-1.0", "Ubuntu-font-1.0", "CDLA-Permissive-2.0"]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "OFL-1.1", "MPL-2.0", "BSL-1.0", "CC0-1.0", "Ubuntu-font-1.0", "CDLA-Permissive-2.0", "Unlicense"]
 
 [bans]
 multiple-versions = "warn"

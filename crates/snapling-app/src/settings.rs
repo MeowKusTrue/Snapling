@@ -13,6 +13,7 @@ use snapling_core::i18n::{n, t, tf};
 use snapling_core::sound::Sound;
 use snapling_core::storage;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, channel};
 
 pub struct Hooks {
     pub warn: fn(&str),
@@ -26,6 +27,8 @@ pub struct Hooks {
     pub autostart_blocked: fn() -> bool,
     /// Windows gives PrtScn to its own screen capture.
     pub snipping_owns: fn() -> bool,
+    pub free_printscreen: fn() -> Result<(), String>,
+    pub models: PathBuf,
     /// Proxy of online translation, kept in Credential Manager: it may hold a password.
     pub get_proxy: fn() -> Option<String>,
     pub set_proxy: fn(&str) -> Result<(), String>,
@@ -45,15 +48,17 @@ enum Tab {
     Capture,
     Hotkeys,
     Text,
+    Models,
     Privacy,
     About,
 }
 
-const TABS: [(Tab, &str, &str); 6] = [
+const TABS: [(Tab, &str, &str); 7] = [
     (Tab::General, icon::GEAR_SIX, n("Основные")),
     (Tab::Capture, icon::CORNERS_OUT, n("Снимки")),
     (Tab::Hotkeys, icon::KEYBOARD, n("Горячие клавиши")),
     (Tab::Text, icon::TRANSLATE, n("Текст и перевод")),
+    (Tab::Models, icon::DOWNLOAD_SIMPLE, n("Модели")),
     (Tab::Privacy, icon::SHIELD_CHECK, n("Приватность и сеть")),
     (Tab::About, icon::INFO, n("О программе")),
 ];
@@ -89,7 +94,7 @@ pub fn run(hooks: Hooks, welcome: bool) {
     }
 }
 
-/// `SNAP_TAB=<0-5>` opens that tab in debug builds, for `ui::preview`.
+/// `SNAP_TAB=<0-6>` opens that tab in debug builds, for `ui::preview`.
 fn first_tab() -> Tab {
     let wanted = cfg!(debug_assertions)
         .then(|| std::env::var("SNAP_TAB").ok()?.parse::<usize>().ok())
@@ -124,7 +129,15 @@ struct Settings {
     /// Why the last pressed combo was refused.
     refused: Option<(Action, String)>,
     proxy: String,
+    /// Row of the model being downloaded and its result.
+    fetching: Option<(String, Receiver<Result<(), String>>)>,
+    /// Update check under way and what it said.
+    update: Option<Receiver<UpdateReply>>,
+    update_text: String,
+    update_page: Option<String>,
 }
+
+type UpdateReply = Result<Option<(String, String)>, String>;
 
 impl Settings {
     fn new(path: PathBuf, cfg: Config, hooks: Hooks, welcome: bool) -> Self {
@@ -141,6 +154,10 @@ impl Settings {
             welcome,
             recording: None,
             refused: None,
+            fetching: None,
+            update: None,
+            update_text: String::new(),
+            update_page: None,
         }
     }
 
@@ -223,6 +240,34 @@ impl Settings {
         );
     }
 
+    fn language_row(ui: &mut egui::Ui, now: &mut String, store: &mut Store) {
+        row(ui, t("Язык"), "", |ui| {
+            let dir = ui::language_dir();
+            let mut all = vec![("auto".to_string(), t("Как в системе").to_string())];
+            all.extend(i18n::languages(&dir));
+            let shown = all
+                .iter()
+                .find(|l| l.0 == *now)
+                .map_or("", |l| l.1.as_str());
+            let mut picked = None;
+            egui::ComboBox::from_id_salt("language")
+                .selected_text(shown)
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    for (code, name) in &all {
+                        if ui.selectable_label(code == now, name).clicked() {
+                            picked = Some(code.clone());
+                        }
+                    }
+                });
+            if let Some(code) = picked {
+                ui::apply_language(&code);
+                store.set("ui", "language", code.clone());
+                *now = code;
+            }
+        });
+    }
+
     fn general(&mut self, ui: &mut egui::Ui) {
         let store = &mut self.store;
         ui::heading(ui, t("Основные"), 24.0);
@@ -234,13 +279,15 @@ impl Settings {
                     Theme::System => 0,
                     Theme::Dark => 1,
                     Theme::Light => 2,
+                    Theme::Black => 3,
                 };
-                let items = [t("Системная"), t("Тёмная"), t("Светлая")];
+                let items = [t("Системная"), t("Тёмная"), t("Светлая"), t("Чёрная")];
                 if let Some(i) = segmented(ui, &items, now, 30.0) {
                     let (t, key) = [
                         (Theme::System, "system"),
                         (Theme::Dark, "dark"),
                         (Theme::Light, "light"),
+                        (Theme::Black, "black"),
                     ][i];
                     self.cfg.ui.theme = t;
                     store.set("ui", "theme", key);
@@ -249,32 +296,7 @@ impl Settings {
             });
         });
         card(ui, |ui| {
-            row(ui, t("Язык"), "", |ui| {
-                let dir = ui::language_dir();
-                let mut all = vec![("auto".to_string(), t("Как в системе").to_string())];
-                all.extend(i18n::languages(&dir));
-                let now = &mut self.cfg.ui.language;
-                let shown = all
-                    .iter()
-                    .find(|l| l.0 == *now)
-                    .map_or("", |l| l.1.as_str());
-                let mut picked = None;
-                egui::ComboBox::from_id_salt("language")
-                    .selected_text(shown)
-                    .width(190.0)
-                    .show_ui(ui, |ui| {
-                        for (code, name) in &all {
-                            if ui.selectable_label(code == now, name).clicked() {
-                                picked = Some(code.clone());
-                            }
-                        }
-                    });
-                if let Some(code) = picked {
-                    ui::apply_language(&code);
-                    store.set("ui", "language", code.clone());
-                    *now = code;
-                }
-            });
+            Self::language_row(ui, &mut self.cfg.ui.language, store);
             divider(ui);
             row(ui, t("Значок в трее"), "", |ui| {
                 let modes = [
@@ -707,6 +729,7 @@ impl Settings {
     fn hotkeys(&mut self, ui: &mut egui::Ui) {
         let p = ui::pal(ui.ctx());
         ui::heading(ui, t("Горячие клавиши"), 24.0);
+        self.snipping_card(ui);
         let (_, problems) = hotkey::check(&self.cfg.hotkeys, self.hooks.reserved);
         let mut click = None;
         let mut clear = None;
@@ -736,6 +759,36 @@ impl Settings {
         );
     }
 
+    /// Shown while Windows keeps PrtScn for itself and an action wants it.
+    fn snipping_card(&mut self, ui: &mut egui::Ui) {
+        let p = ui::pal(ui.ctx());
+        let wanted = Action::ALL
+            .into_iter()
+            .any(|a| Hotkey::parse(self.cfg.hotkeys.combo(a)) == Hotkey::parse("PrintScreen"));
+        if !wanted || !(self.hooks.snipping_owns)() {
+            return;
+        }
+        Frame::new()
+            .fill(p.warn_bg)
+            .corner_radius(14)
+            .inner_margin(14)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 10.0;
+                ui.label(
+                    RichText::new(t(
+                        "PrtScn сейчас открывает «Ножницы» Windows, снимок по нему не сработает.",
+                    ))
+                    .color(p.warn),
+                );
+                if ui::tone(ui, t("Исправить"), None, 34.0).clicked()
+                    && let Err(e) = (self.hooks.free_printscreen)()
+                {
+                    self.store.error = e;
+                }
+            });
+    }
+
     /// First run: what matters before the first shot, on one screen.
     fn welcome(&mut self, ui: &mut egui::Ui) {
         let p = ui::pal(ui.ctx());
@@ -746,34 +799,15 @@ impl Settings {
             ))
             .color(p.soft),
         );
+        card(ui, |ui| {
+            Self::language_row(ui, &mut self.cfg.ui.language, &mut self.store);
+        });
         let a = Action::CaptureRegion;
         let (_, problems) = hotkey::check(&self.cfg.hotkeys, self.hooks.reserved);
         caption(ui, t("Сочетание для снимка"));
         let (clicked, cleared) = card(ui, |ui| self.hotkey_row(ui, a, &problems));
         self.hotkey_pressed(clicked.then_some(a), cleared.then_some(a));
-        let prtscn = Hotkey::parse(self.cfg.hotkeys.combo(a))
-            .is_ok_and(|h| Hotkey::parse("PrintScreen").is_ok_and(|k| k == h));
-        if prtscn && (self.hooks.snipping_owns)() {
-            Frame::new()
-                .fill(p.warn_bg)
-                .corner_radius(14)
-                .inner_margin(14)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 10.0;
-                    ui.label(
-                        RichText::new(t(
-                            "PrtScn сейчас открывает «Ножницы» Windows. Выключи в параметрах \
-                             пункт про клавишу Print Screen.",
-                        ))
-                        .color(p.warn),
-                    );
-                    if ui::tone(ui, t("Открыть параметры Windows"), None, 34.0).clicked()
-                    {
-                        (self.hooks.open)(Path::new("ms-settings:easeofaccess-keyboard"));
-                    }
-                });
-        }
+        self.snipping_card(ui);
         caption(ui, t("Папка снимков"));
         self.folder_card(ui);
         card(ui, |ui| {
@@ -929,8 +963,8 @@ impl Settings {
                             .color(p.ok),
                     );
                     ui.label(t(
-                        "Snapling выходит в сеть только для скачивания моделей и онлайн-перевода \
-                         — и только когда ты сам это подтвердил.",
+                        "Snapling выходит в сеть только для скачивания моделей, онлайн-перевода и \
+                         проверки обновлений — и только по твоей кнопке.",
                     ));
                 });
             });
@@ -965,7 +999,166 @@ impl Settings {
             if ui::tone(ui, t("Открыть лог"), None, 38.0).clicked() {
                 (self.hooks.open)(&self.hooks.log);
             }
+            let busy = self.update.is_some();
+            let label = if busy {
+                t("Проверяю…")
+            } else {
+                t("Проверить обновления")
+            };
+            if ui
+                .add_enabled_ui(!busy, |ui| ui::tone(ui, label, None, 38.0))
+                .inner
+                .clicked()
+            {
+                let (tx, rx) = channel();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(snapling_translate::latest_release());
+                    ctx.request_repaint();
+                });
+                self.update = Some(rx);
+                self.update_text.clear();
+                self.update_page = None;
+            }
+            if !self.update_text.is_empty() {
+                ui.label(RichText::new(&self.update_text).size(13.0).color(p.muted));
+            }
+            if let Some(page) = &self.update_page
+                && ui::primary(ui, t("Открыть страницу выпуска"), None, 38.0).clicked()
+            {
+                (self.hooks.open)(Path::new(page));
+            }
         });
+    }
+
+    fn poll_jobs(&mut self) {
+        if let Some(reply) = self.update.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.update = None;
+            self.update_text = match reply {
+                Ok(Some((tag, page)))
+                    if snapling_translate::is_newer(&tag, snapling_core::VERSION) =>
+                {
+                    self.update_page = page.starts_with("https://github.com/").then_some(page);
+                    tf("Есть версия {0}", &[("0", &tag)])
+                }
+                Ok(Some(_)) => t("Установлена последняя версия").into(),
+                Ok(None) => t("Выпусков пока нет").into(),
+                Err(e) => e,
+            };
+        }
+        if let Some(done) = self.fetching.as_ref().and_then(|f| f.1.try_recv().ok()) {
+            self.fetching = None;
+            if let Err(e) = done {
+                self.store.error = e;
+            }
+        }
+    }
+
+    fn start_fetch(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        work: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+    ) {
+        let (tx, rx) = channel();
+        let models = self.hooks.models.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(work(&models));
+            ctx.request_repaint();
+        });
+        self.fetching = Some((id.to_string(), rx));
+        self.store.error.clear();
+    }
+
+    /// Download or Remove of one row, by whether its files are there.
+    fn model_button(&self, ui: &mut egui::Ui, id: &str, installed: bool) -> Option<bool> {
+        if self.fetching.as_ref().is_some_and(|f| f.0 == id) {
+            ui.label(RichText::new(t("Скачиваю…")).color(ui::pal(ui.ctx()).muted));
+            return None;
+        }
+        let label = if installed {
+            t("Удалить")
+        } else {
+            t("Скачать")
+        };
+        let free = self.fetching.is_none();
+        let r = ui.add_enabled_ui(free, |ui| ui::tone(ui, label, None, 30.0));
+        r.inner.clicked().then_some(installed)
+    }
+
+    fn models_tab(&mut self, ui: &mut egui::Ui) {
+        use snapling_translate::{DIRECTIONS, LANGS, Lang, lang_name, paddle};
+        let p = ui::pal(ui.ctx());
+        ui::heading(ui, t("Модели"), 24.0);
+        let root = self.hooks.models.clone();
+        let mut action: Option<(Option<Lang>, bool)> = None;
+        caption(ui, t("Распознавание"));
+        card(ui, |ui| {
+            let hint = tf("Офлайн, ~{0} МБ", &[("0", &paddle::DOWNLOAD_MB)]);
+            row(ui, "PaddleOCR", &hint, |ui| {
+                if let Some(remove) =
+                    self.model_button(ui, paddle::FOLDER, paddle::installed(&root))
+                {
+                    action = Some((None, remove));
+                }
+            });
+        });
+        caption(ui, t("Перевод без интернета"));
+        card(ui, |ui| {
+            let langs = LANGS
+                .iter()
+                .filter(|l| l.0 != "en")
+                .filter(|l| DIRECTIONS.iter().any(|d| d.from == l.0 || d.to == l.0));
+            for (i, (code, _)) in langs.enumerate() {
+                if i > 0 {
+                    divider(ui);
+                }
+                let dirs: Vec<_> = DIRECTIONS
+                    .iter()
+                    .filter(|d| d.from == *code || d.to == *code)
+                    .collect();
+                let mb: u32 = dirs.iter().map(|d| d.mb).sum();
+                let hint = if dirs.len() == 2 {
+                    tf("С английским в обе стороны, ~{0} МБ", &[("0", &mb)])
+                } else {
+                    tf("Только на английский, ~{0} МБ", &[("0", &mb)])
+                };
+                let installed = dirs.iter().all(|d| d.installed(&root));
+                row(ui, lang_name(code), &hint, |ui| {
+                    if let Some(remove) = self.model_button(ui, code, installed) {
+                        action = Some((Some(code), remove));
+                    }
+                });
+            }
+        });
+        ui.label(
+            RichText::new(t(
+                "Между двумя языками перевод идёт через английский: нужны модели обоих. \
+                 Остальные пары работают только через онлайн-сервис.",
+            ))
+            .size(13.0)
+            .color(p.muted),
+        );
+        let ctx = ui.ctx().clone();
+        match action {
+            Some((None, false)) => self.start_fetch(&ctx, paddle::FOLDER, paddle::download),
+            Some((None, true)) => {
+                let _ = std::fs::remove_dir_all(root.join(paddle::FOLDER));
+            }
+            Some((Some(code), false)) => self.start_fetch(&ctx, code, move |models| {
+                DIRECTIONS
+                    .iter()
+                    .filter(|d| d.from == code || d.to == code)
+                    .try_for_each(|d| snapling_translate::download(models, d))
+            }),
+            Some((Some(code), true)) => {
+                for d in DIRECTIONS.iter().filter(|d| d.from == code || d.to == code) {
+                    let _ = std::fs::remove_dir_all(root.join(d.model()));
+                }
+            }
+            None => {}
+        }
     }
 }
 
@@ -974,6 +1167,7 @@ impl eframe::App for Settings {
         let ctx = ui.ctx().clone();
         ui::preview(&ctx);
         self.poll_recording(&ctx);
+        self.poll_jobs();
         if self.recording.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -1040,6 +1234,7 @@ impl eframe::App for Settings {
                                         Tab::Capture => self.capture(ui),
                                         Tab::Hotkeys => self.hotkeys(ui),
                                         Tab::Text => self.text(ui),
+                                        Tab::Models => self.models_tab(ui),
                                         Tab::Privacy => self.privacy(ui),
                                         Tab::About => self.about(ui),
                                     }

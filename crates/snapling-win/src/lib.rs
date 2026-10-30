@@ -453,7 +453,6 @@ pub fn unregister_hotkey(id: i32) {
 }
 
 /// Windows 11 «Use the Print screen key to open screen capture»: on unless explicitly 0.
-/// Read-only; Snapling never changes this setting.
 pub fn snipping_owns_printscreen() -> bool {
     use windows::Win32::System::Registry::RRF_RT_REG_DWORD;
     let mut value = 0u32;
@@ -470,6 +469,52 @@ pub fn snipping_owns_printscreen() -> bool {
         )
     };
     res.is_err() || value != 0
+}
+
+/// Gives PrtScn back, on the user's click. The value is per user: no elevation needed.
+pub fn free_printscreen() -> Result<(), String> {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::System::Registry::REG_DWORD;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+    };
+    let fail = |e| format!("PrtScn: {e:?}");
+    unsafe {
+        let mut key = HKEY::default();
+        let e = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!("Control Panel\\Keyboard"),
+            None,
+            KEY_SET_VALUE,
+            &mut key,
+        );
+        if e.is_err() {
+            return Err(fail(e));
+        }
+        let off = 0u32.to_ne_bytes();
+        let e = RegSetValueExW(
+            key,
+            w!("PrintScreenKeyForSnippingEnabled"),
+            None,
+            REG_DWORD,
+            Some(&off),
+        );
+        let _ = RegCloseKey(key);
+        if e.is_err() {
+            return Err(fail(e));
+        }
+        let what = w!("Control Panel\\Keyboard");
+        let _ = SendMessageTimeoutW(
+            HWND(HWND_BROADCAST.0),
+            WM_SETTINGCHANGE,
+            WPARAM(0),
+            LPARAM(what.as_ptr() as isize),
+            SMTO_ABORTIFHUNG,
+            500,
+            None,
+        );
+    }
+    Ok(())
 }
 
 fn vk_code(key: &str) -> Option<u32> {

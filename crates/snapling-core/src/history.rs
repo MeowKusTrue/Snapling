@@ -56,8 +56,21 @@ pub fn remove(file: &Path, e: &Entry) -> Result<(), String> {
     if let Some(i) = entries.iter().position(|x| x == e) {
         entries.remove(i);
     }
+    write_all(file, &entries)
+}
+
+/// Keeps recognized text on the first equal entry, so the search finds it.
+pub fn set_text(file: &Path, e: &Entry, text: &str) -> Result<(), String> {
+    let mut entries = load(file);
+    if let Some(x) = entries.iter_mut().find(|x| *x == e) {
+        x.text = text.to_string();
+    }
+    write_all(file, &entries)
+}
+
+fn write_all(file: &Path, entries: &[Entry]) -> Result<(), String> {
     let mut text = String::new();
-    for x in &entries {
+    for x in entries {
         text += &serde_json::to_string(x).map_err(|err| err.to_string())?;
         text.push('\n');
     }
@@ -136,7 +149,9 @@ mod tests {
         append(&f, &e).unwrap();
         assert_eq!(load(&f), vec![e.clone(), e.clone()]);
         remove(&f, &e).unwrap();
-        assert_eq!(load(&f), vec![e]);
+        assert_eq!(load(&f), vec![e.clone()]);
+        set_text(&f, &e, "счёт").unwrap();
+        assert_eq!(load(&f)[0].text, "счёт");
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 

@@ -87,11 +87,13 @@ panel = true
 # по её нажатию. Ключ API вводится в окне перевода и хранится в диспетчере учётных данных
 # Windows, не здесь.
 online = "off"
+# Язык перевода: "ru", "en", "de", "fr", "es", "it", "pt", "uk", "pl", "nl", "tr", "zh", "ja", "ko".
+target = "ru"
 
 [ui]
-# Язык: "auto" — как в системе, "ru", "en" или свой файл из папки i18n рядом с этим файлом.
-language = "auto"
-# Тема окон: "system", "dark", "light".
+# Язык: "en", "ru", "auto" — как в системе, или свой файл из папки i18n рядом с этим файлом.
+language = "en"
+# Тема окон: "system", "dark", "light", "black".
 theme = "system"
 # Значок в трее: "auto" — под цвет панели задач, "white", "black".
 tray_icon = "auto"
@@ -128,6 +130,8 @@ pub enum Theme {
     System,
     Dark,
     Light,
+    /// Pure black, for OLED screens.
+    Black,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -142,7 +146,7 @@ pub struct Ui {
 impl Default for Ui {
     fn default() -> Self {
         Self {
-            language: "auto".into(),
+            language: "en".into(),
             theme: Theme::default(),
             tray_icon: TrayIcon::default(),
             welcomed: false,
@@ -253,10 +257,20 @@ impl Online {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Translate {
     pub online: Online,
+    pub target: String,
+}
+
+impl Default for Translate {
+    fn default() -> Self {
+        Self {
+            online: Online::Off,
+            target: "ru".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

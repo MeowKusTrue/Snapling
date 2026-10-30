@@ -11,6 +11,7 @@ use egui_phosphor::regular as icon;
 use snapling_core::config::{self, Config};
 use snapling_core::i18n::t;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const ACCENT: Color32 = Color32::from_rgb(0x29, 0x5B, 0xE8);
 const ACCENT_HOVER: Color32 = Color32::from_rgb(0x3B, 0x6C, 0xF5);
@@ -76,8 +77,24 @@ const LIGHT: Pal = Pal {
     ok: Color32::from_rgb(0x17, 0x7A, 0x5B),
 };
 
+const BLACK: Pal = Pal {
+    bg: Color32::BLACK,
+    main: Color32::BLACK,
+    card: Color32::from_rgb(0x0C, 0x0C, 0x0E),
+    line: Color32::from_rgb(0x24, 0x24, 0x28),
+    tone: Color32::from_rgb(0x16, 0x1E, 0x38),
+    ghost: Color32::from_rgb(0x1A, 0x1A, 0x1E),
+    well: Color32::from_rgb(0x08, 0x08, 0x0A),
+    warn_bg: Color32::from_rgb(0x2A, 0x1C, 0x12),
+    ..DARK
+};
+
+/// `Theme::Black` is egui's dark theme with these colors.
+static PURE_BLACK: AtomicBool = AtomicBool::new(false);
+
 pub fn pal(ctx: &egui::Context) -> Pal {
     match ctx.theme() {
+        Theme::Dark if PURE_BLACK.load(Ordering::Relaxed) => BLACK,
         Theme::Dark => DARK,
         Theme::Light => LIGHT,
     }
@@ -101,9 +118,15 @@ pub fn config_path() -> std::path::PathBuf {
 }
 
 pub fn set_theme(ctx: &egui::Context, theme: config::Theme) {
+    let black = theme == config::Theme::Black;
+    PURE_BLACK.store(black, Ordering::Relaxed);
+    ctx.set_visuals_of(
+        Theme::Dark,
+        visuals(Theme::Dark, if black { BLACK } else { DARK }),
+    );
     ctx.set_theme(match theme {
         config::Theme::System => ThemePreference::System,
-        config::Theme::Dark => ThemePreference::Dark,
+        config::Theme::Dark | config::Theme::Black => ThemePreference::Dark,
         config::Theme::Light => ThemePreference::Light,
     });
 }
@@ -174,7 +197,6 @@ pub fn init(cc: &eframe::CreationContext<'_>) {
         .families
         .insert(FontFamily::Name("shot".into()), vec!["Ubuntu-Light".into()]);
     ctx.set_fonts(fonts);
-    ctx.set_visuals_of(Theme::Dark, visuals(Theme::Dark, DARK));
     ctx.set_visuals_of(Theme::Light, visuals(Theme::Light, LIGHT));
     ctx.all_styles_mut(|s| {
         s.spacing.button_padding = vec2(12.0, 7.0);
@@ -464,6 +486,22 @@ fn filled(ui: &mut Ui, text: &str, width: Option<f32>, height: f32, main: bool) 
 }
 
 /// Text button with no fill until hovered.
+/// Quiet button of a given width.
+pub fn ghost_text_w(ui: &mut Ui, text: &str, width: f32, height: f32) -> Response {
+    let p = pal(ui.ctx());
+    let (rect, r) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    ui.painter()
+        .rect_filled(rect, 10.0, if r.hovered() { p.line } else { p.ghost });
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        FontId::proportional(13.5),
+        p.text,
+    );
+    r
+}
+
 pub fn ghost_text(ui: &mut Ui, text: &str, height: f32) -> Response {
     let p = pal(ui.ctx());
     let g = ui

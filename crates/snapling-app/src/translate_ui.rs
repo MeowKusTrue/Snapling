@@ -6,7 +6,7 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use egui_phosphor::regular as icon;
 use snapling_core::config::Online;
 use snapling_core::i18n::{t, tf};
-use snapling_translate::{Dir, Model};
+use snapling_translate::{Direction, LANGS, Lang, Model, detect, lang_name, route, target_for};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -16,6 +16,8 @@ pub struct Hooks {
     pub models: PathBuf,
     /// `[translate] online`.
     pub online: Online,
+    /// `[translate] target`.
+    pub target: String,
     /// Name on the chip.
     pub engine: &'static str,
     pub get_key: fn(Online) -> Option<String>,
@@ -25,8 +27,11 @@ pub struct Hooks {
 }
 
 type Reply = (u64, Result<String, String>);
-/// id, direction, text, service and key (`None` = offline).
-type Job = (u64, Dir, String, Option<(Online, String)>);
+enum Job {
+    /// id, from, to, text, service and key (`None` = offline).
+    Text(u64, Lang, Lang, String, Option<(Online, String)>),
+    Fetch(u64, Vec<&'static Direction>),
+}
 
 /// `text_only`: the result of recognition, translated only when asked.
 pub fn run(file: &Path, hooks: Hooks, text_only: bool) {
@@ -75,22 +80,42 @@ fn worker(
     tx: Sender<Reply>,
     ctx: egui::Context,
 ) {
-    let mut loaded: Vec<(Dir, Model)> = Vec::new();
-    for (id, dir, text, key) in rx {
-        let res = (|| {
-            if let Some((service, key)) = key {
+    let mut loaded: Vec<(String, Model)> = Vec::new();
+    for job in rx {
+        let (id, res) = match job {
+            Job::Fetch(id, dirs) => {
+                let got = dirs
+                    .iter()
+                    .try_for_each(|d| snapling_translate::download(&models, d));
+                (id, got.map(|()| String::new()))
+            }
+            Job::Text(id, from, to, text, Some((service, key))) => {
                 let proxy = proxy();
-                return snapling_translate::online(service, &key, &text, dir, proxy.as_deref());
+                let proxy = proxy.as_deref();
+                let got = snapling_translate::online(service, &key, &text, from, to, proxy);
+                (id, got)
             }
-            if !loaded.iter().any(|(d, _)| *d == dir) {
-                loaded.push((dir, Model::load(&models, dir)?));
+            Job::Text(id, from, to, mut text, None) => {
+                let got = (|| {
+                    for d in route(from, to) {
+                        let name = d.model();
+                        if !loaded.iter().any(|(n, _)| *n == name) {
+                            if loaded.len() == 2 {
+                                loaded.remove(0);
+                            }
+                            loaded.push((name.clone(), Model::load(&models, d)?));
+                        }
+                        let (_, m) = loaded
+                            .iter_mut()
+                            .find(|(n, _)| *n == name)
+                            .expect("just loaded");
+                        text = m.translate(&text)?;
+                    }
+                    Ok(text)
+                })();
+                (id, got)
             }
-            let (_, m) = loaded
-                .iter_mut()
-                .find(|(d, _)| *d == dir)
-                .expect("just loaded");
-            m.translate(&text)
-        })();
+        };
         if tx.send((id, res)).is_err() {
             return;
         }
@@ -101,8 +126,12 @@ fn worker(
 struct Window {
     original: String,
     translation: String,
-    dir: Dir,
+    from: Lang,
+    to: Lang,
     text_only: bool,
+    /// Models this pair lacks: the pane asks to download them.
+    need: Vec<&'static Direction>,
+    fetching: bool,
     hooks: Hooks,
     tx: Sender<Job>,
     rx: Receiver<Reply>,
@@ -127,8 +156,12 @@ impl Window {
         let (wtx, rx) = channel();
         let (models, proxy) = (hooks.models.clone(), hooks.get_proxy);
         std::thread::spawn(move || worker(models, proxy, wrx, wtx, ctx));
+        let from = detect(&original);
         let mut w = Self {
-            dir: snapling_translate::detect(&original),
+            from,
+            to: target_for(from, &hooks.target),
+            need: Vec::new(),
+            fetching: false,
             original,
             translation: String::new(),
             text_only,
@@ -155,6 +188,24 @@ impl Window {
         if self.original.trim().is_empty() {
             return;
         }
+        self.need.clear();
+        if key.is_none() {
+            let way = route(self.from, self.to);
+            if way.is_empty() {
+                self.pending = None;
+                self.status = t("Для этой пары нет офлайн-модели, нужен онлайн-сервис").into();
+                return;
+            }
+            self.need = way
+                .into_iter()
+                .filter(|d| !d.installed(&self.hooks.models))
+                .collect();
+            if !self.need.is_empty() {
+                self.pending = None;
+                self.status.clear();
+                return;
+            }
+        }
         self.next_id += 1;
         self.pending = Some(self.next_id);
         self.pending_online = key.is_some();
@@ -162,9 +213,25 @@ impl Window {
             Some((service, _)) => tf("Отправляю в {0}…", &[("0", &service.name())]),
             None => t("Перевожу офлайн…").into(),
         };
-        let _ = self
-            .tx
-            .send((self.next_id, self.dir, self.original.clone(), key));
+        let job = Job::Text(self.next_id, self.from, self.to, self.original.clone(), key);
+        let _ = self.tx.send(job);
+    }
+
+    fn fetch(&mut self) {
+        self.next_id += 1;
+        self.pending = Some(self.next_id);
+        self.fetching = true;
+        self.status = t("Скачиваю модель…").into();
+        let _ = self.tx.send(Job::Fetch(self.next_id, self.need.clone()));
+    }
+
+    /// Again with the same service after the languages changed.
+    fn redo(&mut self) {
+        if self.via_online {
+            self.send_online();
+        } else {
+            self.request(None);
+        }
     }
 
     /// Service button: key first, then a one-time confirmation, then the send.
@@ -272,12 +339,20 @@ impl Window {
                 continue;
             }
             self.pending = None;
+            if std::mem::take(&mut self.fetching) {
+                match res {
+                    Ok(_) => self.request(None),
+                    Err(e) => self.status = tf("Не удалось скачать модель: {e}", &[("e", &e)]),
+                }
+                continue;
+            }
             match res {
                 Ok(t) => {
                     self.translation = t;
                     self.via_online = self.pending_online;
                     self.status.clear();
-                    if !self.copied_once {
+                    // A debug preview must not touch the real clipboard.
+                    if !self.copied_once && std::env::var_os("SNAP_PREVIEW").is_none() {
                         self.copied_once = true;
                         self.copy();
                     }
@@ -290,11 +365,27 @@ impl Window {
 
 impl Window {
     fn swap(&mut self) {
-        self.dir = match self.dir {
-            Dir::RuEn => Dir::EnRu,
-            Dir::EnRu => Dir::RuEn,
-        };
-        self.request(None);
+        std::mem::swap(&mut self.from, &mut self.to);
+        self.redo();
+    }
+
+    fn lang_combo(ui: &mut egui::Ui, id: &str, lang: &mut Lang, width: f32) -> bool {
+        let mut changed = false;
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(lang_name(lang))
+            .width(width)
+            .show_ui(ui, |ui| {
+                for (code, _) in LANGS {
+                    if ui
+                        .selectable_label(*lang == code, lang_name(code))
+                        .clicked()
+                    {
+                        *lang = code;
+                        changed = true;
+                    }
+                }
+            });
+        changed
     }
 
     /// Lines joined with spaces: OCR keeps the layout's line breaks.
@@ -411,30 +502,17 @@ impl eframe::App for Window {
                         }
                     });
                 });
-                ui.horizontal(|ui| {
-                    let (from, to) = match self.dir {
-                        Dir::RuEn => (t("Русский"), t("Английский")),
-                        Dir::EnRu => (t("Английский"), t("Русский")),
-                    };
+                let row = egui::vec2(width, 36.0);
+                let center = egui::Layout::left_to_right(egui::Align::Center);
+                ui.allocate_ui_with_layout(row, center, |ui| {
                     let w = (width - 36.0 - 16.0) / 2.0;
-                    let pill = |ui: &mut egui::Ui, text: &str| {
-                        let size = egui::vec2(w, 36.0);
-                        let (r, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-                        ui.painter().rect_filled(r, 10.0, p.ghost);
-                        ui.painter().text(
-                            r.left_center() + egui::vec2(12.0, 0.0),
-                            egui::Align2::LEFT_CENTER,
-                            text,
-                            egui::FontId::proportional(13.5),
-                            p.text,
-                        );
-                        resp.clicked()
-                    };
-                    let a = pill(ui, from);
+                    let a = Self::lang_combo(ui, "from", &mut self.from, w);
                     let b = ui::ghost_icon(ui, icon::ARROWS_LEFT_RIGHT, 36.0, t("Поменять языки"));
-                    let c = pill(ui, to);
-                    if a || b.clicked() || c {
+                    let c = Self::lang_combo(ui, "to", &mut self.to, w);
+                    if b.clicked() {
                         self.swap();
+                    } else if a || c {
+                        self.redo();
                     }
                 });
                 let foot = 38.0 + ui.spacing().item_spacing.y;
@@ -449,6 +527,25 @@ impl eframe::App for Window {
                         ui.set_height(h - 24.0);
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             ui.set_width(ui.available_width());
+                            if !self.need.is_empty() {
+                                let mb: u32 = self.need.iter().map(|d| d.mb).sum();
+                                ui.label(tf(
+                                    "Для этого перевода нужна модель, ~{0} МБ. После скачивания \
+                                     всё работает без интернета.",
+                                    &[("0", &mb)],
+                                ));
+                                let (label, free) = if self.fetching {
+                                    (t("Скачиваю…"), false)
+                                } else {
+                                    (t("Скачать"), true)
+                                };
+                                let r = ui
+                                    .add_enabled_ui(free, |ui| ui::primary(ui, label, None, 36.0));
+                                if r.inner.clicked() {
+                                    self.fetch();
+                                }
+                                return;
+                            }
                             let mut view = self.translation.as_str();
                             ui.add(
                                 egui::TextEdit::multiline(&mut view)

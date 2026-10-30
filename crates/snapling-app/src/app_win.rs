@@ -159,7 +159,7 @@ fn menu_rows(cfg: &Config) -> Vec<MenuRow> {
         act(MenuIcon::Repeat, Action::RepeatRegion),
         act(MenuIcon::Text, Action::RecognizeText),
         MenuRow::Line,
-        item(MenuIcon::History, t("История")),
+        item(MenuIcon::History, t("Галерея")),
         item(MenuIcon::Folder, t("Папка снимков")),
         item(MenuIcon::Settings, t("Настройки")),
         MenuRow::Line,
@@ -170,7 +170,7 @@ fn menu_rows(cfg: &Config) -> Vec<MenuRow> {
 fn menu_light(cfg: &Config) -> bool {
     match cfg.ui.theme {
         Theme::Light => true,
-        Theme::Dark => false,
+        Theme::Dark | Theme::Black => false,
         Theme::System => snapling_win::taskbar_is_light(),
     }
 }
@@ -379,8 +379,8 @@ fn read_text(img: &snapling_win::Image, lang: &str, paddle: bool) -> Result<Stri
     engine::recognize(&models, &img.bgra, img.width, img.height)
 }
 
-/// OCR here, then the translation window process (it loads the model and frees it on close).
-/// Missing model → asks before downloading: the only network access of offline translation.
+/// OCR here, then the translation window process: it loads the model and frees it on close,
+/// and offers the download when a model is missing.
 fn translate(img: snapling_win::Image) {
     let lang = OCR_LANG.with(|l| l.borrow().clone());
     let paddle = OCR_PADDLE.get();
@@ -402,36 +402,6 @@ fn translate(img: snapling_win::Image) {
             }
         };
         remember_text(&img, &text);
-        let dir = snapling_translate::detect(&text);
-        let models = models_dir();
-        if !snapling_translate::installed(&models, dir) {
-            let q = tf(
-                "Для офлайн-перевода ({0}) нужна модель OPUS-MT, ~{1} МБ.
-Скачать её с huggingface.co (Xenova/{2})?
-
-После скачивания перевод работает без интернета.",
-                &[
-                    ("0", &dir.label()),
-                    ("1", &snapling_translate::DOWNLOAD_MB),
-                    ("2", &dir.model()),
-                ],
-            );
-            if !snapling_win::ask(&q) {
-                return;
-            }
-            let t0 = Instant::now();
-            info!("model download: {}", dir.model());
-            if let Err(e) = snapling_translate::download(&models, dir) {
-                error!("model download: {e}");
-                play(Sound::Error);
-                return snapling_win::warn(&tf(
-                    "Не удалось скачать модель перевода.
-{e}",
-                    &[("e", &e)],
-                ));
-            }
-            info!("model downloaded in {} s", t0.elapsed().as_secs());
-        }
         text_window(&text, "--translate");
     });
 }
@@ -465,6 +435,7 @@ pub fn text_hooks() -> crate::translate_ui::Hooks {
         warn: snapling_win::warn,
         models: models_dir(),
         online: cfg.translate.online,
+        target: cfg.translate.target.clone(),
         engine: cfg.ocr.engine.name(),
         get_key: |s| snapling_win::secret::get(s.name()),
         set_key: |s, k| snapling_win::secret::set(s.name(), k),
@@ -585,6 +556,8 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         hotkey_free: snapling_win::hotkey_free,
         autostart_blocked: snapling_win::autostart_blocked,
         snipping_owns: snapling_win::snipping_owns_printscreen,
+        free_printscreen: snapling_win::free_printscreen,
+        models: models_dir(),
         get_proxy: || snapling_win::secret::get(DEEPL_PROXY),
         set_proxy: |url| {
             if url.is_empty() {
@@ -630,7 +603,16 @@ pub fn history_hooks() -> crate::history_ui::Hooks {
             open_editor(load_image(path)?, app.to_string());
             Ok(())
         },
-        open: open_path,
+        reveal: |path| {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .spawn();
+        },
+        recognize: |path| {
+            let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"))?;
+            let paddle = cfg.ocr.engine == Engine::Paddle;
+            read_text(&load_image(path)?, cfg.ocr.language.trim(), paddle)
+        },
         open_folder: || {
             let cfg = Config::load_or_create(&app_dir("APPDATA").join("config.toml"));
             match cfg.and_then(|c| storage::prepare_dir(&save_dir(&c.save)?)) {
@@ -890,8 +872,8 @@ fn apply_hotkeys(cfg: &Config) -> Vec<String> {
         {
             problems.push(
                 t(
-                    "PrtScn сейчас открывает «Ножницы» Windows. Выключить: Параметры → \
-                 Специальные возможности → Клавиатура → «Использовать клавишу PrtScn…».",
+                    "PrtScn сейчас открывает «Ножницы» Windows. Исправить: настройки Snapling → \
+                 Горячие клавиши.",
                 )
                 .into(),
             );

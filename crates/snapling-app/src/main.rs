@@ -95,6 +95,8 @@ fn settings_hooks() -> settings::Hooks {
         set_proxy: |_| Err(t("пока только Windows").into()),
         reserved: |_| None,
         snipping_owns: || false,
+        free_printscreen: || Err(t("пока только Windows").into()),
+        models: std::path::PathBuf::from("models"),
         open: |_| {},
         log: std::path::PathBuf::new(),
         default_dir: || None,
@@ -117,7 +119,8 @@ fn history_hooks() -> history_ui::Hooks {
         copy_image: |_| Err(t("пока только Windows").into()),
         copy_text: |_| Err(t("пока только Windows").into()),
         edit: |_, _| Err(t("пока только Windows").into()),
-        open: |_| {},
+        reveal: |_| {},
+        recognize: |_| Err(t("пока только Windows").into()),
         open_folder: || {},
     }
 }
@@ -134,6 +137,7 @@ fn text_hooks() -> translate_ui::Hooks {
         warn: |m| eprintln!("{m}"),
         models: std::path::PathBuf::from("models"),
         online: Default::default(),
+        target: String::new(),
         engine: "PaddleOCR",
         get_key: |_| None,
         set_key: |_, _| Err(t("пока только Windows").into()),

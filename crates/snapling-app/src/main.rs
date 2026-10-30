@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(not(windows))]
+use snapling_core::i18n::t;
 #[cfg(windows)]
 mod app_win;
 mod editor;
@@ -19,6 +21,8 @@ fn app_dir(env: &str) -> std::path::PathBuf {
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    let cfg = snapling_core::config::Config::load_or_create(&ui::config_path());
+    ui::apply_language(&cfg.map_or("auto".to_string(), |c| c.ui.language));
     if args.len() == 3 && args[1] == "--edit" {
         return editor::run(std::path::Path::new(&args[2]), hooks());
     }
@@ -45,9 +49,9 @@ fn hooks() -> editor::Hooks {
 #[cfg(not(windows))]
 fn hooks() -> editor::Hooks {
     editor::Hooks {
-        copy: |_, _, _| Err("пока только Windows".into()),
-        save: |_, _, _, _| Err("пока только Windows".into()),
-        save_as: |_, _, _, _| Err("пока только Windows".into()),
+        copy: |_, _, _| Err(t("пока только Windows").into()),
+        save: |_, _, _, _| Err(t("пока только Windows").into()),
+        save_as: |_, _, _, _| Err(t("пока только Windows").into()),
         text: |_, _, _| {},
         warn: |m| eprintln!("{m}"),
     }
@@ -63,16 +67,20 @@ fn settings_hooks() -> settings::Hooks {
     settings::Hooks {
         warn: |m| eprintln!("{m}"),
         autostart: || false,
-        set_autostart: |_| Err("пока только Windows".into()),
+        set_autostart: |_| Err(t("пока только Windows").into()),
         pick_folder: || None,
-        pressed_combo: || None,
-        pause_hotkeys: |_| {},
+        record_keys: |_| {},
+        recorded_combo: || None,
+        hotkey_free: |_| true,
+        autostart_blocked: || false,
+        get_proxy: || None,
+        set_proxy: |_| Err(t("пока только Windows").into()),
         reserved: |_| None,
         open: |_| {},
         log: std::path::PathBuf::new(),
         default_dir: || None,
         pick_wav: || None,
-        preview: |_, _| Err("пока только Windows".into()),
+        preview: |_, _| Err(t("пока только Windows").into()),
     }
 }
 
@@ -87,9 +95,9 @@ fn history_hooks() -> history_ui::Hooks {
         warn: |m| eprintln!("{m}"),
         file: app_dir("LOCALAPPDATA").join("history.jsonl"),
         now: String::new,
-        copy_image: |_| Err("пока только Windows".into()),
-        copy_text: |_| Err("пока только Windows".into()),
-        edit: |_, _| Err("пока только Windows".into()),
+        copy_image: |_| Err(t("пока только Windows").into()),
+        copy_text: |_| Err(t("пока только Windows").into()),
+        edit: |_, _| Err(t("пока только Windows").into()),
         open: |_| {},
         open_folder: || {},
     }
@@ -103,11 +111,12 @@ fn text_hooks() -> translate_ui::Hooks {
 #[cfg(not(windows))]
 fn text_hooks() -> translate_ui::Hooks {
     translate_ui::Hooks {
-        copy_text: |_| Err("пока только Windows".into()),
+        copy_text: |_| Err(t("пока только Windows").into()),
         warn: |m| eprintln!("{m}"),
         models: std::path::PathBuf::from("models"),
         online: false,
         get_key: || None,
-        set_key: |_| Err("пока только Windows".into()),
+        set_key: |_| Err(t("пока только Windows").into()),
+        get_proxy: || None,
     }
 }

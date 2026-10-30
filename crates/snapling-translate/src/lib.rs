@@ -3,6 +3,7 @@
 
 use ort::session::Session;
 use ort::value::Tensor;
+use snapling_core::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
@@ -23,8 +24,8 @@ impl Dir {
 
     pub fn label(self) -> &'static str {
         match self {
-            Dir::RuEn => "Русский → English",
-            Dir::EnRu => "English → Русский",
+            Dir::RuEn => t("Русский → English"),
+            Dir::EnRu => t("English → Русский"),
         }
     }
 }
@@ -109,8 +110,13 @@ pub fn installed(models: &Path, dir: Dir) -> bool {
 }
 
 fn agent() -> ureq::Agent {
+    agent_via(None)
+}
+
+fn agent_via(proxy: Option<ureq::Proxy>) -> ureq::Agent {
     ureq::Agent::new_with_config(
         ureq::config::Config::builder()
+            .proxy(proxy)
             .tls_config(
                 ureq::tls::TlsConfig::builder()
                     .provider(ureq::tls::TlsProvider::NativeTls)
@@ -119,6 +125,12 @@ fn agent() -> ureq::Agent {
             .timeout_global(Some(std::time::Duration::from_secs(20)))
             .build(),
     )
+}
+
+/// `socks5://`, `socks4://`, `http://` or `https://`, login and password allowed.
+/// The message never repeats the address: it may hold a password.
+pub fn parse_proxy(url: &str) -> Result<ureq::Proxy, String> {
+    ureq::Proxy::new(url.trim()).map_err(|_| t("Адрес прокси не распознан").to_string())
 }
 
 /// Free-plan keys end with `:fx` and use a separate host.
@@ -131,14 +143,16 @@ pub fn deepl_host(key: &str) -> &'static str {
 }
 
 /// Online translation. Sends `text` to DeepL: call only on the user's explicit action.
-/// Errors never contain the key.
-pub fn deepl(key: &str, text: &str, dir: Dir) -> Result<String, String> {
+/// Errors never contain the key or the proxy address.
+pub fn deepl(key: &str, text: &str, dir: Dir, proxy: Option<&str>) -> Result<String, String> {
     let (source, target) = match dir {
         Dir::RuEn => ("RU", "EN-US"),
         Dir::EnRu => ("EN", "RU"),
     };
     let body = serde_json::json!({ "text": [text], "source_lang": source, "target_lang": target });
-    let resp = agent()
+    let via = proxy.map(parse_proxy).transpose()?;
+    let through = via.is_some();
+    let resp = agent_via(via)
         .post(format!("https://{}/v2/translate", deepl_host(key)))
         .header("Authorization", format!("DeepL-Auth-Key {}", key.trim()))
         .content_type("application/json")
@@ -147,20 +161,21 @@ pub fn deepl(key: &str, text: &str, dir: Dir) -> Result<String, String> {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(code)) => {
             return Err(match code {
-                403 => "DeepL: ключ не подходит".into(),
-                456 => "DeepL: исчерпан лимит символов".into(),
-                429 => "DeepL: слишком много запросов, попробуйте позже".into(),
-                c => format!("DeepL: ошибка сервера {c}"),
+                403 => t("DeepL: ключ не подходит").into(),
+                456 => t("DeepL: исчерпан лимит символов").into(),
+                429 => t("DeepL: слишком много запросов, попробуйте позже").into(),
+                c => tf("DeepL: ошибка сервера {c}", &[("c", &c)]),
             });
         }
-        Err(e) => return Err(format!("DeepL: нет связи ({e})")),
+        Err(_) if through => return Err(t("DeepL: нет связи через прокси").into()),
+        Err(e) => return Err(tf("DeepL: нет связи ({e})", &[("e", &e)])),
     };
     let json: serde_json::Value =
         serde_json::from_str(&resp.body_mut().read_to_string().map_err(err)?).map_err(err)?;
     json["translations"][0]["text"]
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| "DeepL: неожиданный ответ".into())
+        .ok_or_else(|| t("DeepL: неожиданный ответ").into())
 }
 
 /// Download size of one direction, for the consent prompt.
@@ -179,7 +194,7 @@ pub fn download(models: &Path, dir: Dir) -> Result<(), String> {
         if dest.is_file() {
             continue;
         }
-        let want = sha256(dir, file).ok_or("нет контрольной суммы")?;
+        let want = sha256(dir, file).ok_or(t("нет контрольной суммы"))?;
         let part = dest.with_extension("part");
         let fetch = || -> Result<(), String> {
             let resp = agent
@@ -200,8 +215,9 @@ pub fn download(models: &Path, dir: Dir) -> Result<(), String> {
             }
             let got: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
             if got != want {
-                return Err(format!(
-                    "{file}: контрольная сумма не совпала, файл отброшен"
+                return Err(tf(
+                    "{file}: контрольная сумма не совпала, файл отброшен",
+                    &[("file", &file)],
                 ));
             }
             drop(out);
@@ -259,9 +275,9 @@ impl Model {
     pub fn load(models: &Path, dir: Dir) -> Result<Self, String> {
         let root: PathBuf = models.join(dir.model());
         if !installed(models, dir) {
-            return Err(format!(
-                "модель перевода не установлена: {}",
-                root.display()
+            return Err(tf(
+                "модель перевода не установлена: {0}",
+                &[("0", &root.display())],
             ));
         }
         let env = env()?;
@@ -353,6 +369,14 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_errors_do_not_repeat_the_address() {
+        assert!(parse_proxy("socks5://127.0.0.1:1080").is_ok());
+        assert!(parse_proxy("http://user:pass@proxy.example:8080").is_ok());
+        let e = parse_proxy("ftp://user:secret@host").err().unwrap();
+        assert!(!e.contains("secret"));
+    }
 
     #[test]
     fn detects_direction() {

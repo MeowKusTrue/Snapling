@@ -1,6 +1,7 @@
 //! Capture history: one JSON object per line, append-only, local file.
 //! Removing an entry later never deletes the image itself.
 
+use crate::i18n::tf;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
@@ -85,8 +86,8 @@ pub fn days_ago(time: &str, now: &str) -> Option<i64> {
 pub fn when(time: &str, now: &str) -> String {
     let hm = time.get(11..16).unwrap_or("");
     match days_ago(time, now) {
-        Some(0) => format!("Сегодня, {hm}"),
-        Some(1) => format!("Вчера, {hm}"),
+        Some(0) => tf("Сегодня, {hm}", &[("hm", &hm)]),
+        Some(1) => tf("Вчера, {hm}", &[("hm", &hm)]),
         _ => match (time.get(8..10), time.get(5..7)) {
             (Some(d), Some(m)) => format!("{d}.{m}"),
             _ => time.to_string(),

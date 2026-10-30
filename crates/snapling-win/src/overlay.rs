@@ -10,6 +10,7 @@
 
 use crate::{Image, crop_bgra, dib_header, targets, uia};
 use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
+use snapling_core::i18n::t;
 use snapling_core::selection::{Corner, Hit, HoverChain, MIN_SELECTION_PX, Point, Rect, Selection};
 use snapling_scene::{
     Button, COLORS, Control, Draw, Hover, Layout, SIZES, Scene, TOOLS, Target, Tool,
@@ -79,6 +80,8 @@ struct State {
     /// Exe name of the hovered window, for the hover pill.
     app: String,
     pen: Pen,
+    /// Selecting ends the overlay with this outcome (OCR hotkeys).
+    auto: Option<Outcome>,
     /// The press started a selection, so its release may finish one. A press on a rail
     /// button must not pick the window under that button.
     armed: bool,
@@ -118,7 +121,7 @@ impl Default for Pen {
             lasso_mode: false,
             color: COLORS[0],
             size: SIZES[1],
-            blur: BlurStyle::default(),
+            blur: BLUR.get(),
             history: History::default(),
             live: None,
             typing: None,
@@ -132,6 +135,13 @@ thread_local! {
     static HWND_OVERLAY: Cell<HWND> = Cell::new(HWND::default());
     /// `[capture] instant_copy`.
     static INSTANT: Cell<bool> = const { Cell::new(false) };
+    /// `[blur]`, the brush a new overlay starts with.
+    static BLUR: Cell<BlurStyle> = const {
+        Cell::new(BlurStyle {
+            gauss: false,
+            strength: 0,
+        })
+    };
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     static UIA: RefCell<Option<Sender<uia::Request>>> = const { RefCell::new(None) };
 }
@@ -283,11 +293,12 @@ fn dib(width: u32, height: u32) -> Result<(HBITMAP, *mut u8), String> {
 /// Shows the frozen frame; `on_done` gets the cropped region, or `None` on cancel.
 pub fn show(
     img: Image,
+    auto: Option<Outcome>,
     on_done: impl FnOnce(Option<(Image, Outcome)>) + 'static,
 ) -> Result<(), String> {
     let hwnd = HWND_OVERLAY.get();
     if hwnd.is_invalid() || is_open() {
-        return Err("overlay недоступен".into());
+        return Err(t("overlay недоступен").into());
     }
     let len = img.bgra.len();
     let (orig, orig_bits) = dib(img.width, img.height)?;
@@ -336,6 +347,7 @@ pub fn show(
             hover_btn: None,
             app: String::new(),
             pen: Pen::default(),
+            auto,
             armed: false,
             lasso: Vec::new(),
             stroke: Vec::new(),
@@ -1001,10 +1013,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             unsafe {
                 let _ = ReleaseCapture();
             }
-            if selected == Some(true) && INSTANT.get() {
-                finish(hwnd, Some(Outcome::Copy));
-            } else {
-                invalidate(hwnd, true);
+            let auto = with(|s| s.auto).flatten();
+            let instant = INSTANT.get().then_some(Outcome::Copy);
+            match auto.or(instant).filter(|_| selected == Some(true)) {
+                Some(out) => finish(hwnd, Some(out)),
+                None => invalidate(hwnd, true),
             }
         }
         WM_LBUTTONDBLCLK => {
@@ -1107,6 +1120,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     LRESULT(0)
 }
 
+/// Starting style of the blur brush.
+pub fn set_blur(gauss: bool, strength: u8) {
+    BLUR.set(BlurStyle { gauss, strength });
+}
+
 /// Selecting copies and closes at once, skipping the action toolbar.
 pub fn set_instant_copy(on: bool) {
     INSTANT.set(on);
@@ -1120,13 +1138,14 @@ pub fn set_hidden_from_capture(hide: bool) -> Result<(), String> {
     };
     let hwnd = HWND_OVERLAY.get();
     if hwnd.is_invalid() {
-        return Err("overlay не создан".into());
+        return Err(t("overlay не создан").into());
     }
     let mode = if hide {
         WDA_EXCLUDEFROMCAPTURE
     } else {
         WDA_NONE
     };
+    crate::toast::set_hidden_from_capture(hide);
     unsafe { SetWindowDisplayAffinity(hwnd, mode) }.map_err(|e| e.to_string())
 }
 

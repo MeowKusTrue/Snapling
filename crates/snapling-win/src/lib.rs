@@ -1,10 +1,12 @@
 #![cfg(windows)]
 
 use snapling_core::hotkey::{self, Hotkey};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use snapling_core::i18n::{t, tf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicIsize, AtomicU8, Ordering};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HOTKEY_ALREADY_REGISTERED,
-    GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND,
+    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HOTKEY_ALREADY_REGISTERED, GetLastError,
+    GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
@@ -27,14 +29,13 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegDeleteKeyValueW,
     RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
-use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
-    RegisterHotKey, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
 };
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
@@ -42,8 +43,10 @@ use windows::Win32::UI::Shell::{
     IFileSaveDialog, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, IDYES, MB_ICONQUESTION, MB_ICONWARNING, MB_YESNO, MessageBoxW,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    CallNextHookEx, GetSystemMetrics, HHOOK, IDYES, KBDLLHOOKSTRUCT, MB_ICONQUESTION,
+    MB_ICONWARNING, MB_YESNO, MessageBoxW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 use windows::core::{HSTRING, w};
 
@@ -51,6 +54,7 @@ pub mod ocr;
 pub mod overlay;
 pub mod secret;
 pub mod targets;
+pub mod toast;
 pub mod uia;
 
 /// Top-down BGRA, alpha forced to 255. `x`/`y`: screen position of the top-left pixel.
@@ -108,52 +112,97 @@ pub fn single_instance() -> bool {
     handle.is_ok() && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS
 }
 
-const HOTKEY_PAUSE: windows::core::PCWSTR = w!("Local\\Snapling.HotkeyRecording");
-static PAUSE: AtomicIsize = AtomicIsize::new(0);
+static RECORD_HOOK: AtomicIsize = AtomicIsize::new(0);
+static RECORD_MODS: AtomicU8 = AtomicU8::new(0);
+static RECORDED: Mutex<Option<String>> = Mutex::new(None);
 
-/// While the settings window records a combo, the tray must not act on it.
-/// A named mutex: it goes away by itself if that window crashes.
-pub fn pause_hotkeys(on: bool) {
-    let old = PAUSE.swap(0, Ordering::Relaxed);
-    if old != 0 {
-        let _ = unsafe { CloseHandle(HANDLE(old as _)) };
-    }
-    if on && let Ok(h) = unsafe { CreateMutexW(None, false, HOTKEY_PAUSE) } {
-        PAUSE.store(h.0 as isize, Ordering::Relaxed);
-    }
-}
-
-pub fn hotkeys_paused() -> bool {
-    match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, HOTKEY_PAUSE) } {
-        Ok(h) => {
-            let _ = unsafe { CloseHandle(h) };
-            true
-        }
-        Err(_) => false,
+/// Bit of a modifier key in `RECORD_MODS`.
+fn modifier_bit(vk: u32) -> Option<u8> {
+    match vk {
+        0xA0 | 0xA1 | 0x10 => Some(1),
+        0xA2 | 0xA3 | 0x11 => Some(2),
+        0xA4 | 0xA5 | 0x12 => Some(4),
+        0x5B | 0x5C => Some(8),
+        _ => None,
     }
 }
 
-/// The combo held right now, for recording. PrintScreen may report only its "pressed since
-/// last call" bit, so the first call clears stale bits and its result is to be ignored.
-pub fn pressed_combo() -> Option<String> {
-    let state = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) } as u16;
-    let down = |vk: u16| state(vk) & 0x8000 != 0;
-    let key = hotkey::key_names()
-        .filter(|k| vk_code(k).is_some_and(|vk| state(vk as u16) & 0x8001 != 0))
-        .last()?;
-    let hk = Hotkey {
-        ctrl: down(VK_CONTROL.0),
-        alt: down(VK_MENU.0),
-        shift: down(VK_SHIFT.0),
-        win: down(VK_LWIN.0) || down(VK_RWIN.0),
+fn recorded_hotkey(vk: u32, mods: u8) -> Option<Hotkey> {
+    let key = hotkey::key_names().find(|k| vk_code(k) == Some(vk))?;
+    Some(Hotkey {
+        shift: mods & 1 != 0,
+        ctrl: mods & 2 != 0,
+        alt: mods & 4 != 0,
+        win: mods & 8 != 0,
         key,
-    };
-    Some(hk.to_string())
+    })
+}
+
+/// Sees every key before Windows and other programs do, and keeps presses from them: Win+…,
+/// PrintScreen and combos other programs own can be recorded without firing. Releases pass.
+unsafe extern "system" fn record_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let vk = unsafe { (*(lp.0 as *const KBDLLHOOKSTRUCT)).vkCode };
+        let down = wp.0 as u32 == WM_KEYDOWN || wp.0 as u32 == WM_SYSKEYDOWN;
+        match modifier_bit(vk) {
+            Some(bit) if down => {
+                RECORD_MODS.fetch_or(bit, Ordering::Relaxed);
+            }
+            Some(bit) => {
+                RECORD_MODS.fetch_and(!bit, Ordering::Relaxed);
+            }
+            None if down => {
+                let hk = recorded_hotkey(vk, RECORD_MODS.load(Ordering::Relaxed));
+                if let (Some(hk), Ok(mut slot)) = (hk, RECORDED.lock()) {
+                    *slot = Some(hk.to_string());
+                }
+            }
+            None => {}
+        }
+        if down {
+            return LRESULT(1);
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wp, lp) }
+}
+
+/// Starts or stops catching the keyboard for hotkey recording. Runs on a thread with a message
+/// loop; Windows drops the hook by itself if that thread stops answering.
+pub fn record_keys(on: bool) {
+    let old = RECORD_HOOK.swap(0, Ordering::Relaxed);
+    if old != 0 {
+        let _ = unsafe { UnhookWindowsHookEx(HHOOK(old as _)) };
+    }
+    RECORD_MODS.store(0, Ordering::Relaxed);
+    if let Ok(mut slot) = RECORDED.lock() {
+        *slot = None;
+    }
+    if on && let Ok(h) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(record_proc), None, 0) } {
+        RECORD_HOOK.store(h.0 as isize, Ordering::Relaxed);
+    }
+}
+
+pub fn recorded_combo() -> Option<String> {
+    RECORDED.lock().ok()?.take()
+}
+
+/// Whether Windows would give this combo to us right now. The tray's own combos read as taken,
+/// so check for those first.
+pub fn hotkey_free(hk: &Hotkey) -> bool {
+    const PROBE: i32 = 0x7FFF;
+    let free = register_hotkey(PROBE, hk).is_ok();
+    if free {
+        unregister_hotkey(PROBE);
+    }
+    free
 }
 
 const RUN_KEY: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 
-pub fn autostart() -> bool {
+const APPROVED_KEY: windows::core::PCWSTR =
+    w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run");
+
+fn has_run_entry() -> bool {
     unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
@@ -168,6 +217,40 @@ pub fn autostart() -> bool {
     .is_ok()
 }
 
+/// Task Manager marks a switched-off entry with an odd first byte.
+fn approved_off(value: &[u8]) -> bool {
+    value.first().is_some_and(|b| b & 1 == 1)
+}
+
+/// Switched off in Task Manager or Windows settings; the Run entry is still there.
+pub fn autostart_blocked() -> bool {
+    let mut value = [0u8; 12];
+    let mut size = value.len() as u32;
+    let res = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            APPROVED_KEY,
+            w!("Snapling"),
+            windows::Win32::System::Registry::RRF_RT_REG_BINARY,
+            None,
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    has_run_entry() && res.is_ok() && approved_off(&value[..size as usize])
+}
+
+pub fn autostart() -> bool {
+    has_run_entry() && !autostart_blocked()
+}
+
+/// Keeps the Run entry on this exe after it was moved or updated.
+pub fn refresh_autostart() {
+    if has_run_entry() {
+        let _ = write_run_entry();
+    }
+}
+
 pub fn set_autostart(on: bool) -> Result<(), String> {
     let fail = |e| format!("автозапуск: {e:?}");
     unsafe {
@@ -179,6 +262,15 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
                 Err(fail(e))
             };
         }
+        // Lifts a block from Task Manager: the user has just asked for autostart here.
+        let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, APPROVED_KEY, w!("Snapling"));
+    }
+    write_run_entry()
+}
+
+fn write_run_entry() -> Result<(), String> {
+    let fail = |e| format!("автозапуск: {e:?}");
+    unsafe {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let value: Vec<u16> = format!("\"{}\"", exe.display())
             .encode_utf16()
@@ -234,6 +326,32 @@ fn open_dialog(folder: bool) -> Option<String> {
         CoTaskMemFree(Some(path.0 as *const _));
         text
     }
+}
+
+/// Language of the Windows interface, as a Snapling language code.
+pub fn ui_language() -> &'static str {
+    let id = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+    // Low 10 bits are the primary language; 0x19 is Russian.
+    if id & 0x3FF == 0x19 { "ru" } else { "en" }
+}
+
+/// Taskbar and tray use the light theme.
+pub fn taskbar_is_light() -> bool {
+    use windows::Win32::System::Registry::RRF_RT_REG_DWORD;
+    let mut value = 0u32;
+    let mut size = 4u32;
+    let res = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("SystemUsesLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut value).cast()),
+            Some(&mut size),
+        )
+    };
+    res.is_ok() && value == 1
 }
 
 /// Native «Сохранить как»; the file type comes from the extension the user picks.
@@ -304,7 +422,8 @@ pub fn ask(text: &str) -> bool {
 }
 
 pub fn register_hotkey(id: i32, hk: &Hotkey) -> Result<(), String> {
-    let vk = vk_code(&hk.key).ok_or_else(|| format!("{hk}: клавиша не поддерживается"))?;
+    let vk =
+        vk_code(&hk.key).ok_or_else(|| tf("{hk}: клавиша не поддерживается", &[("hk", &hk)]))?;
     let mut mods = MOD_NOREPEAT;
     for (on, m) in [
         (hk.ctrl, MOD_CONTROL),
@@ -318,11 +437,12 @@ pub fn register_hotkey(id: i32, hk: &Hotkey) -> Result<(), String> {
     }
     unsafe { RegisterHotKey(None, id, HOT_KEY_MODIFIERS(mods.0), vk) }.map_err(|e| {
         if e.code() == ERROR_HOTKEY_ALREADY_REGISTERED.to_hresult() {
-            format!(
-                "{hk} занято другой программой или Windows (какой именно — Windows не сообщает)"
+            tf(
+                "{hk} занято другой программой или Windows (какой именно — Windows не сообщает)",
+                &[("hk", &hk)],
             )
         } else {
-            format!("{hk} не зарегистрировано: {e}")
+            tf("{hk} не зарегистрировано: {e}", &[("hk", &hk), ("e", &e)])
         }
     })
 }
@@ -402,7 +522,7 @@ pub fn capture_virtual_screen() -> Result<Image, String> {
         let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
         let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
         if w <= 0 || h <= 0 {
-            return Err("пустой виртуальный экран".into());
+            return Err(t("пустой виртуальный экран").into());
         }
         let screen = GetDC(None);
         let mem = CreateCompatibleDC(Some(screen));
@@ -431,7 +551,10 @@ pub fn capture_virtual_screen() -> Result<Image, String> {
 
         blt.map_err(|e| format!("BitBlt: {e}"))?;
         if lines != h {
-            return Err(format!("GetDIBits: {lines} из {h} строк"));
+            return Err(tf(
+                "GetDIBits: {lines} из {h} строк",
+                &[("lines", &lines), ("h", &h)],
+            ));
         }
         for px in bgra.as_chunks_mut::<4>().0 {
             px[3] = 255;
@@ -547,6 +670,33 @@ mod tests {
         assert_eq!(vk_code("F24"), Some(0x87));
         assert_eq!(vk_code("PrintScreen"), Some(0x2C));
         assert_eq!(vk_code("Nope"), None);
+    }
+
+    #[test]
+    fn recorded_keys_become_canonical_combos() {
+        let bits = |vks: &[u32]| {
+            vks.iter()
+                .filter_map(|v| modifier_bit(*v))
+                .fold(0, |a, b| a | b)
+        };
+        let hk = recorded_hotkey(0x2C, bits(&[0xA2, 0xA1])).unwrap();
+        assert_eq!(hk.to_string(), "Ctrl+Shift+PrintScreen");
+        let hk = recorded_hotkey(0x53, bits(&[0x5B])).unwrap();
+        assert_eq!(hk.to_string(), "Win+S");
+        assert_eq!(modifier_bit(0x41), None);
+        assert!(recorded_hotkey(0xFF, 0).is_none());
+    }
+
+    #[test]
+    fn task_manager_off_state_is_an_odd_first_byte() {
+        assert!(approved_off(&[3, 0, 0, 0]));
+        assert!(!approved_off(&[2, 0, 0, 0]));
+        assert!(!approved_off(&[]));
+    }
+
+    #[test]
+    fn taskbar_theme_reads_without_panicking() {
+        let _ = taskbar_is_light();
     }
 
     #[test]

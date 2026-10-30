@@ -9,6 +9,7 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as icon;
 use snapling_core::config::{self, Config};
+use snapling_core::i18n::t;
 use std::sync::Arc;
 
 pub const ACCENT: Color32 = Color32::from_rgb(0x29, 0x5B, 0xE8);
@@ -80,6 +81,19 @@ pub fn pal(ctx: &egui::Context) -> Pal {
         Theme::Dark => DARK,
         Theme::Light => LIGHT,
     }
+}
+
+/// The user's extra language files.
+pub fn language_dir() -> std::path::PathBuf {
+    crate::app_dir("APPDATA").join("i18n")
+}
+
+pub fn apply_language(code: &str) {
+    #[cfg(windows)]
+    let system = snapling_win::ui_language();
+    #[cfg(not(windows))]
+    let system = "en";
+    snapling_core::i18n::set(code, system, &language_dir());
 }
 
 pub fn config_path() -> std::path::PathBuf {
@@ -348,19 +362,19 @@ fn caption_button(ui: &mut Ui, glyph: &str, hover: Color32, tip: &str) -> Respon
 /// The same three as quiet icon buttons, for a floating top bar.
 pub fn window_buttons(ui: &mut Ui, size: f32) {
     let ctx = ui.ctx().clone();
-    if ghost_icon(ui, icon::X, size, "Закрыть").clicked() {
+    if ghost_icon(ui, icon::X, size, t("Закрыть")).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
     let max = maximized(&ctx);
     let (glyph, tip) = if max {
-        (icon::CORNERS_IN, "Восстановить")
+        (icon::CORNERS_IN, t("Восстановить"))
     } else {
-        (icon::SQUARE, "Развернуть")
+        (icon::SQUARE, t("Развернуть"))
     };
     if ghost_icon(ui, glyph, size, tip).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!max));
     }
-    if ghost_icon(ui, icon::MINUS, size, "Свернуть").clicked() {
+    if ghost_icon(ui, icon::MINUS, size, t("Свернуть")).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
     }
 }
@@ -370,19 +384,19 @@ pub fn caption_buttons(ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let p = pal(&ctx);
     ui.spacing_mut().item_spacing.x = 0.0;
-    if caption_button(ui, icon::X, CLOSE_HOVER, "Закрыть").clicked() {
+    if caption_button(ui, icon::X, CLOSE_HOVER, t("Закрыть")).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
     let max = maximized(&ctx);
     let (glyph, tip) = if max {
-        (icon::CORNERS_IN, "Восстановить")
+        (icon::CORNERS_IN, t("Восстановить"))
     } else {
-        (icon::SQUARE, "Развернуть")
+        (icon::SQUARE, t("Развернуть"))
     };
     if caption_button(ui, glyph, p.ghost, tip).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!max));
     }
-    if caption_button(ui, icon::MINUS, p.ghost, "Свернуть").clicked() {
+    if caption_button(ui, icon::MINUS, p.ghost, t("Свернуть")).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
     }
 }
@@ -606,19 +620,27 @@ pub fn row(ui: &mut Ui, title: &str, hint: &str, add: impl FnOnce(&mut Ui)) {
         .show(ui, |ui| {
             let height = if hint.is_empty() { 34.0 } else { 40.0 };
             let size = vec2(ui.available_width(), height);
-            ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-                if hint.is_empty() {
-                    ui.label(title);
-                } else {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(title);
-                        ui.label(RichText::new(hint).size(12.5).color(p.muted));
-                    });
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), add);
+            // Controls first: the text gets what is left and is cut short, not pushed out.
+            ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), |ui| {
+                add(ui);
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    if hint.is_empty() {
+                        short(ui, RichText::new(title));
+                    } else {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            short(ui, RichText::new(title));
+                            short(ui, RichText::new(hint).size(12.5).color(p.muted));
+                        });
+                    }
+                });
             });
         });
+}
+
+/// One line of text, cut with an ellipsis when it does not fit.
+pub fn short(ui: &mut Ui, text: RichText) -> Response {
+    ui.add(egui::Label::new(text).truncate())
 }
 
 /// Hairline between rows, indented like the design.

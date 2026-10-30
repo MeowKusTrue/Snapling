@@ -1,3 +1,4 @@
+use crate::i18n::t;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -18,6 +19,10 @@ capture_screen = "Shift+PrintScreen"
 capture_window = "Alt+PrintScreen"
 # Повторить последнюю выделенную область
 repeat_region = "Ctrl+PrintScreen"
+# Выделить область и сразу распознать текст
+recognize = ""
+# Выделить область и сразу распознать и перевести
+translate = ""
 
 [save]
 # Папка для снимков. Пусто — «Изображения\Snapling».
@@ -40,6 +45,13 @@ copy = true
 open_editor = false
 # Выделил — сразу скопировано и закрыто, без панели действий.
 instant_copy = false
+# Уведомление после снимка: миниатюра и кнопки.
+toast = true
+
+[blur]
+# Размытие кистью при запуске: false — кубики, true — гаусс. Сила 0, 1 или 2.
+gauss = false
+strength = 0
 
 [sound]
 enabled = true
@@ -70,8 +82,12 @@ language = "auto"
 online = "off"
 
 [ui]
+# Язык: "auto" — как в системе, "ru", "en" или свой файл из папки i18n рядом с этим файлом.
+language = "auto"
 # Тема окон: "system", "dark", "light".
 theme = "system"
+# Значок в трее: "auto" — под цвет панели задач, "white", "black".
+tray_icon = "auto"
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -84,7 +100,16 @@ pub struct Config {
     pub privacy: Privacy,
     pub ocr: Ocr,
     pub translate: Translate,
+    pub blur: Blur,
     pub ui: Ui,
+}
+
+/// Starting style of the blur brush.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Blur {
+    pub gauss: bool,
+    pub strength: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -96,10 +121,31 @@ pub enum Theme {
     Light,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ui {
+    pub language: String,
     pub theme: Theme,
+    pub tray_icon: TrayIcon,
+}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Self {
+            language: "auto".into(),
+            theme: Theme::default(),
+            tray_icon: TrayIcon::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrayIcon {
+    #[default]
+    Auto,
+    White,
+    Black,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -108,6 +154,7 @@ pub struct Capture {
     pub copy: bool,
     pub open_editor: bool,
     pub instant_copy: bool,
+    pub toast: bool,
 }
 
 impl Default for Capture {
@@ -116,6 +163,7 @@ impl Default for Capture {
             copy: true,
             open_editor: false,
             instant_copy: false,
+            toast: true,
         }
     }
 }
@@ -247,6 +295,8 @@ pub struct Hotkeys {
     pub capture_screen: String,
     pub capture_window: String,
     pub repeat_region: String,
+    pub recognize: String,
+    pub translate: String,
 }
 
 impl Default for Hotkeys {
@@ -256,6 +306,8 @@ impl Default for Hotkeys {
             capture_screen: "Shift+PrintScreen".into(),
             capture_window: "Alt+PrintScreen".into(),
             repeat_region: "Ctrl+PrintScreen".into(),
+            recognize: String::new(),
+            translate: String::new(),
         }
     }
 }
@@ -266,22 +318,40 @@ pub enum Action {
     CaptureScreen,
     CaptureWindow,
     RepeatRegion,
+    RecognizeText,
+    TranslateText,
 }
 
 impl Action {
-    pub const ALL: [Action; 4] = [
+    pub const ALL: [Action; 6] = [
         Action::CaptureRegion,
         Action::CaptureScreen,
         Action::CaptureWindow,
         Action::RepeatRegion,
+        Action::RecognizeText,
+        Action::TranslateText,
     ];
+
+    /// Key in the `[hotkeys]` section.
+    pub fn key(self) -> &'static str {
+        match self {
+            Action::CaptureRegion => "capture_region",
+            Action::CaptureScreen => "capture_screen",
+            Action::CaptureWindow => "capture_window",
+            Action::RepeatRegion => "repeat_region",
+            Action::RecognizeText => "recognize",
+            Action::TranslateText => "translate",
+        }
+    }
 
     pub fn title(self) -> &'static str {
         match self {
-            Action::CaptureRegion => "Выделить область",
-            Action::CaptureScreen => "Весь экран",
-            Action::CaptureWindow => "Активное окно",
-            Action::RepeatRegion => "Повторить область",
+            Action::CaptureRegion => t("Выделить область"),
+            Action::CaptureScreen => t("Весь экран"),
+            Action::CaptureWindow => t("Активное окно"),
+            Action::RepeatRegion => t("Повторить область"),
+            Action::RecognizeText => t("Распознать текст"),
+            Action::TranslateText => t("Текст + перевод"),
         }
     }
 }
@@ -293,7 +363,20 @@ impl Hotkeys {
             Action::CaptureScreen => &self.capture_screen,
             Action::CaptureWindow => &self.capture_window,
             Action::RepeatRegion => &self.repeat_region,
+            Action::RecognizeText => &self.recognize,
+            Action::TranslateText => &self.translate,
         }
+    }
+
+    pub fn set_combo(&mut self, a: Action, combo: String) {
+        *match a {
+            Action::CaptureRegion => &mut self.capture_region,
+            Action::CaptureScreen => &mut self.capture_screen,
+            Action::CaptureWindow => &mut self.capture_window,
+            Action::RepeatRegion => &mut self.repeat_region,
+            Action::RecognizeText => &mut self.recognize,
+            Action::TranslateText => &mut self.translate,
+        } = combo;
     }
 }
 

@@ -11,6 +11,8 @@ use eframe::egui::{
 use egui_phosphor::regular as icon;
 use snapling_core::annotate::Pixmap;
 use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
+use snapling_core::config::Config;
+use snapling_core::i18n::{n, t, tf};
 use std::path::{Path, PathBuf};
 
 type SaveAs = fn(&[u8], u32, u32, &str) -> Result<Option<PathBuf>, String>;
@@ -57,27 +59,27 @@ enum Tool {
 }
 
 const TOOLS: [(Tool, &str, &str, Key); 11] = [
-    (Tool::Select, icon::CURSOR, "Выбор", Key::V),
-    (Tool::Arrow, icon::ARROW_UP_RIGHT, "Стрелка", Key::A),
-    (Tool::Line, icon::LINE_SEGMENT, "Линия", Key::L),
-    (Tool::Rect, icon::SQUARE, "Прямоугольник", Key::R),
-    (Tool::Ellipse, icon::CIRCLE, "Эллипс", Key::O),
-    (Tool::Pen, icon::PENCIL_SIMPLE, "Перо", Key::P),
-    (Tool::Marker, icon::HIGHLIGHTER, "Маркер", Key::M),
-    (Tool::Text, icon::TEXT_T, "Текст", Key::T),
-    (Tool::Step, icon::NUMBER_CIRCLE_ONE, "Нумерация", Key::N),
-    (Tool::Pixelate, icon::CHECKERBOARD, "Размытие", Key::B),
-    (Tool::Crop, icon::CROP, "Обрезка", Key::C),
+    (Tool::Select, icon::CURSOR, n("Выбор"), Key::V),
+    (Tool::Arrow, icon::ARROW_UP_RIGHT, n("Стрелка"), Key::A),
+    (Tool::Line, icon::LINE_SEGMENT, n("Линия"), Key::L),
+    (Tool::Rect, icon::SQUARE, n("Прямоугольник"), Key::R),
+    (Tool::Ellipse, icon::CIRCLE, n("Эллипс"), Key::O),
+    (Tool::Pen, icon::PENCIL_SIMPLE, n("Перо"), Key::P),
+    (Tool::Marker, icon::HIGHLIGHTER, n("Маркер"), Key::M),
+    (Tool::Text, icon::TEXT_T, n("Текст"), Key::T),
+    (Tool::Step, icon::NUMBER_CIRCLE_ONE, n("Нумерация"), Key::N),
+    (Tool::Pixelate, icon::CHECKERBOARD, n("Размытие"), Key::B),
+    (Tool::Crop, icon::CROP, n("Обрезка"), Key::C),
 ];
 
 pub fn run(file: &Path, hooks: Hooks) {
     let raw = match annotate::read_raw(file) {
         Ok(r) => r,
-        Err(e) => return (hooks.warn)(&format!("Не удалось открыть снимок.\n{e}")),
+        Err(e) => return (hooks.warn)(&tf("Не удалось открыть снимок.\n{e}", &[("e", &e)])),
     };
     let _ = std::fs::remove_file(file);
     let Some(base) = annotate::pixmap_from_bgra(&raw.bgra, raw.width, raw.height) else {
-        return (hooks.warn)("Не удалось открыть снимок: неверный размер.");
+        return (hooks.warn)(t("Не удалось открыть снимок: неверный размер."));
     };
     let (w, h) = (raw.width as f32, raw.height as f32);
     let big = w > 1040.0 || h > 700.0;
@@ -86,7 +88,7 @@ pub fn run(file: &Path, hooks: Hooks) {
         (h + 180.0).clamp(700.0, 900.0),
     ];
     let mut viewport =
-        ui::viewport("Snapling — редактор", size, [1000.0, 700.0]).with_maximized(big);
+        ui::viewport(t("Snapling — редактор"), size, [1000.0, 700.0]).with_maximized(big);
     viewport.drag_and_drop = Some(false);
     let options = eframe::NativeOptions {
         viewport,
@@ -102,7 +104,7 @@ pub fn run(file: &Path, hooks: Hooks) {
         }),
     );
     if let Err(e) = res {
-        warn(&format!("Редактор не запустился.\n{e}"));
+        warn(&tf("Редактор не запустился.\n{e}", &[("e", &e)]));
     }
 }
 
@@ -144,7 +146,15 @@ impl Editor {
             color: COLORS[0],
             size: 5.0,
             head: Head::default(),
-            blur: BlurStyle::default(),
+            blur: {
+                let b = Config::load_or_create(&ui::config_path())
+                    .unwrap_or_default()
+                    .blur;
+                BlurStyle {
+                    gauss: b.gauss,
+                    strength: b.strength.min(2),
+                }
+            },
             drag: None,
             typing: None,
             picked: None,
@@ -191,11 +201,11 @@ impl Editor {
         let (bgra, w, h) = self.export();
         match (self.hooks.copy)(&bgra, w, h) {
             Ok(()) => {
-                self.status = format!("Скопировано в буфер · {w}×{h}");
+                self.status = tf("Скопировано в буфер · {w}×{h}", &[("w", &w), ("h", &h)]);
                 true
             }
             Err(e) => {
-                self.status = format!("Не удалось скопировать: {e}");
+                self.status = tf("Не удалось скопировать: {e}", &[("e", &e)]);
                 false
             }
         }
@@ -205,17 +215,17 @@ impl Editor {
         let (bgra, w, h) = self.export();
         // ponytail: encodes on the UI thread (a 4K PNG freezes ~0.3 s); move to a thread if it bothers.
         self.status = match (self.hooks.save)(&bgra, w, h, &self.app) {
-            Ok(p) => format!("Сохранено: {}", p.display()),
-            Err(e) => format!("Не удалось сохранить: {e}"),
+            Ok(p) => tf("Сохранено: {0}", &[("0", &p.display())]),
+            Err(e) => tf("Не удалось сохранить: {e}", &[("e", &e)]),
         };
     }
 
     fn save_as(&mut self) {
         let (bgra, w, h) = self.export();
         self.status = match (self.hooks.save_as)(&bgra, w, h, &self.app) {
-            Ok(Some(p)) => format!("Сохранено: {}", p.display()),
+            Ok(Some(p)) => tf("Сохранено: {0}", &[("0", &p.display())]),
             Ok(None) => String::new(),
-            Err(e) => format!("Не удалось сохранить: {e}"),
+            Err(e) => tf("Не удалось сохранить: {e}", &[("e", &e)]),
         };
     }
 
@@ -311,18 +321,6 @@ impl Editor {
                     ui.allocate_ui_with_layout(size, row, |ui| {
                         ui.add_space(16.0);
                         ui::draw_logo(ui, 22.0);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            ui.add_space(9.0);
-                            let name = if self.app.is_empty() {
-                                "Снимок".to_string()
-                            } else {
-                                format!("Снимок · {}", self.app)
-                            };
-                            ui.label(RichText::new(name).font(ui::semi(14.0)));
-                            let sub = format!("{w} × {h}");
-                            ui.label(RichText::new(sub).size(12.0).color(p.muted));
-                        });
                         let right = egui::Layout::right_to_left(egui::Align::Center);
                         ui.with_layout(right, |ui| {
                             ui.add_space(10.0);
@@ -330,9 +328,24 @@ impl Editor {
                             let (d, _) = ui.allocate_exact_size(vec2(9.0, 22.0), Sense::hover());
                             ui.painter()
                                 .vline(d.center().x, d.y_range(), Stroke::new(1.0, p.line));
-                            copy = ui::primary(ui, "Копировать и закрыть", None, 38.0).clicked();
-                            save_as = ui::tone(ui, "Сохранить как…", None, 38.0).clicked();
-                            text = ui::ghost_text(ui, "Текст и перевод", 38.0).clicked();
+                            copy = ui::primary(ui, t("Копировать и закрыть"), None, 38.0).clicked();
+                            save_as = ui::tone(ui, t("Сохранить как…"), None, 38.0).clicked();
+                            text = ui::ghost_text(ui, t("Текст и перевод"), 38.0).clicked();
+                            let left = egui::Layout::left_to_right(egui::Align::Center);
+                            ui.with_layout(left, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 1.0;
+                                    ui.add_space(9.0);
+                                    let name = if self.app.is_empty() {
+                                        t("Снимок").to_string()
+                                    } else {
+                                        tf("Снимок · {0}", &[("0", &self.app)])
+                                    };
+                                    ui::short(ui, RichText::new(name).font(ui::semi(14.0)));
+                                    let sub = format!("{w} × {h}");
+                                    ui::short(ui, RichText::new(sub).size(12.0).color(p.muted));
+                                });
+                            });
                         });
                     });
                 });
@@ -346,7 +359,7 @@ impl Editor {
         if text {
             let (bgra, w, h) = self.export();
             (self.hooks.text)(&bgra, w, h);
-            self.status = "Распознаю текст…".into();
+            self.status = t("Распознаю текст…").into();
         }
     }
 
@@ -362,7 +375,7 @@ impl Editor {
                 Self::panel(ctx, 16, Margin::same(6)).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     for (tool, glyph, tip, _) in TOOLS {
-                        let name = format!("{tip} ({})", key_name(tool));
+                        let name = format!("{} ({})", t(tip), key_name(tool));
                         if ui::rail_button(ui, glyph, self.tool == tool, true, &name).clicked() {
                             pick = Some(tool);
                         }
@@ -378,7 +391,7 @@ impl Editor {
                         icon::ARROW_COUNTER_CLOCKWISE,
                         false,
                         self.history.can_undo(),
-                        "Отменить (Ctrl+Z)",
+                        t("Отменить (Ctrl+Z)"),
                     )
                     .clicked();
                     redo = ui::rail_button(
@@ -386,7 +399,7 @@ impl Editor {
                         icon::ARROW_CLOCKWISE,
                         false,
                         self.history.can_redo(),
-                        "Повторить (Ctrl+Y)",
+                        t("Повторить (Ctrl+Y)"),
                     )
                     .clicked();
                 });
@@ -405,18 +418,21 @@ impl Editor {
     fn inspector_title(&self) -> &'static str {
         if let Some(e) = self.picked.and_then(|i| self.history.doc.elements.get(i)) {
             return match e.kind {
-                Kind::Arrow(..) => "Стрелка",
-                Kind::Line(..) => "Линия",
-                Kind::Rect(..) => "Прямоугольник",
-                Kind::Ellipse(..) => "Эллипс",
-                Kind::Pen(..) => "Перо",
-                Kind::Marker(..) => "Маркер",
-                Kind::Text(..) => "Текст",
-                Kind::Step(..) => "Нумерация",
-                Kind::Pixelate(..) | Kind::Blur(..) => "Размытие",
+                Kind::Arrow(..) => t("Стрелка"),
+                Kind::Line(..) => t("Линия"),
+                Kind::Rect(..) => t("Прямоугольник"),
+                Kind::Ellipse(..) => t("Эллипс"),
+                Kind::Pen(..) => t("Перо"),
+                Kind::Marker(..) => t("Маркер"),
+                Kind::Text(..) => t("Текст"),
+                Kind::Step(..) => t("Нумерация"),
+                Kind::Pixelate(..) | Kind::Blur(..) => t("Размытие"),
             };
         }
-        TOOLS.iter().find(|t| t.0 == self.tool).map_or("", |t| t.2)
+        TOOLS
+            .iter()
+            .find(|x| x.0 == self.tool)
+            .map_or("", |x| t(x.2))
     }
 
     fn inspector(&mut self, ctx: &egui::Context) {
@@ -450,16 +466,16 @@ impl Editor {
                     ui.label(RichText::new(title).font(ui::semi(15.0)));
                     if bare {
                         let hint = if self.tool == Tool::Crop {
-                            "Обведи рамкой. Клик — сбросить обрезку."
+                            t("Обведи рамкой. Клик — сбросить обрезку.")
                         } else {
-                            "Кликни по фигуре: двигай, меняй цвет и толщину, Delete — удалить."
+                            t("Кликни по фигуре: двигай, меняй цвет и толщину, Delete — удалить.")
                         };
                         ui.label(RichText::new(hint).size(12.5).color(p.muted));
                         return;
                     }
                     if !blur {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("Цвет").size(12.5).color(p.muted));
+                        ui.label(RichText::new(t("Цвет")).size(12.5).color(p.muted));
                         for row in COLORS.chunks(4) {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 16.0;
@@ -472,8 +488,8 @@ impl Editor {
                         }
                     } else {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("Вид").size(12.5).color(p.muted));
-                        let items = ["Кубики", "Гаусс"];
+                        ui.label(RichText::new(t("Вид")).size(12.5).color(p.muted));
+                        let items = [t("Кубики"), t("Гаусс")];
                         let now = usize::from(self.blur.gauss);
                         if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
                             new_blur = Some(BlurStyle {
@@ -481,8 +497,8 @@ impl Editor {
                                 ..self.blur
                             });
                         }
-                        ui.label(RichText::new("Сила").size(12.5).color(p.muted));
-                        let items = ["Слабая", "Средняя", "Сильная"];
+                        ui.label(RichText::new(t("Сила")).size(12.5).color(p.muted));
+                        let items = [t("Слабая"), t("Средняя"), t("Сильная")];
                         let now = usize::from(self.blur.strength);
                         if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
                             new_blur = Some(BlurStyle {
@@ -492,7 +508,7 @@ impl Editor {
                         }
                     }
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Толщина").size(12.5).color(p.muted));
+                    ui.label(RichText::new(t("Толщина")).size(12.5).color(p.muted));
                     ui.spacing_mut().slider_width = 216.0;
                     let r = ui.add(egui::Slider::new(&mut size, 1.0..=16.0).show_value(false));
                     if r.drag_started() || r.clicked() {
@@ -502,10 +518,10 @@ impl Editor {
                     }
                     if arrow {
                         ui.add_space(6.0);
-                        ui.label(RichText::new("Наконечник").size(12.5).color(p.muted));
+                        ui.label(RichText::new(t("Наконечник")).size(12.5).color(p.muted));
                         let heads = [Head::Sharp, Head::Soft, Head::Double];
                         let now = heads.iter().position(|h| *h == head).unwrap_or(0);
-                        let items = ["Острый", "Мягкий", "Двойной"];
+                        let items = [t("Острый"), t("Мягкий"), t("Двойной")];
                         if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
                             new_head = Some(heads[i]);
                         }
@@ -564,15 +580,15 @@ impl Editor {
                 Self::panel(ctx, 12, Margin::same(4)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        out = ui::ghost_icon(ui, icon::MINUS, 30.0, "Уменьшить").clicked();
+                        out = ui::ghost_icon(ui, icon::MINUS, 30.0, t("Уменьшить")).clicked();
                         let label = RichText::new(format!("{percent}%"))
                             .font(ui::mono(13.0))
                             .color(p.soft);
                         let b = egui::Button::new(label)
                             .frame(false)
                             .min_size(vec2(52.0, 30.0));
-                        fit = ui.add(b).on_hover_text("По размеру окна").clicked();
-                        into = ui::ghost_icon(ui, icon::PLUS, 30.0, "Увеличить").clicked();
+                        fit = ui.add(b).on_hover_text(t("По размеру окна")).clicked();
+                        into = ui::ghost_icon(ui, icon::PLUS, 30.0, t("Увеличить")).clicked();
                     });
                 });
             });
@@ -806,7 +822,7 @@ impl Editor {
                     .frame(egui::Frame::NONE)
                     .desired_rows(1)
                     .desired_width(width)
-                    .hint_text("Текст");
+                    .hint_text(t("Текст"));
                 let r = egui::Frame::new()
                     .stroke(Stroke::new(1.0, ACCENT))
                     .corner_radius(4)

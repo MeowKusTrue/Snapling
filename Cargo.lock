@@ -3409,6 +3409,7 @@ dependencies = [
  "ort",
  "serde_json",
  "sha2",
+ "snapling-core",
  "tokenizers",
  "ureq",
 ]

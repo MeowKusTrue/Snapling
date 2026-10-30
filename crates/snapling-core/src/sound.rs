@@ -2,6 +2,7 @@
 //! `tools/sound_design.py`. System pack: freedesktop sound theme, see THIRD_PARTY_NOTICES.md.
 
 use crate::config::{SoundCfg, SoundPack};
+use crate::i18n::{t, tf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sound {
@@ -53,7 +54,7 @@ const MAX_FILE: usize = 10 * 1024 * 1024;
 /// Where the sample data of a WAV lies, and its format tag and bit depth.
 fn wav_data(w: &[u8]) -> Result<(std::ops::Range<usize>, u16, u16), String> {
     if w.len() < 12 || &w[..4] != b"RIFF" || &w[8..12] != b"WAVE" {
-        return Err("это не файл WAV".into());
+        return Err(t("это не файл WAV").into());
     }
     let mut at = 12;
     let mut format = None;
@@ -74,14 +75,14 @@ fn wav_data(w: &[u8]) -> Result<(std::ops::Range<usize>, u16, u16), String> {
                 format = Some((tag, bits));
             }
             b"data" => {
-                let (tag, bits) = format.ok_or("в файле WAV нет описания формата")?;
+                let (tag, bits) = format.ok_or(t("в файле WAV нет описания формата"))?;
                 return Ok((body..end, tag, bits));
             }
             _ => {}
         }
         at = body.saturating_add(size + (size & 1));
     }
-    Err("в файле WAV нет звука".into())
+    Err(t("в файле WAV нет звука").into())
 }
 
 /// Own WAV scaled by `volume`: integer PCM of 16, 24, 32 bits or 32-bit float.
@@ -113,8 +114,9 @@ pub fn scale_wav(mut w: Vec<u8>, volume: u8) -> Result<Vec<u8>, String> {
             }
         }
         _ => {
-            return Err(format!(
-                "формат WAV не поддерживается: код {tag}, {bits} бит"
+            return Err(tf(
+                "формат WAV не поддерживается: код {tag}, {bits} бит",
+                &[("tag", &tag), ("bits", &bits)],
             ));
         }
     }
@@ -134,7 +136,7 @@ pub fn load(cfg: &SoundCfg, sound: Sound) -> Result<Vec<u8>, String> {
     }
     let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
     if bytes.len() > MAX_FILE {
-        return Err(format!("{file}: файл больше 10 МБ"));
+        return Err(tf("{file}: файл больше 10 МБ", &[("file", &file)]));
     }
     scale_wav(bytes, cfg.volume).map_err(|e| format!("{file}: {e}"))
 }

@@ -2,6 +2,7 @@
 //! Shapes follow EiSen app/src/lib/editor (elements.ts, store.ts, exportPipeline.ts);
 //! rendering is tiny-skia so the export is the same on every OS.
 
+use crate::i18n::tf;
 pub use ab_glyph::FontRef;
 use ab_glyph::{Font, OutlineCurve, ScaleFont};
 use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Rect, Stroke, Transform};
@@ -805,7 +806,7 @@ pub struct Raw {
 }
 
 pub fn read_raw(path: &std::path::Path) -> Result<Raw, String> {
-    let bad = || format!("{}: повреждённый файл снимка", path.display());
+    let bad = || tf("{0}: повреждённый файл снимка", &[("0", &path.display())]);
     let mut d = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if d.len() < 18 || &d[..8] != b"SNAPRAW1" {
         return Err(bad());

@@ -1,4 +1,5 @@
 use crate::config::{Action, Hotkeys};
+use crate::i18n::{t, tf};
 use std::fmt;
 
 const NAMED: &[&str] = &[
@@ -51,20 +52,24 @@ impl Hotkey {
                 "win" | "super" | "meta" => &mut hk.win,
                 _ => {
                     if !hk.key.is_empty() {
-                        return Err(format!("«{s}»: больше одной клавиши"));
+                        return Err(tf("«{s}»: больше одной клавиши", &[("s", &s)]));
                     }
-                    hk.key = canonical_key(part)
-                        .ok_or_else(|| format!("«{s}»: неизвестная клавиша «{part}»"))?;
+                    hk.key = canonical_key(part).ok_or_else(|| {
+                        tf(
+                            "«{s}»: неизвестная клавиша «{part}»",
+                            &[("s", &s), ("part", &part)],
+                        )
+                    })?;
                     continue;
                 }
             };
             if *flag {
-                return Err(format!("«{s}»: модификатор повторяется"));
+                return Err(tf("«{s}»: модификатор повторяется", &[("s", &s)]));
             }
             *flag = true;
         }
         if hk.key.is_empty() {
-            return Err(format!("«{s}»: нет основной клавиши"));
+            return Err(tf("«{s}»: нет основной клавиши", &[("s", &s)]));
         }
         Ok(hk)
     }
@@ -110,6 +115,14 @@ impl fmt::Display for Hotkey {
     }
 }
 
+/// The other action already bound to this combo.
+pub fn taken_by(hotkeys: &Hotkeys, action: Action, hk: &Hotkey) -> Option<Action> {
+    Action::ALL
+        .into_iter()
+        .filter(|a| *a != action)
+        .find(|a| Hotkey::parse(hotkeys.combo(*a)).is_ok_and(|h| h == *hk))
+}
+
 /// Parsed bindings plus readable problems. Syntax errors and duplicates are dropped;
 /// OS-reserved combos are kept (registration may still work) but warned about.
 pub fn check(
@@ -131,10 +144,9 @@ pub fn check(
             }
         };
         if let Some((other, _)) = ok.iter().find(|(_, h)| *h == hk) {
-            problems.push(format!(
-                "«{}»: {hk} уже назначено на «{}»",
-                a.title(),
-                other.title()
+            problems.push(tf(
+                "«{0}»: {hk} уже назначено на «{1}»",
+                &[("hk", &hk), ("0", &a.title()), ("1", &other.title())],
             ));
             continue;
         }
@@ -155,24 +167,24 @@ pub fn reserved_on_windows(hk: &Hotkey) -> Option<&'static str> {
         .and_then(|n| n.parse::<u8>().ok())
         .is_some_and(|n| n >= 13);
     Some(match (hk.ctrl, hk.alt, hk.shift, hk.win, k) {
-        (false, false, true, true, "S") => "занято «Ножницами» Windows",
-        (false, false, false, true, "PrintScreen") => "снимок экрана Windows в «Изображения»",
-        (false, true, false, true, "PrintScreen" | "R") => "занято Xbox Game Bar",
-        (_, _, _, true, _) => "сочетания с Win часто заняты Windows",
-        (true, true, false, false, "Delete") => "системное сочетание Windows",
-        (true, false, true, false, "Escape") => "открывает диспетчер задач",
-        (true, false, false, false, "Escape") => "открывает меню «Пуск»",
-        (false, true, false, false, "Tab" | "F4" | "Escape") => "системное сочетание Windows",
+        (false, false, true, true, "S") => t("занято «Ножницами» Windows"),
+        (false, false, false, true, "PrintScreen") => t("снимок экрана Windows в «Изображения»"),
+        (false, true, false, true, "PrintScreen" | "R") => t("занято Xbox Game Bar"),
+        (_, _, _, true, _) => t("сочетания с Win часто заняты Windows"),
+        (true, true, false, false, "Delete") => t("системное сочетание Windows"),
+        (true, false, true, false, "Escape") => t("открывает диспетчер задач"),
+        (true, false, false, false, "Escape") => t("открывает меню «Пуск»"),
+        (false, true, false, false, "Tab" | "F4" | "Escape") => t("системное сочетание Windows"),
         (
             true,
             false,
             false,
             false,
             "A" | "C" | "F" | "N" | "O" | "P" | "S" | "T" | "V" | "W" | "X" | "Y" | "Z",
-        ) => "перехватит стандартное сочетание во всех программах",
+        ) => t("перехватит стандартное сочетание во всех программах"),
         (false, false, false, false, "PrintScreen" | "Pause" | "ScrollLock") => return None,
         (false, false, false, false, _) if !fkey_high => {
-            "без модификаторов клавиша перестанет работать в других программах"
+            t("без модификаторов клавиша перестанет работать в других программах")
         }
         _ => return None,
     })
@@ -183,12 +195,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn taken_by_finds_the_other_action_only() {
+        let h = Hotkeys::default();
+        let screen = Hotkey::parse("shift+printscreen").unwrap();
+        assert_eq!(
+            taken_by(&h, Action::CaptureRegion, &screen),
+            Some(Action::CaptureScreen)
+        );
+        assert_eq!(taken_by(&h, Action::CaptureScreen, &screen), None);
+    }
+
+    #[test]
     fn check_reports_bad_duplicate_and_reserved() {
         let hk = Hotkeys {
             capture_region: "PrintScreen".into(),
             capture_screen: "printscreen".into(),
             capture_window: "Ctrl+Foo".into(),
             repeat_region: "Win+Shift+S".into(),
+            ..Hotkeys::default()
         };
         let (ok, problems) = check(&hk, reserved_on_windows);
         let actions: Vec<Action> = ok.iter().map(|(a, _)| *a).collect();

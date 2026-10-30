@@ -4,6 +4,7 @@
 use crate::ui;
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use egui_phosphor::regular as icon;
+use snapling_core::i18n::{t, tf};
 use snapling_translate::{Dir, Model};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -16,6 +17,8 @@ pub struct Hooks {
     pub online: bool,
     pub get_key: fn() -> Option<String>,
     pub set_key: fn(&str) -> Result<(), String>,
+    /// Proxy for DeepL requests, from Credential Manager: it may hold a password.
+    pub get_proxy: fn() -> Option<String>,
 }
 
 type Reply = (u64, Result<String, String>);
@@ -26,15 +29,19 @@ pub fn run(file: &Path, hooks: Hooks) {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
-            return (hooks.warn)(&format!(
-                "Не удалось открыть текст.\n{}: {e}",
-                file.display()
+            return (hooks.warn)(&tf(
+                "Не удалось открыть текст.\n{0}: {e}",
+                &[("e", &e), ("0", &file.display())],
             ));
         }
     };
     let _ = std::fs::remove_file(file);
     let options = eframe::NativeOptions {
-        viewport: ui::viewport("Snapling — текст и перевод", [400.0, 600.0], [360.0, 480.0]),
+        viewport: ui::viewport(
+            t("Snapling — текст и перевод"),
+            [400.0, 600.0],
+            [360.0, 480.0],
+        ),
         ..Default::default()
     };
     let warn = hooks.warn;
@@ -47,17 +54,23 @@ pub fn run(file: &Path, hooks: Hooks) {
         }),
     );
     if let Err(e) = res {
-        warn(&format!("Окно перевода не запустилось.\n{e}"));
+        warn(&tf("Окно перевода не запустилось.\n{e}", &[("e", &e)]));
     }
 }
 
 /// Loads each direction's model once and translates requests in order; a key = DeepL.
-fn worker(models: PathBuf, rx: Receiver<Job>, tx: Sender<Reply>, ctx: egui::Context) {
+fn worker(
+    models: PathBuf,
+    proxy: fn() -> Option<String>,
+    rx: Receiver<Job>,
+    tx: Sender<Reply>,
+    ctx: egui::Context,
+) {
     let mut loaded: Vec<(Dir, Model)> = Vec::new();
     for (id, dir, text, key) in rx {
         let res = (|| {
             if let Some(key) = key {
-                return snapling_translate::deepl(&key, &text, dir);
+                return snapling_translate::deepl(&key, &text, dir, proxy().as_deref());
             }
             if !loaded.iter().any(|(d, _)| *d == dir) {
                 loaded.push((dir, Model::load(&models, dir)?));
@@ -101,8 +114,8 @@ impl Window {
     fn new(original: String, hooks: Hooks, ctx: egui::Context) -> Self {
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
-        let models = hooks.models.clone();
-        std::thread::spawn(move || worker(models, wrx, wtx, ctx));
+        let (models, proxy) = (hooks.models.clone(), hooks.get_proxy);
+        std::thread::spawn(move || worker(models, proxy, wrx, wtx, ctx));
         let mut w = Self {
             dir: snapling_translate::detect(&original),
             original,
@@ -132,9 +145,9 @@ impl Window {
         self.pending = Some(self.next_id);
         self.pending_deepl = key.is_some();
         self.status = if key.is_some() {
-            "Отправляю в DeepL…"
+            t("Отправляю в DeepL…")
         } else {
-            "Перевожу офлайн…"
+            t("Перевожу офлайн…")
         }
         .into();
         let _ = self
@@ -153,8 +166,8 @@ impl Window {
 
     fn copy(&mut self) {
         self.status = match (self.hooks.copy_text)(&self.translation) {
-            Ok(()) => "Перевод скопирован в буфер".into(),
-            Err(e) => format!("Не удалось скопировать: {e}"),
+            Ok(()) => t("Перевод скопирован в буфер").into(),
+            Err(e) => tf("Не удалось скопировать: {e}", &[("e", &e)]),
         };
     }
 
@@ -165,14 +178,16 @@ impl Window {
         let mut save = false;
         let resp = egui::Modal::new(egui::Id::new("deepl-key")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading("Ключ DeepL API");
-            ui.label(
+            ui.heading(t("Ключ DeepL API"));
+            ui.label(t(
                 "Ключ есть в аккаунте DeepL → API Keys. Бесплатный ключ оканчивается на «:fx».",
-            );
+            ));
             ui.label(
-                egui::RichText::new("Хранится в диспетчере учётных данных Windows, не в файлах.")
-                    .small()
-                    .color(ui::pal(ctx).muted),
+                egui::RichText::new(t(
+                    "Хранится в диспетчере учётных данных Windows, не в файлах.",
+                ))
+                .small()
+                .color(ui::pal(ctx).muted),
             );
             let r = ui.add(
                 egui::TextEdit::singleline(key)
@@ -181,9 +196,9 @@ impl Window {
             );
             r.request_focus();
             ui.horizontal(|ui| {
-                save = ui.button("Сохранить").clicked()
+                save = ui.button(t("Сохранить")).clicked()
                     || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
-                if ui.button("Отмена").clicked() {
+                if ui.button(t("Отмена")).clicked() {
                     ui.close();
                 }
             });
@@ -208,13 +223,11 @@ impl Window {
         let mut send = false;
         let resp = egui::Modal::new(egui::Id::new("deepl-confirm")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading("Отправить в DeepL?");
-            ui.label(format!(
-                "Текст ({chars} символов) уйдёт на сервер DeepL для перевода. Офлайн-перевод ничего не отправляет."
-            ));
+            ui.heading(t("Отправить в DeepL?"));
+            ui.label(tf("Текст ({chars} символов) уйдёт на сервер DeepL для перевода. Офлайн-перевод ничего не отправляет.", &[("chars", &chars)]));
             ui.horizontal(|ui| {
-                send = ui.button("Отправить").clicked();
-                if ui.button("Отмена").clicked() {
+                send = ui.button(t("Отправить")).clicked();
+                if ui.button(t("Отмена")).clicked() {
                     ui.close();
                 }
             });
@@ -244,7 +257,7 @@ impl Window {
                         self.copy();
                     }
                 }
-                Err(e) => self.status = format!("Ошибка перевода: {e}"),
+                Err(e) => self.status = tf("Ошибка перевода: {e}", &[("e", &e)]),
             }
         }
     }
@@ -267,8 +280,8 @@ impl Window {
 
     fn copy_original(&mut self) {
         self.status = match (self.hooks.copy_text)(&self.original) {
-            Ok(()) => "Текст скопирован в буфер".into(),
-            Err(e) => format!("Не удалось скопировать: {e}"),
+            Ok(()) => t("Текст скопирован в буфер").into(),
+            Err(e) => tf("Не удалось скопировать: {e}", &[("e", &e)]),
         };
     }
 }
@@ -301,9 +314,9 @@ impl eframe::App for Window {
                 let top = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(width, 32.0));
                 ui::drag_area(ui, top);
                 ui.horizontal(|ui| {
-                    ui::heading(ui, "Текст", 17.0);
+                    ui::heading(ui, t("Текст"), 17.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::ghost_icon(ui, icon::X, 32.0, "Закрыть").clicked() {
+                        if ui::ghost_icon(ui, icon::X, 32.0, t("Закрыть")).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                         egui::Frame::new()
@@ -323,19 +336,20 @@ impl eframe::App for Window {
                 );
                 ui.horizontal(|ui| {
                     let line = 118.0;
-                    if ui::primary(ui, "Копировать текст", Some(width - line - 8.0), 40.0).clicked()
+                    if ui::primary(ui, t("Копировать текст"), Some(width - line - 8.0), 40.0)
+                        .clicked()
                     {
                         self.copy_original();
                     }
-                    if ui::tone(ui, "В одну строку", Some(line), 40.0).clicked() {
+                    if ui::tone(ui, t("В одну строку"), Some(line), 40.0).clicked() {
                         self.one_line();
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui::heading(ui, "Перевод", 17.0);
+                    ui::heading(ui, t("Перевод"), 17.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.hooks.online {
-                            let items = ["На устройстве", "DeepL"];
+                            let items = [t("На устройстве"), "DeepL"];
                             let now = usize::from(self.via_deepl);
                             match ui::segmented(ui, &items, now, 28.0) {
                                 Some(1) => self.deepl(),
@@ -347,8 +361,8 @@ impl eframe::App for Window {
                 });
                 ui.horizontal(|ui| {
                     let (from, to) = match self.dir {
-                        Dir::RuEn => ("Русский", "Английский"),
-                        Dir::EnRu => ("Английский", "Русский"),
+                        Dir::RuEn => (t("Русский"), t("Английский")),
+                        Dir::EnRu => (t("Английский"), t("Русский")),
                     };
                     let w = (width - 36.0 - 16.0) / 2.0;
                     let pill = |ui: &mut egui::Ui, text: &str| {
@@ -365,7 +379,7 @@ impl eframe::App for Window {
                         resp.clicked()
                     };
                     let a = pill(ui, from);
-                    let b = ui::ghost_icon(ui, icon::ARROWS_LEFT_RIGHT, 36.0, "Поменять языки");
+                    let b = ui::ghost_icon(ui, icon::ARROWS_LEFT_RIGHT, 36.0, t("Поменять языки"));
                     let c = pill(ui, to);
                     if a || b.clicked() || c {
                         self.swap();
@@ -395,13 +409,13 @@ impl eframe::App for Window {
                     let via = if !self.status.is_empty() {
                         self.status.clone()
                     } else if self.via_deepl {
-                        "DeepL · онлайн".into()
+                        t("DeepL · онлайн").into()
                     } else {
-                        "OPUS-MT · без интернета".into()
+                        t("OPUS-MT · без интернета").into()
                     };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_enabled_ui(!self.translation.is_empty(), |ui| {
-                            if ui::tone(ui, "Копировать перевод", None, 38.0)
+                            if ui::tone(ui, t("Копировать перевод"), None, 38.0)
                                 .on_hover_text("Ctrl+Shift+C")
                                 .clicked()
                             {

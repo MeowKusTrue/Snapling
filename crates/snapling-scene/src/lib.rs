@@ -3,6 +3,7 @@
 //! selection) into a BGRA buffer, then calls [`draw`]. Colors are written as BGRA.
 
 use snapling_core::annotate::{self, FontRef, Pt};
+use snapling_core::i18n::{n, t};
 use snapling_core::selection::{Point, Rect};
 use std::sync::OnceLock;
 use tiny_skia::{
@@ -111,9 +112,9 @@ pub enum Target {
 impl Target {
     fn label(self) -> &'static str {
         match self {
-            Target::Window => "Окно",
-            Target::Element => "Элемент",
-            Target::Screen => "Экран",
+            Target::Window => n("Окно"),
+            Target::Element => n("Элемент"),
+            Target::Screen => n("Экран"),
         }
     }
 }
@@ -182,43 +183,43 @@ const BAR: [Option<Button>; 7] = [
 ];
 
 const HINTS_SELECTED: [(&str, &str); 8] = [
-    ("Enter", "копировать"),
-    ("S", "сохранить"),
-    ("E", "редактор"),
-    ("O", "текст"),
-    ("V", "область"),
-    ("L", "произвольная"),
-    ("1–9", "рисовать"),
-    ("Esc", "отмена"),
+    ("Enter", n("копировать")),
+    ("S", n("сохранить")),
+    ("E", n("редактор")),
+    ("O", n("текст")),
+    ("V", n("область")),
+    ("L", n("произвольная")),
+    ("1–9", n("рисовать")),
+    ("Esc", n("отмена")),
 ];
 
 const HINTS: [(&str, &str); 6] = [
-    ("Мышь", "выделить"),
-    ("Клик", "окно"),
-    ("Shift", "квадрат"),
-    ("L", "произвольная"),
-    ("1–9", "рисовать"),
-    ("Esc", "отмена"),
+    (n("Мышь"), n("выделить")),
+    (n("Клик"), n("окно")),
+    ("Shift", n("квадрат")),
+    ("L", n("произвольная")),
+    ("1–9", n("рисовать")),
+    ("Esc", n("отмена")),
 ];
 
 const HINTS_PAINT: [(&str, &str); 5] = [
-    ("", "Рисуй прямо по экрану"),
-    ("V", "выделить область"),
-    ("L", "произвольная"),
-    ("Ctrl+Z", "отменить"),
-    ("Esc", "закрыть"),
+    ("", n("Рисуй прямо по экрану")),
+    ("V", n("выделить область")),
+    ("L", n("произвольная")),
+    ("Ctrl+Z", n("отменить")),
+    ("Esc", n("закрыть")),
 ];
 
 const HINTS_LASSO: [(&str, &str); 2] = [
-    ("", "Обведи мышью, контур замкнётся сам"),
-    ("Esc", "отмена"),
+    ("", n("Обведи мышью, контур замкнётся сам")),
+    ("Esc", n("отмена")),
 ];
 
 const HINTS_LASSO_DONE: [(&str, &str); 4] = [
-    ("", "За контуром снимок прозрачный"),
-    ("Enter", "копировать"),
-    ("L", "обвести заново"),
-    ("Esc", "отмена"),
+    ("", n("За контуром снимок прозрачный")),
+    ("Enter", n("копировать")),
+    ("L", n("обвести заново")),
+    ("Esc", n("отмена")),
 ];
 
 struct Fonts {
@@ -273,7 +274,7 @@ fn text_w(font: &FontRef<'_>, s: &str, px: f32) -> f32 {
 }
 
 fn primary_w(s: f32) -> f32 {
-    (10.0 + 17.0 + 8.0 + 14.0) * s + text_w(&fonts().semibold, "Копировать", 13.5 * s)
+    (10.0 + 17.0 + 8.0 + 14.0) * s + text_w(&fonts().semibold, t("Копировать"), 13.5 * s)
 }
 
 /// Pill above the selection's top-left corner, or inside it when there is no room.
@@ -381,18 +382,21 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
         let hints = hints(sc);
         let mut w = 32.0 * s + 18.0 * s * (hints.len() - 1) as f32;
         for &(k, v) in hints {
-            w += text_w(&f.semibold, k, fs) + text_w(&f.regular, &format!(" {v}"), fs);
+            w += text_w(&f.semibold, t(k), fs) + text_w(&f.regular, &format!(" {}", t(v)), fs);
         }
         let h = 34.0 * s;
         let m = sc.cursor_monitor;
-        let bar = r(
-            m.left as f32 + (m.width as f32 - w) / 2.0,
-            m.bottom() as f32 - 24.0 * s - h,
-            w,
-            h,
-        );
-        out.bounds = union(out.bounds, inflate(bar, blur));
-        out.hint_bar = Some(bar);
+        // Hints are a help, not a control: on a narrow monitor they stay out of the way.
+        if w + 48.0 * s <= m.width as f32 {
+            let bar = r(
+                m.left as f32 + (m.width as f32 - w) / 2.0,
+                m.bottom() as f32 - 24.0 * s - h,
+                w,
+                h,
+            );
+            out.bounds = union(out.bounds, inflate(bar, blur));
+            out.hint_bar = Some(bar);
+        }
     }
     out
 }
@@ -506,7 +510,7 @@ fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
 }
 
 fn hover_text(hv: &Hover<'_>) -> String {
-    let tail = "колесо — уровень · клик — выбрать";
+    let tail = t("колесо — уровень · клик — выбрать");
     if hv.app.is_empty() {
         tail.into()
     } else {
@@ -1020,7 +1024,7 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             text(
                 pm,
                 &f.semibold,
-                "Копировать",
+                t("Копировать"),
                 bx + 35.0 * s,
                 cy,
                 13.5 * s,
@@ -1123,10 +1127,168 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
         let cy = bar.top as f32 + bar.height as f32 / 2.0;
         let mut x = bar.left as f32 + 16.0 * s;
         for &(k, v) in hints(sc) {
-            x += text(pm, &f.semibold, k, x, cy, fs, TEXT);
-            x += text(pm, &f.regular, &format!(" {v}"), x, cy, fs, ICON_MUTED);
+            x += text(pm, &f.semibold, t(k), x, cy, fs, TEXT);
+            x += text(pm, &f.regular, &format!(" {}", t(v)), x, cy, fs, ICON_MUTED);
             x += 18.0 * s;
         }
+    }
+}
+
+/// Button of the notification after a shot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastAction {
+    Editor,
+    Text,
+    Folder,
+}
+
+pub struct Toast<'a> {
+    pub scale: f32,
+    pub title: &'a str,
+    pub sub: &'a str,
+    /// BGRA, width, height.
+    pub shot: (&'a [u8], u32, u32),
+    pub hover: Option<ToastAction>,
+}
+
+const TOAST: (f32, f32) = (392.0, 96.0);
+const TOAST_THUMB: (f32, f32) = (116.0, 76.0);
+const TOAST_BUTTONS: [(ToastAction, &str); 3] = [
+    (ToastAction::Editor, n("Редактор")),
+    (ToastAction::Text, n("Текст")),
+    (ToastAction::Folder, n("Папка")),
+];
+
+pub fn toast_size(s: f32) -> (u32, u32) {
+    ((TOAST.0 * s).ceil() as u32, (TOAST.1 * s).ceil() as u32)
+}
+
+fn toast_buttons(s: f32) -> Vec<(Rect, ToastAction, &'static str)> {
+    let mut x = 138.0 * s;
+    let y = 56.0 * s;
+    TOAST_BUTTONS
+        .map(|(a, label)| {
+            let label = t(label);
+            let w = text_w(&fonts().semibold, label, 12.5 * s) + 22.0 * s;
+            let b = r(x, y, w, 30.0 * s);
+            x += w + 4.0 * s;
+            (b, a, label)
+        })
+        .to_vec()
+}
+
+/// The button under a point of the notification.
+pub fn toast_at(s: f32, p: Point) -> Option<ToastAction> {
+    toast_buttons(s)
+        .into_iter()
+        .find(|(b, ..)| b.contains(p))
+        .map(|(_, a, _)| a)
+}
+
+/// `s` cut with an ellipsis to fit `max` pixels.
+fn fit_text(font: &FontRef<'_>, s: &str, px: f32, max: f32) -> String {
+    if text_w(font, s, px) <= max {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    (0..chars.len())
+        .rev()
+        .map(|n| format!("{}…", chars[..n].iter().collect::<String>()))
+        .find(|c| text_w(font, c, px) <= max)
+        .unwrap_or_default()
+}
+
+/// The whole notification into a transparent BGRA buffer, premultiplied.
+pub fn draw_toast(pm: &mut PixmapMut<'_>, tt: &Toast<'_>) {
+    let s = tt.scale;
+    let f = fonts();
+    let id = Transform::identity();
+    let (w, h) = (pm.width() as f32, pm.height() as f32);
+    if let Some(p) = rrect(0.5, 0.5, w - 1.0, h - 1.0, 18.0 * s) {
+        pm.fill_path(&p, &paint([22, 27, 39, 245]), FillRule::Winding, id, None);
+        pm.stroke_path(&p, &paint([255, 255, 255, 26]), &stroke(1.0), id, None);
+    }
+    let (px, py) = (10.0 * s, 10.0 * s);
+    let (tw, th) = (TOAST_THUMB.0 * s, TOAST_THUMB.1 * s);
+    if let (Some(path), Some(src)) = (
+        rrect(px, py, tw, th, 10.0 * s),
+        PixmapRef::from_bytes(tt.shot.0, tt.shot.1, tt.shot.2),
+    ) {
+        // Cover the frame, keep the middle of the shot.
+        let (iw, ih) = (tt.shot.1 as f32, tt.shot.2 as f32);
+        let k = (tw / iw).max(th / ih);
+        let dx = px + (tw - iw * k) / 2.0;
+        let dy = py + (th - ih * k) / 2.0;
+        pm.fill_path(
+            &path,
+            &paint([49, 51, 56, 255]),
+            FillRule::Winding,
+            id,
+            None,
+        );
+        let shader = tiny_skia::Pattern::new(
+            src,
+            tiny_skia::SpreadMode::Pad,
+            tiny_skia::FilterQuality::Bilinear,
+            1.0,
+            Transform::from_row(k, 0.0, 0.0, k, dx, dy),
+        );
+        let p = Paint {
+            shader,
+            anti_alias: true,
+            ..Paint::default()
+        };
+        pm.fill_path(&path, &p, FillRule::Winding, id, None);
+        pm.stroke_path(&path, &paint([255, 255, 255, 20]), &stroke(1.0), id, None);
+    }
+    let x = 138.0 * s;
+    let right = w - 12.0 * s;
+    icon(
+        pm,
+        &["M 5 12 L 10 17 L 20 7"],
+        x + 8.0 * s,
+        22.0 * s,
+        16.0 * s,
+        [0x5B, 0xD3, 0xA8, 255],
+    );
+    let title = fit_text(&f.semibold, tt.title, 14.0 * s, right - x - 22.0 * s);
+    text(
+        pm,
+        &f.semibold,
+        &title,
+        x + 22.0 * s,
+        22.0 * s,
+        14.0 * s,
+        TEXT,
+    );
+    let sub = fit_text(&f.regular, tt.sub, 12.0 * s, right - x);
+    text(pm, &f.regular, &sub, x, 42.0 * s, 12.0 * s, ICON_MUTED);
+    for (i, (b, a, label)) in toast_buttons(s).into_iter().enumerate() {
+        let on = tt.hover == Some(a);
+        let fill = match (i, on) {
+            (0, true) => Some([59, 108, 245, 90]),
+            (0, false) => Some([59, 108, 245, 51]),
+            (_, true) => Some([255, 255, 255, 26]),
+            _ => None,
+        };
+        if let (Some(c), Some(p)) = (fill, rr(b, 9.0 * s)) {
+            pm.fill_path(&p, &paint(c), FillRule::Winding, id, None);
+        }
+        let cy = b.top as f32 + b.height as f32 / 2.0;
+        let c = if i == 0 {
+            [0xC9, 0xD8, 0xFF, 255]
+        } else {
+            ICON
+        };
+        text(
+            pm,
+            &f.semibold,
+            label,
+            b.left as f32 + 11.0 * s,
+            cy,
+            12.5 * s,
+            c,
+        );
     }
 }
 
@@ -1263,6 +1425,36 @@ mod tests {
             [255, 255, 255],
             "only a hairline between corners"
         );
+    }
+
+    #[test]
+    fn toast_draws_a_shot_and_finds_its_buttons() {
+        let (w, h) = toast_size(1.0);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        let shot = [200u8, 200, 200, 255].repeat(40 * 20);
+        let long = "очень длинное имя файла ".repeat(10);
+        let tt = Toast {
+            scale: 1.0,
+            title: "Снимок скопирован",
+            sub: &long,
+            shot: (&shot, 40, 20),
+            hover: Some(ToastAction::Text),
+        };
+        let mut pm = PixmapMut::from_bytes(&mut buf, w, h).unwrap();
+        draw_toast(&mut pm, &tt);
+        let at = |x: u32, y: u32| buf[((y * w + x) * 4) as usize];
+        assert_eq!(at(60, 48), 200, "the shot fills the thumbnail");
+        assert_eq!(buf[3], 0, "corners stay transparent");
+        let (b, a, _) = toast_buttons(1.0)[1];
+        let p = Point {
+            x: b.left + 2,
+            y: b.top + 2,
+        };
+        assert_eq!(a, ToastAction::Text);
+        assert_eq!(toast_at(1.0, p), Some(ToastAction::Text));
+        assert_eq!(toast_at(1.0, Point { x: 5, y: 5 }), None);
+        let cut = fit_text(&fonts().regular, &long, 12.0, 200.0);
+        assert!(cut.ends_with('…') && text_w(&fonts().regular, &cut, 12.0) <= 200.0);
     }
 
     #[test]

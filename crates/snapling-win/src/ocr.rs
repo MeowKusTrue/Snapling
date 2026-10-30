@@ -2,6 +2,7 @@
 //! nothing leaves the machine. Approach from EiSen windows_adapter.rs, but the bitmap is
 //! built from memory instead of a temp file.
 
+use snapling_core::i18n::{t, tf};
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
@@ -26,7 +27,7 @@ pub fn languages() -> Vec<String> {
 pub fn language_problem(lang: &str) -> Option<String> {
     let have = languages();
     if have.is_empty() {
-        return Some("OCR: в Windows не установлен ни один язык распознавания текста.".into());
+        return Some(t("OCR: в Windows не установлен ни один язык распознавания текста.").into());
     }
     if lang == "auto"
         || have.iter().any(|t| {
@@ -38,9 +39,9 @@ pub fn language_problem(lang: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!(
-        "OCR: язык «{lang}» не установлен (есть: {}). Добавьте его: Параметры → Время и язык → Язык и регион.",
-        have.join(", ")
+    Some(tf(
+        "OCR: язык «{lang}» не установлен (есть: {0}). Добавьте его: Параметры → Время и язык → Язык и регион.",
+        &[("lang", &lang), ("0", &have.join(", "))],
     ))
 }
 
@@ -70,10 +71,14 @@ pub fn recognize(bgra: &[u8], width: u32, height: u32, lang: &str) -> Result<Str
     init();
     let max = OcrEngine::MaxImageDimension().map_err(|e| e.to_string())?;
     if width > max || height > max {
-        return Err(format!("область больше {max} px — выделите поменьше"));
+        return Err(tf(
+            "область больше {max} px — выделите поменьше",
+            &[("max", &max)],
+        ));
     }
-    let engine = engine(lang)
-        .map_err(|e| language_problem(lang).unwrap_or_else(|| format!("OCR недоступен: {e}")))?;
+    let engine = engine(lang).map_err(|e| {
+        language_problem(lang).unwrap_or_else(|| tf("OCR недоступен: {e}", &[("e", &e)]))
+    })?;
     let run = || -> windows::core::Result<String> {
         let w = DataWriter::new()?;
         w.WriteBytes(bgra)?;

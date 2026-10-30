@@ -7,6 +7,7 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as icon;
 use snapling_core::history::{self, Entry};
+use snapling_core::i18n::{t, tf};
 use snapling_core::storage;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,7 +33,7 @@ const GAP: f32 = 16.0;
 
 pub fn run(hooks: Hooks) {
     let options = eframe::NativeOptions {
-        viewport: ui::viewport("Snapling — история", [1040.0, 700.0], [560.0, 420.0]),
+        viewport: ui::viewport(t("Snapling — история"), [1040.0, 700.0], [560.0, 420.0]),
         ..Default::default()
     };
     let warn = hooks.warn;
@@ -45,7 +46,7 @@ pub fn run(hooks: Hooks) {
         }),
     );
     if let Err(e) = res {
-        warn(&format!("Окно истории не запустилось.\n{e}"));
+        warn(&tf("Окно истории не запустилось.\n{e}", &[("e", &e)]));
     }
 }
 
@@ -145,7 +146,7 @@ impl History {
                 } else {
                     (self.hooks.copy_image)(Path::new(&e.path))
                 };
-                r.map(|()| "Скопировано в буфер".to_string())
+                r.map(|()| t("Скопировано в буфер").to_string())
             }
             Act::Edit(i) => {
                 let e = &self.entries[i];
@@ -157,10 +158,10 @@ impl History {
             }
             Act::Remove(i) => history::remove(&self.hooks.file, &self.entries[i]).map(|()| {
                 self.entries.remove(i);
-                "Убрано из истории, файл на месте".to_string()
+                t("Убрано из истории, файл на месте").to_string()
             }),
         };
-        self.status = res.unwrap_or_else(|e| format!("Не получилось: {e}"));
+        self.status = res.unwrap_or_else(|e| tf("Не получилось: {e}", &[("e", &e)]));
     }
 
     fn title(e: &Entry) -> String {
@@ -168,10 +169,10 @@ impl History {
             return e.app.clone();
         }
         match e.kind.as_str() {
-            "screen" => "Весь экран",
-            "window" => "Окно",
-            "ocr" => "Текст",
-            _ => "Область",
+            "screen" => t("Весь экран"),
+            "window" => t("Окно"),
+            "ocr" => t("Текст"),
+            _ => t("Область"),
         }
         .to_string()
     }
@@ -234,12 +235,18 @@ impl History {
         let mut area = ui.new_child(UiBuilder::new().max_rect(text));
         area.set_clip_rect(text.intersect(ui.clip_rect()));
         area.spacing_mut().item_spacing.y = 3.0;
-        area.label(RichText::new(Self::title(&e)).font(ui::semi(14.0)));
+        ui::short(
+            &mut area,
+            RichText::new(Self::title(&e)).font(ui::semi(14.0)),
+        );
         if hit.is_empty() {
-            area.label(RichText::new(self.meta(&e)).size(12.5).color(p.muted));
+            ui::short(
+                &mut area,
+                RichText::new(self.meta(&e)).size(12.5).color(p.muted),
+            );
         } else {
             let pill = format!("«{hit}»");
-            area.label(RichText::new(pill).size(12.0).color(p.warn));
+            ui::short(&mut area, RichText::new(pill).size(12.0).color(p.warn));
         }
 
         let bar = Rect::from_min_max(
@@ -256,14 +263,15 @@ impl History {
         if !e.path.is_empty() {
             rest -= 86.0 + 6.0;
         }
-        if ui::primary(&mut row, "Копировать", Some(rest), 34.0).clicked() {
+        if ui::primary(&mut row, t("Копировать"), Some(rest), 34.0).clicked() {
             act = Some(Act::Copy(index));
         }
-        if !e.path.is_empty() && ui::tone(&mut row, "Редактор", Some(86.0), 34.0).clicked()
+        if !e.path.is_empty() && ui::tone(&mut row, t("Редактор"), Some(86.0), 34.0).clicked()
         {
             act = Some(Act::Edit(index));
         }
-        if ui::ghost_icon(&mut row, icon::X, 34.0, "Убрать из истории").clicked() {
+        if ui::ghost_icon(&mut row, icon::X, 34.0, t("Убрать из истории")).clicked()
+        {
             act = Some(Act::Remove(index));
         }
         act
@@ -293,12 +301,12 @@ impl eframe::App for History {
                 let top = Rect::from_min_size(ui.max_rect().min, vec2(ui.available_width(), 36.0));
                 ui::drag_area(ui, top);
                 ui.horizontal(|ui| {
-                    ui::heading(ui, "История", 24.0);
+                    ui::heading(ui, t("История"), 24.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::ghost_icon(ui, icon::X, 36.0, "Закрыть").clicked() {
+                        if ui::ghost_icon(ui, icon::X, 36.0, t("Закрыть")).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if ui::tone(ui, "Открыть папку", None, 36.0).clicked() {
+                        if ui::tone(ui, t("Открыть папку"), None, 36.0).clicked() {
                             (self.hooks.open_folder)();
                         }
                     });
@@ -322,12 +330,12 @@ impl eframe::App for History {
                                 ui.add(
                                     TextEdit::singleline(&mut self.query)
                                         .frame(Frame::NONE)
-                                        .hint_text("Поиск по тексту на снимках")
+                                        .hint_text(t("Поиск по тексту на снимках"))
                                         .desired_width(f32::INFINITY),
                                 );
                             });
                         });
-                    let items = ["Всё", "Сегодня", "Неделя"];
+                    let items = [t("Всё"), t("Сегодня"), t("Неделя")];
                     if let Some(i) = ui::segmented(ui, &items, self.period, 34.0) {
                         self.period = i;
                     }
@@ -343,8 +351,8 @@ impl eframe::App for History {
             }))
             .show(ui, |ui| {
                 let text = if self.status.is_empty() {
-                    "Убрать из истории — файл на диске остаётся. История хранится только на этом \
-                     компьютере."
+                    t("Убрать из истории — файл на диске остаётся. История хранится только на этом \
+                     компьютере.")
                 } else {
                     &self.status
                 };
@@ -362,9 +370,9 @@ impl eframe::App for History {
                 if visible.is_empty() {
                     ui.centered_and_justified(|ui| {
                         let text = if self.entries.is_empty() {
-                            "Здесь появятся сохранённые снимки"
+                            t("Здесь появятся сохранённые снимки")
                         } else {
-                            "Ничего не найдено"
+                            t("Ничего не найдено")
                         };
                         ui.label(RichText::new(text).color(p.muted));
                     });

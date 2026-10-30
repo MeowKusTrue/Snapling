@@ -2,6 +2,7 @@
 //! Folder checks follow the idea of EiSen `domain/path_guard.rs` (MIT, © 2026 Tran Trong Thuc),
 //! fixed for Windows: EiSen rejected every first-level folder such as `E:\Photos`.
 
+use crate::i18n::{t, tf};
 use std::path::{Component, Path, PathBuf};
 
 /// Local time parts, supplied by the platform layer (no date crate in core).
@@ -30,10 +31,10 @@ const DENIED: &[&str] = &[
 /// Shape-only check (no disk access): absolute, not a drive/filesystem root, not a system folder.
 pub fn shape_error(dir: &Path) -> Option<String> {
     if dir.as_os_str().is_empty() {
-        return Some("папка не задана".into());
+        return Some(t("папка не задана").into());
     }
     if !dir.is_absolute() {
-        return Some(format!("{}: нужен полный путь", dir.display()));
+        return Some(tf("{0}: нужен полный путь", &[("0", &dir.display())]));
     }
     let normal: Vec<_> = dir
         .components()
@@ -43,19 +44,27 @@ pub fn shape_error(dir: &Path) -> Option<String> {
         })
         .collect();
     if dir.components().any(|c| c == Component::ParentDir) {
-        return Some(format!("{}: «..» в пути не допускается", dir.display()));
+        return Some(tf(
+            "{0}: «..» в пути не допускается",
+            &[("0", &dir.display())],
+        ));
     }
     if normal.is_empty() {
-        return Some(format!(
-            "{}: корень диска не подходит, выбери папку",
-            dir.display()
+        return Some(tf(
+            "{0}: корень диска не подходит, выбери папку",
+            &[("0", &dir.display())],
         ));
     }
     #[cfg(windows)]
     let denied = DENIED.iter().any(|d| normal[0].eq_ignore_ascii_case(d));
     #[cfg(not(windows))]
     let denied = DENIED.iter().any(|d| dir.starts_with(d));
-    denied.then(|| format!("{}: системная папка, выбери другую", dir.display()))
+    denied.then(|| {
+        tf(
+            "{0}: системная папка, выбери другую",
+            &[("0", &dir.display())],
+        )
+    })
 }
 
 /// `\\?\E:\x` → `E:\x`, `\\?\UNC\srv\x` → `\\srv\x`: canonicalize's verbatim form confuses users and some APIs.
@@ -75,8 +84,12 @@ pub fn prepare_dir(dir: &Path) -> Result<PathBuf, String> {
     if let Some(e) = shape_error(dir) {
         return Err(e);
     }
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("{}: не удалось создать: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| {
+        tf(
+            "{0}: не удалось создать: {e}",
+            &[("e", &e), ("0", &dir.display())],
+        )
+    })?;
     let canon = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let canon = strip_verbatim(canon);
     // A symlink/junction may point somewhere forbidden.

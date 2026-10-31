@@ -7,8 +7,8 @@ use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, Sense,
 use egui_phosphor::regular as icon;
 use snapling_core::color::ColorFormat;
 use snapling_core::config::{
-    Action, Config, Engine, Format, Online, PanelSide, RecordFormat, SoundCfg, SoundPack, Theme,
-    TrayIcon,
+    Action, Config, Engine, Format, Online, PanelSide, RecordFormat, SelectSound, SoundCfg,
+    SoundPack, Theme, TrayIcon,
 };
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n;
@@ -587,6 +587,28 @@ impl Settings {
             let title = t("Без звука в играх на весь экран");
             let key = ("sound", "mute_in_games");
             Self::flag(ui, store, title, "", &mut s.mute_in_games, key);
+            if cfg!(windows) {
+                divider(ui);
+                row(
+                    ui,
+                    t("Звук выделения"),
+                    t("Пока тянешь рамку"),
+                    |ui| {
+                        let kinds = SelectSound::ALL;
+                        let now = kinds.iter().position(|k| *k == s.select).unwrap_or(0);
+                        let items = [t("Нет"), t("Счётчик"), t("Треск"), t("Резинка")];
+                        if let Some(i) = segmented(ui, &items, now, 30.0) {
+                            s.select = kinds[i];
+                            store.set("sound", "select", kinds[i].key());
+                            if kinds[i] != SelectSound::Off {
+                                store.error = (self.hooks.preview)(s, Sound::Select)
+                                    .err()
+                                    .unwrap_or_default();
+                            }
+                        }
+                    },
+                );
+            }
         });
         caption(ui, t("Свои звуки, файлы WAV"));
         let events = [
@@ -603,7 +625,7 @@ impl Settings {
                 let file = match event {
                     Sound::Capture => &mut s.capture_file,
                     Sound::Copy => &mut s.copy_file,
-                    Sound::Error => &mut s.error_file,
+                    Sound::Error | Sound::Select => &mut s.error_file,
                 };
                 let name = std::path::Path::new(file.as_str())
                     .file_name()
@@ -1407,6 +1429,17 @@ impl Settings {
                 }
             });
             ui.add_space(8.0);
+            ui.scope(|ui| {
+                ui.set_max_width(420.0);
+                Self::flag(
+                    ui,
+                    &mut self.store,
+                    t("Проверять при запуске"),
+                    t("Запрос к GitHub, больше ничего не отправляется"),
+                    &mut self.cfg.ui.check_updates,
+                    ("ui", "check_updates"),
+                );
+            });
             let busy = self.update.is_some();
             let label = if busy {
                 t("Проверяю…")

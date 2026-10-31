@@ -102,8 +102,27 @@ fn play(s: Sound) {
         Sound::Capture => 0,
         Sound::Copy => 1,
         Sound::Error => 2,
+        Sound::Select => return,
     };
     snapling_win::play_wav(wavs[i]);
+}
+
+/// Grains of `[sound] select`, built by `apply_sound`.
+static SELECT_WAVS: Mutex<Vec<&'static [u8]>> = Mutex::new(Vec::new());
+
+fn stretch_sound(level: usize) {
+    let muted = SOUND.lock().is_ok_and(|s| {
+        s.as_ref()
+            .is_some_and(|(c, _)| c.mute_in_games && snapling_win::fullscreen_game())
+    });
+    if muted {
+        return;
+    }
+    if let Ok(wavs) = SELECT_WAVS.lock()
+        && let Some(w) = wavs.get(level).or(wavs.last())
+    {
+        snapling_win::play_wav(w);
+    }
 }
 
 /// Returns problems with the user's own files; those events fall back to the pack.
@@ -127,6 +146,19 @@ fn apply_sound(cfg: &SoundCfg) -> Vec<String> {
         )
     };
     let changed = current.as_ref().is_none_or(|(c, _)| !same(c));
+    let grains_changed = current
+        .as_ref()
+        .is_none_or(|(c, _)| (c.select, c.volume) != (cfg.select, cfg.volume));
+    if grains_changed && let Ok(mut grains) = SELECT_WAVS.lock() {
+        // Same leak as the packs below: PlaySound may still be reading the old buffers.
+        *grains = sound::select_wavs(cfg.select, cfg.volume)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|w| &*Box::leak(w.into_boxed_slice()))
+            .collect();
+    }
+    let audible = cfg.enabled && cfg.select != snapling_core::config::SelectSound::Off;
+    snapling_win::overlay::set_stretch(audible.then_some(stretch_sound as fn(usize)));
     let mut problems = Vec::new();
     let wavs = match current.take() {
         Some((_, w)) if !changed => w,
@@ -692,10 +724,15 @@ fn capture_failed(e: String) {
 fn capture_rect(screen_rect: Option<Rect>, kind: &'static str) {
     let app = snapling_win::foreground_app_name();
     let t0 = Instant::now();
-    let img = match snapling_win::capture_virtual_screen() {
+    let mut img = match snapling_win::capture_virtual_screen() {
         Ok(img) => img,
         Err(e) => return capture_failed(e),
     };
+    if snapling_win::fullscreen_game()
+        && let Err(e) = snapling_win::dup::overlay_foreground_monitor(&mut img)
+    {
+        warn!("game capture: {e}");
+    }
     let Some(r) = screen_rect else {
         return deliver(img, t0, app, kind, false);
     };
@@ -818,6 +855,7 @@ fn start_recording(img: snapling_win::Image, app: String) {
 /// Keeps what the overlay panels changed for the next time.
 fn save_prefs(p: snapling_win::overlay::Prefs) {
     snapling_win::overlay::set_blur(p.blur.gauss, p.blur.strength);
+    snapling_win::overlay::set_style(p.style);
     snapling_win::overlay::set_color(p.picker, p.color_format);
     snapling_win::overlay::set_rail(p.rail_at);
     let path = crate::ui::config_path();
@@ -840,6 +878,7 @@ fn save_prefs(p: snapling_win::overlay::Prefs) {
     if cfg.blur.strength != p.blur.strength {
         let _ = Config::update(&path, "blur", "strength", i64::from(p.blur.strength));
     }
+    let _ = cfg.draw.store(&path, p.style);
 }
 
 fn begin_recording(area: Rect, app: String) {
@@ -1019,6 +1058,7 @@ fn apply_config(cfg: &Config) {
     DELAY.set(cfg.capture.delay.clamp(1, 60));
     RECORD.set(cfg.record);
     snapling_win::overlay::set_blur(cfg.blur.gauss, cfg.blur.strength.min(2));
+    snapling_win::overlay::set_style(cfg.draw.style());
     apply_ocr(&cfg.ocr.language);
     OCR_PADDLE.set(cfg.ocr.engine == Engine::Paddle);
     OCR_PANEL.set(cfg.ocr.panel);
@@ -1147,6 +1187,22 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// `[ui] check_updates`: asks GitHub once and offers the settings window, where the update is.
+fn offer_update() {
+    let Ok(Some(release)) = snapling_translate::latest_release() else {
+        return;
+    };
+    if snapling_translate::is_newer(&release.tag, snapling_core::VERSION)
+        && snapling_win::ask(&tf(
+            "Есть версия {0}. Открыть настройки, чтобы обновить?",
+            &[("0", &release.tag)],
+        ))
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let _ = std::process::Command::new(exe).arg("--settings").spawn();
+    }
+}
+
 pub fn run() {
     snapling_win::set_dpi_aware();
     init_log();
@@ -1244,6 +1300,9 @@ pub fn run() {
     }
 
     snapling_win::watch_show();
+    if cfg.ui.check_updates {
+        std::thread::spawn(offer_update);
+    }
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         match msg.message {

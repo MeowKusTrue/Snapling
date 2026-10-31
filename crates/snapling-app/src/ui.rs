@@ -105,6 +105,34 @@ pub fn language_dir() -> std::path::PathBuf {
     crate::app_dir("APPDATA").join("i18n")
 }
 
+/// The family of an installed font for egui. A family added now can be drawn from the next frame
+/// on, so the first call answers with the bundled one.
+// ponytail: only the font's own glyphs while typing; the saved shape falls back per glyph.
+pub fn shot_family(ctx: &egui::Context, family: &str) -> FontFamily {
+    use egui::epaint::text::{FontData, FontInsert, FontPriority, InsertFontFamily};
+    let bundled = FontFamily::Name("shot".into());
+    let Some((bytes, index)) = snapling_core::fonts::data(family) else {
+        return bundled;
+    };
+    let own = FontFamily::Name(family.into());
+    let known = ctx.fonts(|f| f.families().contains(&own));
+    if known {
+        return own;
+    }
+    let mut data = FontData::from_static(bytes);
+    data.index = index;
+    ctx.add_font(FontInsert::new(
+        family,
+        data,
+        vec![InsertFontFamily {
+            family: own,
+            priority: FontPriority::Highest,
+        }],
+    ));
+    ctx.request_repaint();
+    bundled
+}
+
 pub fn apply_language(code: &str) {
     #[cfg(windows)]
     let system = snapling_win::ui_language();

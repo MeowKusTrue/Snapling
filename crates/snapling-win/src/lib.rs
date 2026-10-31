@@ -51,6 +51,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 pub mod countdown;
+pub mod dup;
 pub mod menu;
 pub mod ocr;
 pub mod overlay;
@@ -715,8 +716,8 @@ pub(crate) fn lparam_point(
     }
 }
 
-/// All monitors as one image (virtual screen), GDI BitBlt.
-/// ponytail: GDI gives black frames for exclusive-fullscreen games; WGC/DXGI in stage 3.
+/// All monitors as one image (virtual screen), GDI BitBlt. GDI gives black frames for
+/// exclusive-fullscreen games: `dup::overlay_foreground_monitor` covers those.
 pub fn capture_virtual_screen() -> Result<Image, String> {
     let (x, y, w, h) = unsafe {
         (

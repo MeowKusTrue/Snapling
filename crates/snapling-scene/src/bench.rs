@@ -39,6 +39,7 @@ fn bench_frame() {
             color: COLORS[0],
             size: SIZES[1],
             blur: annotate::BlurStyle::default(),
+            style: annotate::DrawStyle::default(),
             can_undo: true,
             can_redo: false,
             live: None,

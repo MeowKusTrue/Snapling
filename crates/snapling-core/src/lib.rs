@@ -1,6 +1,7 @@
 pub mod annotate;
 pub mod color;
 pub mod config;
+pub mod fonts;
 pub mod history;
 pub mod hotkey;
 pub mod i18n;

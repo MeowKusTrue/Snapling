@@ -3,7 +3,7 @@
 //! only Windows knows: monitors, windows and their elements through UI Automation.
 
 use crate::{Image, dib_header, lparam_point, targets, uia};
-use snapling_core::annotate::BlurStyle;
+use snapling_core::annotate::{ArrowStyle, BlurStyle, DrawStyle, Head, StepStyle};
 use snapling_core::color::ColorFormat;
 use snapling_core::i18n::t;
 use snapling_core::selection::{Point, Rect};
@@ -72,6 +72,19 @@ thread_local! {
             strength: 0,
         })
     };
+    /// `[draw]`.
+    static STYLE: Cell<DrawStyle> = const {
+        Cell::new(DrawStyle {
+            arrow: ArrowStyle {
+                head: Head::Sharp,
+                to_start: false,
+            },
+            free: false,
+            step: StepStyle::Solid,
+            font: "",
+        })
+    };
+    static ON_STRETCH: Cell<Option<fn(usize)>> = const { Cell::new(None) };
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     static UIA: RefCell<Option<Sender<uia::Request>>> = const { RefCell::new(None) };
 }
@@ -224,6 +237,8 @@ pub fn show(
         picker,
         color_format,
         blur: BLUR.get(),
+        style: STYLE.get(),
+        on_stretch: ON_STRETCH.get(),
         targets: rects,
         monitors,
         mouse: Point {
@@ -567,6 +582,16 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 /// Starting style of the blur brush.
 pub fn set_blur(gauss: bool, strength: u8) {
     BLUR.set(BlurStyle { gauss, strength });
+}
+
+/// Look of the shapes a new overlay draws.
+pub fn set_style(style: DrawStyle) {
+    STYLE.set(style);
+}
+
+/// Plays the sound of a selection growing, `None`: silent.
+pub fn set_stretch(play: Option<fn(usize)>) {
+    ON_STRETCH.set(play);
 }
 
 /// Eyedropper and color format a new overlay starts with.

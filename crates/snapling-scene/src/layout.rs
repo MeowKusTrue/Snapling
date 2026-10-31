@@ -258,7 +258,7 @@ pub(crate) fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
         return;
     }
     let Some(tool) = t.tool else { return };
-    let rows: Vec<(Vec<Control>, f32)> = if tool == Tool::Blur {
+    let mut rows: Vec<(Vec<Control>, f32)> = if tool == Tool::Blur {
         vec![
             (vec![Control::Gauss(false), Control::Gauss(true)], 36.0),
             ((0..3).map(Control::Strength).collect(), 32.0),
@@ -271,6 +271,24 @@ pub(crate) fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
             ((0..3).map(Control::Size).collect(), 28.0),
         ]
     };
+    match tool {
+        Tool::Arrow => {
+            rows.push(((0..3).map(Control::Head).collect(), 30.0));
+            let shape = vec![
+                Control::Free(false),
+                Control::Free(true),
+                Control::ToStart(false),
+                Control::ToStart(true),
+            ];
+            rows.push((shape, 30.0));
+        }
+        Tool::Step => rows.push((
+            (0..StepStyle::ALL.len()).map(Control::StepStyle).collect(),
+            26.0,
+        )),
+        Tool::Text => rows.push((vec![Control::Font(false), Control::Font(true)], 26.0)),
+        _ => {}
+    }
     let inner = ow - 24.0 * s;
     let mut cy = first_tool + 6.0 * s;
     let top = first_tool - 6.0 * s;

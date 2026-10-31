@@ -1,3 +1,4 @@
+use crate::annotate::{ArrowStyle, DrawStyle, Head, StepStyle};
 use crate::color::ColorFormat;
 use crate::i18n::t;
 use serde::Deserialize;
@@ -68,6 +69,18 @@ toast = true
 gauss = false
 strength = 0
 
+[draw]
+# Наконечник стрелки: "sharp" (острый), "soft" (мягкий), "double" (двойной).
+head = "sharp"
+# Стрелка от руки вместо прямой.
+free = false
+# Наконечник там, откуда начал тянуть.
+to_start = false
+# Кружки с номером: "solid", "ring", "shadow", "square", "pin".
+step = "solid"
+# Шрифт текста, имя из системы. Пусто — встроенный.
+font = ''
+
 [record]
 # Формат записи: "gif" или "mp4".
 format = "gif"
@@ -98,6 +111,8 @@ error_file = ''
 volume = 60
 # Без звуков, пока запущена игра на весь экран.
 mute_in_games = true
+# Звук, пока тянешь рамку: "off", "ticks" (счётчик), "crackle" (треск), "rubber" (резинка).
+select = "off"
 
 [privacy]
 # Прятать выделение от демонстрации экрана и записи (Discord, OBS, Teams). Windows 10 2004+.
@@ -149,6 +164,7 @@ pub struct Config {
     pub ocr: Ocr,
     pub translate: Translate,
     pub blur: Blur,
+    pub draw: DrawCfg,
     pub ui: Ui,
 }
 
@@ -206,6 +222,51 @@ pub struct Blur {
     pub strength: u8,
 }
 
+/// Look of new shapes, shared by the overlay and the editor.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DrawCfg {
+    pub head: Head,
+    pub free: bool,
+    pub to_start: bool,
+    pub step: StepStyle,
+    pub font: String,
+}
+
+impl DrawCfg {
+    pub fn style(&self) -> DrawStyle {
+        DrawStyle {
+            arrow: ArrowStyle {
+                head: self.head,
+                to_start: self.to_start,
+            },
+            free: self.free,
+            step: self.step,
+            font: crate::fonts::intern(&self.font),
+        }
+    }
+
+    /// Writes what differs from these values.
+    pub fn store(&self, path: &Path, new: DrawStyle) -> Result<(), String> {
+        if self.head != new.arrow.head {
+            Config::update(path, "draw", "head", new.arrow.head.key())?;
+        }
+        if self.free != new.free {
+            Config::update(path, "draw", "free", new.free)?;
+        }
+        if self.to_start != new.arrow.to_start {
+            Config::update(path, "draw", "to_start", new.arrow.to_start)?;
+        }
+        if self.step != new.step {
+            Config::update(path, "draw", "step", new.step.key())?;
+        }
+        if self.font != new.font {
+            Config::update(path, "draw", "font", new.font)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -226,6 +287,8 @@ pub struct Ui {
     pub panel_side: PanelSide,
     pub panel_width: u32,
     pub welcomed: bool,
+    /// Asks GitHub for a new version at start. Off: nothing leaves the machine unasked.
+    pub check_updates: bool,
 }
 
 impl Default for Ui {
@@ -237,6 +300,7 @@ impl Default for Ui {
             panel_side: PanelSide::default(),
             panel_width: 960,
             welcomed: false,
+            check_updates: false,
         }
     }
 }
@@ -310,6 +374,39 @@ pub struct SoundCfg {
     pub error_file: String,
     pub volume: u8,
     pub mute_in_games: bool,
+    /// Sound while a selection is being stretched.
+    pub select: SelectSound,
+}
+
+/// Sound of a selection growing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SelectSound {
+    #[default]
+    Off,
+    /// A counter clicking over.
+    Ticks,
+    Crackle,
+    /// A rubber band pulled tighter.
+    Rubber,
+}
+
+impl SelectSound {
+    pub const ALL: [SelectSound; 4] = [
+        SelectSound::Off,
+        SelectSound::Ticks,
+        SelectSound::Crackle,
+        SelectSound::Rubber,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            SelectSound::Off => "off",
+            SelectSound::Ticks => "ticks",
+            SelectSound::Crackle => "crackle",
+            SelectSound::Rubber => "rubber",
+        }
+    }
 }
 
 impl Default for SoundCfg {
@@ -322,6 +419,7 @@ impl Default for SoundCfg {
             error_file: String::new(),
             volume: 60,
             mute_in_games: true,
+            select: SelectSound::default(),
         }
     }
 }

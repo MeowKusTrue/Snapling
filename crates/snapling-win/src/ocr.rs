@@ -114,7 +114,7 @@ mod tests {
         let base = annotate::pixmap_from_bgra(&white, w, h).unwrap();
         let doc = Doc {
             elements: vec![Element {
-                kind: Kind::Text(Pt { x: 20.0, y: 30.0 }, text.into()),
+                kind: Kind::Text(Pt { x: 20.0, y: 30.0 }, text.into(), ""),
                 color: [17, 17, 17],
                 size: 6.0,
             }],

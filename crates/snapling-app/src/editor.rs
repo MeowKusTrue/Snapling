@@ -10,8 +10,10 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as icon;
 use snapling_core::annotate::Pixmap;
-use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
-use snapling_core::config::Config;
+use snapling_core::annotate::{
+    self, ArrowStyle, BlurStyle, DrawStyle, Element, Head, History, Kind, Pt, StepStyle,
+};
+use snapling_core::config::{Config, DrawCfg};
 use snapling_core::i18n::{n, t, tf};
 use std::path::{Path, PathBuf};
 
@@ -123,7 +125,9 @@ struct Editor {
     tool: Tool,
     color: [u8; 3],
     size: f32,
-    head: Head,
+    style: DrawStyle,
+    /// `[draw]` as last written, so only changes go to the file.
+    draw_cfg: DrawCfg,
     blur: BlurStyle,
     drag: Option<Element>,
     /// Text being typed: image position and content.
@@ -143,6 +147,9 @@ struct Editor {
 
 impl Editor {
     fn new(base: Pixmap, app: String, hooks: Hooks, ctx: egui::Context) -> Self {
+        let cfg = Config::load_or_create(&ui::config_path()).unwrap_or_default();
+        // The font list is slow to build the first time: not on the frame that opens the panel.
+        std::thread::spawn(snapling_core::fonts::families);
         Self {
             base,
             app,
@@ -153,16 +160,12 @@ impl Editor {
             tool: Tool::Arrow,
             color: COLORS[0],
             size: 5.0,
-            head: Head::default(),
-            blur: {
-                let b = Config::load_or_create(&ui::config_path())
-                    .unwrap_or_default()
-                    .blur;
-                BlurStyle {
-                    gauss: b.gauss,
-                    strength: b.strength.min(2),
-                }
+            style: cfg.draw.style(),
+            blur: BlurStyle {
+                gauss: cfg.blur.gauss,
+                strength: cfg.blur.strength.min(2),
             },
+            draw_cfg: cfg.draw,
             drag: None,
             typing: None,
             picked: None,
@@ -185,7 +188,7 @@ impl Editor {
 
     fn commit_text(&mut self) {
         if let Some((at, text)) = self.typing.take() {
-            let el = self.el(Kind::Text(at, text.trim_end().to_string()));
+            let el = self.el(Kind::Text(at, text.trim_end().to_string(), self.style.font));
             self.history.push(el);
             self.dirty = true;
         }
@@ -450,7 +453,7 @@ impl Editor {
     fn inspector_title(&self) -> &'static str {
         if let Some(e) = self.picked.and_then(|i| self.history.doc.elements.get(i)) {
             return match e.kind {
-                Kind::Arrow(..) => t("Стрелка"),
+                Kind::Arrow(..) | Kind::Curve(..) => t("Стрелка"),
                 Kind::Line(..) => t("Линия"),
                 Kind::Rect(..) => t("Прямоугольник"),
                 Kind::Ellipse(..) => t("Эллипс"),
@@ -471,7 +474,13 @@ impl Editor {
         let p = ui::pal(ctx);
         let picked = self.picked.and_then(|i| self.history.doc.elements.get(i));
         let arrow = picked.map_or(self.tool == Tool::Arrow, |e| {
-            matches!(e.kind, Kind::Arrow(..))
+            matches!(e.kind, Kind::Arrow(..) | Kind::Curve(..))
+        });
+        let step = picked.map_or(self.tool == Tool::Step, |e| {
+            matches!(e.kind, Kind::Step(..))
+        });
+        let text = picked.map_or(self.tool == Tool::Text, |e| {
+            matches!(e.kind, Kind::Text(..))
         });
         let blur = picked.map_or(self.tool == Tool::Pixelate, |e| {
             matches!(e.kind, Kind::Blur(..))
@@ -479,13 +488,25 @@ impl Editor {
         let bare = picked.is_none() && matches!(self.tool, Tool::Select | Tool::Crop);
         let color = picked.map_or(self.color, |e| e.color);
         let mut size = picked.map_or(self.size, |e| e.size);
-        let head = match picked.map(|e| &e.kind) {
-            Some(Kind::Arrow(_, _, h)) => *h,
-            _ => self.head,
+        let arrow_now = match picked.map(|e| &e.kind) {
+            Some(Kind::Arrow(_, _, a) | Kind::Curve(_, a)) => *a,
+            _ => self.style.arrow,
         };
+        let step_now = match picked.map(|e| &e.kind) {
+            Some(Kind::Step(_, _, s)) => *s,
+            _ => self.style.step,
+        };
+        let font_now = match picked.map(|e| &e.kind) {
+            Some(Kind::Text(_, _, f)) => *f,
+            _ => self.style.font,
+        };
+        let drawing_new = picked.is_none();
+        let mut new_free = None;
+        let mut new_step = None;
+        let mut new_font = None;
         let mut new_color = None;
         let mut size_step = None;
-        let mut new_head = None;
+        let mut new_arrow = None;
         let mut new_blur = None;
         let title = self.inspector_title();
         egui::Area::new(egui::Id::new("inspector"))
@@ -551,12 +572,79 @@ impl Editor {
                     if arrow {
                         ui.add_space(6.0);
                         ui.label(RichText::new(t("Наконечник")).size(12.5).color(p.muted));
-                        let heads = [Head::Sharp, Head::Soft, Head::Double];
-                        let now = heads.iter().position(|h| *h == head).unwrap_or(0);
+                        let now = Head::ALL.iter().position(|h| *h == arrow_now.head);
                         let items = [t("Острый"), t("Мягкий"), t("Двойной")];
-                        if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
-                            new_head = Some(heads[i]);
+                        if let Some(i) =
+                            ui::segmented_w(ui, &items, now.unwrap_or(0), 30.0, Some(216.0))
+                        {
+                            new_arrow = Some(ArrowStyle {
+                                head: Head::ALL[i],
+                                ..arrow_now
+                            });
                         }
+                        ui.label(RichText::new(t("Указывает")).size(12.5).color(p.muted));
+                        let items = [t("Куда дотянул"), t("Откуда начал")];
+                        let now = usize::from(arrow_now.to_start);
+                        if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
+                            new_arrow = Some(ArrowStyle {
+                                to_start: i == 1,
+                                ..arrow_now
+                            });
+                        }
+                        if drawing_new {
+                            ui.label(RichText::new(t("Форма")).size(12.5).color(p.muted));
+                            let items = [t("Прямая"), t("От руки")];
+                            let now = usize::from(self.style.free);
+                            if let Some(i) = ui::segmented_w(ui, &items, now, 30.0, Some(216.0)) {
+                                new_free = Some(i == 1);
+                            }
+                        }
+                    }
+                    if step {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(t("Вид")).size(12.5).color(p.muted));
+                        let names = [
+                            t("Круг"),
+                            t("Кольцо"),
+                            t("С тенью"),
+                            t("Квадрат"),
+                            t("Метка"),
+                        ];
+                        let at = StepStyle::ALL.iter().position(|s| *s == step_now);
+                        egui::ComboBox::from_id_salt("step style")
+                            .selected_text(names[at.unwrap_or(0)])
+                            .width(216.0)
+                            .show_ui(ui, |ui| {
+                                for (s, name) in StepStyle::ALL.into_iter().zip(names) {
+                                    if ui.selectable_label(s == step_now, name).clicked() {
+                                        new_step = Some(s);
+                                    }
+                                }
+                            });
+                    }
+                    if text {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(t("Шрифт")).size(12.5).color(p.muted));
+                        let bundled = t("Встроенный");
+                        let shown = if font_now.is_empty() {
+                            bundled
+                        } else {
+                            font_now
+                        };
+                        egui::ComboBox::from_id_salt("text font")
+                            .selected_text(shown)
+                            .width(216.0)
+                            .height(320.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(font_now.is_empty(), bundled).clicked() {
+                                    new_font = Some("");
+                                }
+                                for f in snapling_core::fonts::families() {
+                                    if ui.selectable_label(*f == font_now, *f).clicked() {
+                                        new_font = Some(*f);
+                                    }
+                                }
+                            });
                     }
                 });
             });
@@ -577,15 +665,49 @@ impl Editor {
                 self.dirty = true;
             }
         }
-        if let Some(h) = new_head {
-            self.head = h;
+        if let Some(a) = new_arrow {
+            self.style.arrow = a;
             if let Some(i) = self.picked {
                 self.history.change(|d| {
-                    if let Kind::Arrow(_, _, old) = &mut d.elements[i].kind {
-                        *old = h;
+                    if let Kind::Arrow(_, _, old) | Kind::Curve(_, old) = &mut d.elements[i].kind {
+                        *old = a;
                     }
                 });
                 self.dirty = true;
+            }
+        }
+        if let Some(f) = new_free {
+            self.style.free = f;
+        }
+        if let Some(s) = new_step {
+            self.style.step = s;
+            if let Some(i) = self.picked {
+                self.history.change(|d| {
+                    if let Kind::Step(_, _, old) = &mut d.elements[i].kind {
+                        *old = s;
+                    }
+                });
+                self.dirty = true;
+            }
+        }
+        if let Some(f) = new_font {
+            self.style.font = f;
+            if let Some(i) = self.picked {
+                self.history.change(|d| {
+                    if let Kind::Text(_, _, old) = &mut d.elements[i].kind {
+                        *old = f;
+                    }
+                });
+                self.dirty = true;
+            }
+        }
+        if new_arrow.is_some() || new_free.is_some() || new_step.is_some() || new_font.is_some() {
+            let path = ui::config_path();
+            match self.draw_cfg.store(&path, self.style) {
+                Ok(()) => {
+                    self.draw_cfg = Config::load_or_create(&path).unwrap_or_default().draw;
+                }
+                Err(e) => self.status = e,
             }
         }
         if let Some(b) = new_blur {
@@ -750,7 +872,7 @@ impl Editor {
                     }
                 }
                 let kind = match self.tool {
-                    Tool::Arrow => Some(Kind::Arrow(start, start, self.head)),
+                    Tool::Arrow => Some(self.style.new_arrow(start)),
                     Tool::Line => Some(Kind::Line(start, start)),
                     Tool::Rect => Some(Kind::Rect(start, start)),
                     Tool::Ellipse => Some(Kind::Ellipse(start, start)),
@@ -802,7 +924,7 @@ impl Editor {
                 }
                 Tool::Step => {
                     self.commit_text();
-                    let el = self.el(Kind::Step(p, self.history.next_step()));
+                    let el = self.el(Kind::Step(p, self.history.next_step(), self.style.step));
                     self.history.push(el);
                     self.dirty = true;
                 }
@@ -841,15 +963,17 @@ impl Editor {
         };
         let px = annotate::text_px(self.size) * k;
         let color = rgb(self.color);
+        let family = self.style.font;
+        let face = ui::shot_family(ui.ctx(), family);
         let mut done = false;
         let mut cancel = false;
         egui::Area::new(egui::Id::new("typing"))
             .fixed_pos(to_scr(*at))
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
-                let width = annotate::text_size(text, px).0 + px;
+                let width = annotate::text_size_family(family, text, px).0 + px;
                 let edit = egui::TextEdit::multiline(text)
-                    .font(egui::FontId::new(px, egui::FontFamily::Name("shot".into())))
+                    .font(egui::FontId::new(px, face))
                     .text_color(color)
                     .frame(egui::Frame::NONE)
                     .desired_rows(1)
@@ -967,6 +1091,25 @@ fn dim_outside(painter: &egui::Painter, all: Rect, keep: Rect) {
 }
 
 /// Live shape while dragging; the committed one is rendered by `annotate`.
+fn arrow_preview(
+    painter: &egui::Painter,
+    pts: &[Pt],
+    el: &Element,
+    style: ArrowStyle,
+    to_scr: &impl Fn(Pt) -> Pos2,
+    stroke: Stroke,
+) {
+    let (shaft, heads) = annotate::arrow_parts(pts, el.size, style);
+    painter.add(Shape::line(shaft.into_iter().map(to_scr).collect(), stroke));
+    for [tip, l, r] in heads {
+        painter.add(Shape::convex_polygon(
+            vec![to_scr(tip), to_scr(l), to_scr(r)],
+            stroke.color,
+            Stroke::NONE,
+        ));
+    }
+}
+
 fn preview(
     painter: &egui::Painter,
     el: &Element,
@@ -981,19 +1124,8 @@ fn preview(
         Kind::Line(a, b) => {
             painter.line_segment([to_scr(*a), to_scr(*b)], stroke);
         }
-        Kind::Arrow(a, b, _) => {
-            let [tip, l, r] = annotate::arrow_head(*a, *b, el.size);
-            let base = Pt {
-                x: (l.x + r.x) / 2.0,
-                y: (l.y + r.y) / 2.0,
-            };
-            painter.line_segment([to_scr(*a), to_scr(base)], stroke);
-            painter.add(Shape::convex_polygon(
-                vec![to_scr(tip), to_scr(l), to_scr(r)],
-                color,
-                Stroke::NONE,
-            ));
-        }
+        Kind::Arrow(a, b, style) => arrow_preview(painter, &[*a, *b], el, *style, &to_scr, stroke),
+        Kind::Curve(pts, style) => arrow_preview(painter, pts, el, *style, &to_scr, stroke),
         Kind::Rect(a, b) => {
             painter.rect_stroke(
                 Rect::from_two_pos(to_scr(*a), to_scr(*b)),

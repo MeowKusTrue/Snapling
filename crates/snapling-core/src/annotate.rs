@@ -5,6 +5,7 @@
 use crate::i18n::tf;
 pub use ab_glyph::FontRef;
 use ab_glyph::{Font, OutlineCurve, ScaleFont};
+use serde::Deserialize;
 use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Rect, Stroke, Transform};
 pub use tiny_skia::{Pixmap, PixmapMut};
 
@@ -16,16 +17,19 @@ pub struct Pt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
-    Arrow(Pt, Pt, Head),
+    Arrow(Pt, Pt, ArrowStyle),
+    /// Arrow along a hand-drawn stroke.
+    Curve(Vec<Pt>, ArrowStyle),
     Line(Pt, Pt),
     Rect(Pt, Pt),
     Ellipse(Pt, Pt),
     Pen(Vec<Pt>),
     /// Translucent wide stroke.
     Marker(Vec<Pt>),
-    Text(Pt, String),
+    /// Position, content, font family (`""`: bundled).
+    Text(Pt, String, &'static str),
     /// Numbered badge centered at the point.
-    Step(Pt, u32),
+    Step(Pt, u32, StepStyle),
     /// Pixelated region: unlike blur it cannot be reversed.
     Pixelate(Pt, Pt),
     /// Brush stroke that hides what is under it.
@@ -33,7 +37,8 @@ pub enum Kind {
 }
 
 /// Arrow end, «Наконечник» in the editor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Head {
     #[default]
     Sharp,
@@ -41,6 +46,84 @@ pub enum Head {
     Soft,
     /// Heads on both ends.
     Double,
+}
+
+impl Head {
+    pub const ALL: [Head; 3] = [Head::Sharp, Head::Soft, Head::Double];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Head::Sharp => "sharp",
+            Head::Soft => "soft",
+            Head::Double => "double",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ArrowStyle {
+    pub head: Head,
+    /// The head is where the drag began, not where it ended.
+    pub to_start: bool,
+}
+
+/// Look of a numbered badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepStyle {
+    /// Filled circle with a contrasting ring.
+    #[default]
+    Solid,
+    /// Colored ring around a contrasting fill.
+    Ring,
+    /// Filled circle over a soft shadow.
+    Shadow,
+    /// Rounded square.
+    Square,
+    /// Map pin pointing down.
+    Pin,
+}
+
+impl StepStyle {
+    pub const ALL: [StepStyle; 5] = [
+        StepStyle::Solid,
+        StepStyle::Ring,
+        StepStyle::Shadow,
+        StepStyle::Square,
+        StepStyle::Pin,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            StepStyle::Solid => "solid",
+            StepStyle::Ring => "ring",
+            StepStyle::Shadow => "shadow",
+            StepStyle::Square => "square",
+            StepStyle::Pin => "pin",
+        }
+    }
+}
+
+/// What new shapes look like, `[draw]` in the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DrawStyle {
+    pub arrow: ArrowStyle,
+    /// The arrow follows the hand instead of a straight line.
+    pub free: bool,
+    pub step: StepStyle,
+    /// Font family of new text, `""`: bundled.
+    pub font: &'static str,
+}
+
+impl DrawStyle {
+    /// A new arrow starting at `at`.
+    pub fn new_arrow(self, at: Pt) -> Kind {
+        if self.free {
+            Kind::Curve(vec![at], self.arrow)
+        } else {
+            Kind::Arrow(at, at, self.arrow)
+        }
+    }
 }
 
 /// Brush blur: «cubes» (pixelate, irreversible) or Gaussian; strength 0..=2.
@@ -139,7 +222,7 @@ impl History {
             .elements
             .iter()
             .filter_map(|e| match e.kind {
-                Kind::Step(_, n) => Some(n),
+                Kind::Step(_, n, _) => Some(n),
                 _ => None,
             })
             .max()
@@ -157,7 +240,8 @@ fn tiny(e: &Element) -> bool {
             (a.x - b.x).abs() < 3.0 || (a.y - b.y).abs() < 3.0
         }
         Kind::Pen(p) | Kind::Marker(p) | Kind::Blur(p, _) => p.is_empty(),
-        Kind::Text(_, t) => t.trim().is_empty(),
+        Kind::Curve(p, _) => p.iter().all(|q| short(p[0], *q)),
+        Kind::Text(_, t, _) => t.trim().is_empty(),
         Kind::Step(..) => false,
     }
 }
@@ -170,7 +254,7 @@ pub fn drag_to(kind: &mut Kind, p: Pt, shift: bool, min_step: f32) {
         Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
             *b = if shift { square(*a, p) } else { p }
         }
-        Kind::Pen(pts) | Kind::Marker(pts) | Kind::Blur(pts, _)
+        Kind::Pen(pts) | Kind::Marker(pts) | Kind::Blur(pts, _) | Kind::Curve(pts, _)
             if pts
                 .last()
                 .is_none_or(|l| (l.x - p.x).hypot(l.y - p.y) > min_step) =>
@@ -207,18 +291,22 @@ pub fn bounds(e: &Element) -> (Pt, Pt) {
         Kind::Line(a, b) | Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
             (vec![*a, *b], e.size)
         }
+        Kind::Curve(p, _) => (p.clone(), arrow_head_len(e.size)),
         Kind::Pen(p) => (p.clone(), e.size),
         Kind::Marker(p) => (p.clone(), marker_width(e.size) / 2.0),
         Kind::Blur(p, _) => (p.clone(), blur_width(e.size) / 2.0),
-        Kind::Text(at, s) => {
-            let (w, h) = text_size(s, text_px(e.size));
+        Kind::Text(at, s, family) => {
+            let (w, h) = text_size_family(family, s, text_px(e.size));
             let end = Pt {
                 x: at.x + w,
                 y: at.y + h,
             };
             (vec![*at, end], 2.0)
         }
-        Kind::Step(c, n) => (vec![*c], step_radius(e.size, *n)),
+        Kind::Step(c, n, style) => {
+            let r = step_radius(e.size, *n);
+            (vec![*c], if *style == StepStyle::Pin { r * 1.8 } else { r })
+        }
     };
     let fold =
         |f: fn(f32, f32) -> f32, g: fn(&Pt) -> f32, init: f32| pts.iter().map(g).fold(init, f);
@@ -256,8 +344,10 @@ pub fn translate(kind: &mut Kind, dx: f32, dy: f32) {
             mv(a);
             mv(b);
         }
-        Kind::Pen(p) | Kind::Marker(p) | Kind::Blur(p, _) => p.iter_mut().for_each(mv),
-        Kind::Text(a, _) | Kind::Step(a, _) => mv(a),
+        Kind::Pen(p) | Kind::Marker(p) | Kind::Blur(p, _) | Kind::Curve(p, _) => {
+            p.iter_mut().for_each(mv)
+        }
+        Kind::Text(a, ..) | Kind::Step(a, ..) => mv(a),
     }
 }
 
@@ -303,6 +393,48 @@ pub fn arrow_head(a: Pt, b: Pt, size: f32) -> [Pt; 3] {
         y: b.y - len * (angle + s).sin(),
     };
     [b, side(-SPREAD), side(SPREAD)]
+}
+
+/// Shaft and head triangles of an arrow along `pts`, drawn from the first point to the last.
+/// A stroke's head follows the last stretch of it, not the jitter of its final pixels.
+pub fn arrow_parts(pts: &[Pt], size: f32, style: ArrowStyle) -> (Vec<Pt>, Vec<[Pt; 3]>) {
+    let mut shaft = pts.to_vec();
+    let mut heads = Vec::new();
+    if pts.len() < 2 {
+        return (shaft, heads);
+    }
+    let dist = |a: Pt, b: Pt| (a.x - b.x).hypot(a.y - b.y);
+    let len = arrow_head_len(size);
+    let mut head_on_last_point = |shaft: &mut Vec<Pt>| {
+        let tip = shaft[shaft.len() - 1];
+        let tail = shaft
+            .iter()
+            .rev()
+            .find(|p| dist(**p, tip) >= len)
+            .copied()
+            .unwrap_or(shaft[0]);
+        let head = arrow_head(tail, tip, size);
+        heads.push(head);
+        if style.head != Head::Soft {
+            let base = Pt {
+                x: (head[1].x + head[2].x) / 2.0,
+                y: (head[1].y + head[2].y) / 2.0,
+            };
+            while shaft.len() > 1 && dist(shaft[shaft.len() - 1], tip) < dist(base, tip) {
+                shaft.pop();
+            }
+            shaft.push(base);
+        }
+    };
+    if style.head == Head::Double || !style.to_start {
+        head_on_last_point(&mut shaft);
+    }
+    if style.head == Head::Double || style.to_start {
+        shaft.reverse();
+        head_on_last_point(&mut shaft);
+        shaft.reverse();
+    }
+    (shaft, heads)
 }
 
 pub fn marker_width(size: f32) -> f32 {
@@ -384,17 +516,41 @@ fn text_path(text: &str, at: Pt, px: f32) -> Option<tiny_skia::Path> {
 
 /// Same with any font (the overlay uses Inter).
 pub fn text_path_in(font: &FontRef<'_>, text: &str, at: Pt, px: f32) -> Option<tiny_skia::Path> {
-    let sf = font.as_scaled(px);
-    let (sx, sy) = (sf.h_scale_factor(), sf.v_scale_factor());
-    let line = sf.ascent() - sf.descent() + sf.line_gap();
+    text_path_fonts(&[font], text, at, px)
+}
+
+/// The family's font, then the bundled one for the glyphs it lacks.
+fn with_family<R>(family: &str, f: impl FnOnce(&[&FontRef<'_>]) -> R) -> R {
+    let base = font();
+    match crate::fonts::font(family) {
+        Some(own) => f(&[&own, &base]),
+        None => f(&[&base]),
+    }
+}
+
+/// Index of the first font that has the glyph.
+fn pick_font(fonts: &[&FontRef<'_>], c: char) -> usize {
+    fonts.iter().position(|f| f.glyph_id(c).0 != 0).unwrap_or(0)
+}
+
+/// Line metrics come from the first font.
+fn text_path_fonts(fonts: &[&FontRef<'_>], text: &str, at: Pt, px: f32) -> Option<tiny_skia::Path> {
+    let first = fonts[0].as_scaled(px);
+    let line = first.ascent() - first.descent() + first.line_gap();
     let mut pb = PathBuilder::new();
     for (row, s) in text.lines().enumerate() {
-        let base = at.y + sf.ascent() + line * row as f32;
+        let base = at.y + first.ascent() + line * row as f32;
         let mut x = at.x;
         let mut prev = None;
         for c in s.chars() {
+            let which = pick_font(fonts, c);
+            let font = fonts[which];
+            let sf = font.as_scaled(px);
+            let (sx, sy) = (sf.h_scale_factor(), sf.v_scale_factor());
             let id = font.glyph_id(c);
-            if let Some(p) = prev {
+            if let Some((from, p)) = prev
+                && from == which
+            {
                 x += sf.kern(p, id);
             }
             if let Some(o) = font.outline(id) {
@@ -434,7 +590,7 @@ pub fn text_path_in(font: &FontRef<'_>, text: &str, at: Pt, px: f32) -> Option<t
                 }
             }
             x += sf.h_advance(id);
-            prev = Some(id);
+            prev = Some((which, id));
         }
     }
     pb.finish()
@@ -446,13 +602,25 @@ pub fn text_size(text: &str, px: f32) -> (f32, f32) {
 }
 
 pub fn text_size_in(font: &FontRef<'_>, text: &str, px: f32) -> (f32, f32) {
-    let sf = font.as_scaled(px);
+    text_size_fonts(&[font], text, px)
+}
+
+/// Same in a font family, `""` being the bundled font.
+pub fn text_size_family(family: &str, text: &str, px: f32) -> (f32, f32) {
+    with_family(family, |fonts| text_size_fonts(fonts, text, px))
+}
+
+fn text_size_fonts(fonts: &[&FontRef<'_>], text: &str, px: f32) -> (f32, f32) {
+    let sf = fonts[0].as_scaled(px);
     let line = sf.ascent() - sf.descent() + sf.line_gap();
     let w = text
         .lines()
         .map(|s| {
             s.chars()
-                .map(|c| sf.h_advance(font.glyph_id(c)))
+                .map(|c| {
+                    let font = fonts[pick_font(fonts, c)];
+                    font.as_scaled(px).h_advance(font.glyph_id(c))
+                })
                 .sum::<f32>()
         })
         .fold(0.0, f32::max);
@@ -460,8 +628,8 @@ pub fn text_size_in(font: &FontRef<'_>, text: &str, px: f32) -> (f32, f32) {
 }
 
 /// Fills a solid text with a contrasting halo; `weight` thickens the light face.
-fn draw_text(pm: &mut PixmapMut<'_>, text: &str, at: Pt, px: f32, color: [u8; 3]) {
-    let Some(path) = text_path(text, at, px) else {
+fn draw_text(pm: &mut PixmapMut<'_>, family: &str, text: &str, at: Pt, px: f32, color: [u8; 3]) {
+    let Some(path) = with_family(family, |fonts| text_path_fonts(fonts, text, at, px)) else {
         return;
     };
     let id = Transform::identity();
@@ -636,6 +804,109 @@ fn blur_brush(pm: &mut PixmapMut<'_>, pts: &[Pt], width: f32, style: BlurStyle) 
     pm.fill_path(&outline, &p, FillRule::Winding, Transform::identity(), None);
 }
 
+fn draw_arrow(pm: &mut PixmapMut<'_>, pts: &[Pt], e: &Element, style: ArrowStyle) {
+    let id = Transform::identity();
+    let solid = paint(e.color, 255);
+    let (shaft, heads) = arrow_parts(pts, e.size, style);
+    if let Some(p) = polyline(&shaft) {
+        pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
+    }
+    for [tip, l, r] in heads {
+        if style.head == Head::Soft {
+            if let Some(p) = polyline(&[l, tip, r]) {
+                pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
+            }
+        } else if let Some(p) = polygon(&[tip, l, r]) {
+            pm.fill_path(&p, &solid, FillRule::Winding, id, None);
+            pm.stroke_path(&p, &solid, &stroke(e.size * 0.5), id, None);
+        }
+    }
+}
+
+/// Square with corners of radius `r`, centered at `c`.
+fn rounded_square(c: Pt, half: f32, r: f32) -> Option<tiny_skia::Path> {
+    let (x0, y0, x1, y1) = (c.x - half, c.y - half, c.x + half, c.y + half);
+    let mut pb = PathBuilder::new();
+    pb.move_to(x0 + r, y0);
+    pb.line_to(x1 - r, y0);
+    pb.quad_to(x1, y0, x1, y0 + r);
+    pb.line_to(x1, y1 - r);
+    pb.quad_to(x1, y1, x1 - r, y1);
+    pb.line_to(x0 + r, y1);
+    pb.quad_to(x0, y1, x0, y1 - r);
+    pb.line_to(x0, y0 + r);
+    pb.quad_to(x0, y0, x0 + r, y0);
+    pb.close();
+    pb.finish()
+}
+
+/// Circle of radius `r` around `c` that narrows to a point below it.
+fn pin(c: Pt, r: f32) -> Option<tiny_skia::Path> {
+    const K: f32 = 0.5523;
+    let (tx, ty) = (c.x, c.y + r * 1.8);
+    let mut pb = PathBuilder::new();
+    pb.move_to(tx, ty);
+    pb.cubic_to(
+        c.x - 0.4 * r,
+        c.y + 1.25 * r,
+        c.x - r,
+        c.y + 0.7 * r,
+        c.x - r,
+        c.y,
+    );
+    pb.cubic_to(c.x - r, c.y - K * r, c.x - K * r, c.y - r, c.x, c.y - r);
+    pb.cubic_to(c.x + K * r, c.y - r, c.x + r, c.y - K * r, c.x + r, c.y);
+    pb.cubic_to(
+        c.x + r,
+        c.y + 0.7 * r,
+        c.x + 0.4 * r,
+        c.y + 1.25 * r,
+        tx,
+        ty,
+    );
+    pb.close();
+    pb.finish()
+}
+
+fn draw_step(pm: &mut PixmapMut<'_>, c: Pt, n: u32, style: StepStyle, e: &Element) {
+    let id = Transform::identity();
+    let r = step_radius(e.size, n);
+    let other = contrast(e.color);
+    let circle = PathBuilder::from_circle(c.x, c.y, r);
+    let thin = Some((other, (r * 0.1).max(1.5)));
+    let (path, fill, ring, ink) = match style {
+        StepStyle::Solid => (circle, e.color, Some((other, (r * 0.12).max(2.0))), other),
+        StepStyle::Ring => (circle, other, Some((e.color, (r * 0.2).max(2.5))), e.color),
+        StepStyle::Shadow => {
+            for (grow, alpha) in [(1.34, 22), (1.22, 30), (1.1, 44)] {
+                if let Some(p) = PathBuilder::from_circle(c.x, c.y + r * 0.14, r * grow) {
+                    pm.fill_path(&p, &paint([0, 0, 0], alpha), FillRule::Winding, id, None);
+                }
+            }
+            (circle, e.color, None, other)
+        }
+        StepStyle::Square => (rounded_square(c, r * 0.92, r * 0.32), e.color, thin, other),
+        StepStyle::Pin => (pin(c, r), e.color, thin, other),
+    };
+    if let Some(p) = path {
+        pm.fill_path(&p, &paint(fill, 255), FillRule::Winding, id, None);
+        if let Some((color, width)) = ring {
+            pm.stroke_path(&p, &paint(color, 255), &stroke(width), id, None);
+        }
+    }
+    let label = n.to_string();
+    let px = r * 1.1;
+    let (w, h) = text_size(&label, px);
+    let at = Pt {
+        x: c.x - w / 2.0,
+        y: c.y - h / 2.0,
+    };
+    if let Some(p) = text_path(&label, at, px) {
+        pm.fill_path(&p, &paint(ink, 255), FillRule::Winding, id, None);
+        pm.stroke_path(&p, &paint(ink, 255), &stroke(px * 0.06), id, None);
+    }
+}
+
 pub fn draw(pm: &mut PixmapMut<'_>, e: &Element) {
     let id = Transform::identity();
     let solid = paint(e.color, 255);
@@ -645,36 +916,8 @@ pub fn draw(pm: &mut PixmapMut<'_>, e: &Element) {
                 pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
             }
         }
-        Kind::Arrow(a, b, head) => {
-            let mut filled = |tail: Pt, tip: Pt| {
-                let [t, l, r] = arrow_head(tail, tip, e.size);
-                if let Some(p) = polygon(&[t, l, r]) {
-                    pm.fill_path(&p, &solid, FillRule::Winding, id, None);
-                    pm.stroke_path(&p, &solid, &stroke(e.size * 0.5), id, None);
-                }
-                Pt {
-                    x: (l.x + r.x) / 2.0,
-                    y: (l.y + r.y) / 2.0,
-                }
-            };
-            let (from, to) = match head {
-                Head::Sharp => (*a, filled(*a, *b)),
-                Head::Double => {
-                    let end = filled(*a, *b);
-                    (filled(*b, *a), end)
-                }
-                Head::Soft => (*a, *b),
-            };
-            if let Some(p) = polyline(&[from, to]) {
-                pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
-            }
-            if *head == Head::Soft {
-                let [tip, l, r] = arrow_head(*a, *b, e.size);
-                if let Some(p) = polyline(&[l, tip, r]) {
-                    pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
-                }
-            }
-        }
+        Kind::Arrow(a, b, style) => draw_arrow(pm, &[*a, *b], e, *style),
+        Kind::Curve(pts, style) => draw_arrow(pm, pts, e, *style),
         Kind::Rect(a, b) => {
             if let Some(p) = rect(*a, *b).map(PathBuilder::from_rect) {
                 pm.stroke_path(&p, &solid, &stroke(e.size), id, None);
@@ -701,32 +944,8 @@ pub fn draw(pm: &mut PixmapMut<'_>, e: &Element) {
                 );
             }
         }
-        Kind::Text(at, s) => draw_text(pm, s, *at, text_px(e.size), e.color),
-        Kind::Step(c, n) => {
-            let r = step_radius(e.size, *n);
-            let ring = contrast(e.color);
-            if let Some(p) = PathBuilder::from_circle(c.x, c.y, r) {
-                pm.fill_path(&p, &solid, FillRule::Winding, id, None);
-                pm.stroke_path(
-                    &p,
-                    &paint(ring, 255),
-                    &stroke((r * 0.12).max(2.0)),
-                    id,
-                    None,
-                );
-            }
-            let label = n.to_string();
-            let px = r * 1.1;
-            let (w, h) = text_size(&label, px);
-            let at = Pt {
-                x: c.x - w / 2.0,
-                y: c.y - h / 2.0,
-            };
-            if let Some(p) = text_path(&label, at, px) {
-                pm.fill_path(&p, &paint(ring, 255), FillRule::Winding, id, None);
-                pm.stroke_path(&p, &paint(ring, 255), &stroke(px * 0.06), id, None);
-            }
-        }
+        Kind::Text(at, s, family) => draw_text(pm, family, s, *at, text_px(e.size), e.color),
+        Kind::Step(c, n, style) => draw_step(pm, *c, *n, *style, e),
         Kind::Pixelate(a, b) => pixelate(pm, *a, *b, pixel_block(e.size)),
         Kind::Blur(pts, style) => blur_brush(pm, pts, blur_width(e.size), *style),
     }
@@ -905,8 +1124,12 @@ mod tests {
     fn undo_redo_and_steps() {
         let mut h = History::default();
         assert!(!h.undo());
-        h.push(el(Kind::Step(p(10.0, 10.0), h.next_step())));
-        h.push(el(Kind::Step(p(30.0, 10.0), h.next_step())));
+        h.push(el(Kind::Step(
+            p(10.0, 10.0),
+            h.next_step(),
+            StepStyle::Solid,
+        )));
+        h.push(el(Kind::Step(p(30.0, 10.0), h.next_step(), StepStyle::Pin)));
         assert_eq!(h.next_step(), 3);
         h.push(el(Kind::Rect(p(0.0, 0.0), p(1.0, 1.0))));
         assert_eq!(h.doc.elements.len(), 2, "tiny shapes are dropped");
@@ -920,11 +1143,67 @@ mod tests {
     }
 
     #[test]
+    fn arrow_head_goes_where_the_style_says() {
+        let (a, b) = (p(10.0, 40.0), p(110.0, 40.0));
+        let tip = |to_start| {
+            let style = ArrowStyle {
+                head: Head::Sharp,
+                to_start,
+            };
+            let (_, heads) = arrow_parts(&[a, b], 4.0, style);
+            assert_eq!(heads.len(), 1);
+            heads[0][0]
+        };
+        assert_eq!(tip(false), b);
+        assert_eq!(tip(true), a);
+        let both = ArrowStyle {
+            head: Head::Double,
+            to_start: false,
+        };
+        assert_eq!(arrow_parts(&[a, b], 4.0, both).1.len(), 2);
+    }
+
+    #[test]
+    fn stroke_arrow_head_follows_the_last_stretch_not_the_jitter() {
+        let pts = [p(0.0, 0.0), p(50.0, 0.0), p(100.0, 0.0), p(100.5, 3.0)];
+        let (shaft, heads) = arrow_parts(&pts, 4.0, ArrowStyle::default());
+        let [tip, l, r] = heads[0];
+        assert_eq!(tip, pts[3]);
+        assert!((l.x + r.x) / 2.0 < tip.x, "points along the stroke");
+        assert!(shaft.len() >= 2);
+    }
+
+    #[test]
+    fn a_curve_needs_more_than_a_click() {
+        let curve = |pts: Vec<Pt>| Element {
+            kind: Kind::Curve(pts, ArrowStyle::default()),
+            color: [0; 3],
+            size: 2.0,
+        };
+        assert!(tiny(&curve(vec![p(5.0, 5.0)])));
+        assert!(!tiny(&curve(vec![p(5.0, 5.0), p(40.0, 5.0)])));
+    }
+
+    #[test]
+    fn every_step_style_paints_its_digit_area() {
+        let b = base();
+        for style in StepStyle::ALL {
+            let mut doc = Doc::default();
+            doc.elements.push(Element {
+                kind: Kind::Step(p(60.0, 40.0), 1, style),
+                color: [200, 0, 0],
+                size: 4.0,
+            });
+            assert_ne!(compose(&b, &doc).data(), b.data(), "{style:?}");
+        }
+    }
+
+    #[test]
     fn shapes_paint_their_color() {
         let b = base();
         for kind in [
             Kind::Line(p(10.0, 40.0), p(110.0, 40.0)),
-            Kind::Arrow(p(10.0, 40.0), p(110.0, 40.0), Head::Sharp),
+            Kind::Arrow(p(10.0, 40.0), p(110.0, 40.0), ArrowStyle::default()),
             Kind::Rect(p(20.0, 20.0), p(100.0, 60.0)),
             Kind::Pen(vec![p(10.0, 40.0), p(60.0, 40.0), p(110.0, 40.0)]),
         ] {
@@ -967,8 +1246,8 @@ mod tests {
     fn text_and_steps_render_glyphs() {
         let b = base();
         for kind in [
-            Kind::Text(p(5.0, 5.0), "Привет\nmir".into()),
-            Kind::Step(p(60.0, 40.0), 12),
+            Kind::Text(p(5.0, 5.0), "Привет\nmir".into(), ""),
+            Kind::Step(p(60.0, 40.0), 12, StepStyle::Solid),
         ] {
             let mut doc = Doc::default();
             doc.elements.push(el(kind.clone()));

@@ -11,7 +11,7 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
         }
         if let Some((at, typed)) = t.caret {
             let el = annotate::Element {
-                kind: annotate::Kind::Text(at, format!("{typed}|")),
+                kind: annotate::Kind::Text(at, format!("{typed}|"), t.style.font),
                 color: t.color,
                 size: t.size,
             };
@@ -177,6 +177,10 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
             Control::Size(i) => t.size == SIZES[i],
             Control::Gauss(g) => t.blur.gauss == g,
             Control::Strength(i) => t.blur.strength == i,
+            Control::Head(i) => t.style.arrow.head == Head::ALL[i],
+            Control::Free(f) => t.style.free == f,
+            Control::ToStart(b) => t.style.arrow.to_start == b,
+            Control::StepStyle(i) => t.style.step == StepStyle::ALL[i],
             _ => false,
         });
         let disabled = tools.is_some_and(|t| {
@@ -225,6 +229,10 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
                 | Control::Picker
                 | Control::ColorFormat(_)
                 | Control::Action(Button::Blur)
+                | Control::Head(_)
+                | Control::Free(_)
+                | Control::ToStart(_)
+                | Control::StepStyle(_)
         );
         let fill = if selected && filled {
             Some(BLUE)
@@ -312,6 +320,61 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
                 let d: &[&str] = if g { &DROP } else { &CUBES };
                 icon(pm, d, cx, cy, 19.0 * s, col);
             }
+            Control::Head(_) | Control::Free(_) | Control::ToStart(_) => {
+                let col = if selected { [255; 4] } else { ICON };
+                let d: &[&str] = match c {
+                    Control::Head(0) => &HEAD_SHARP,
+                    Control::Head(1) => &HEAD_SOFT,
+                    Control::Head(_) => &HEAD_DOUBLE,
+                    Control::Free(false) => &SHAPE_LINE,
+                    Control::Free(true) => &SHAPE_HAND,
+                    Control::ToStart(false) => &TO_END,
+                    _ => &TO_START,
+                };
+                icon(pm, d, cx, cy, 18.0 * s, col);
+            }
+            Control::StepStyle(i) => {
+                let style = StepStyle::ALL[i];
+                // Radius 8 at scale 1; the pin's point hangs below, so it sits higher.
+                let lift = if style == StepStyle::Pin {
+                    3.0 * s
+                } else {
+                    0.0
+                };
+                let color = tools.map_or(COLORS[0], |t| t.color);
+                draw_element(
+                    pm,
+                    &annotate::Element {
+                        kind: annotate::Kind::Step(
+                            Pt {
+                                x: cx,
+                                y: cy - lift,
+                            },
+                            1,
+                            style,
+                        ),
+                        color,
+                        size: (8.0 * s - 10.0) / 2.5,
+                    },
+                );
+            }
+            Control::Font(forward) => {
+                let d: &[&str] = if forward { &NEXT } else { &PREV };
+                icon(pm, d, cx, cy, 17.0 * s, ICON);
+                if forward && let (Some(panel), Some(t)) = (lay.options, tools) {
+                    let name = if t.style.font.is_empty() {
+                        crate::t("Встроенный")
+                    } else {
+                        t.style.font
+                    };
+                    let max = panel.width as f32 - 72.0 * s;
+                    let fs = 12.0 * s;
+                    let shown = clip_text(&f.semibold, name, max, fs);
+                    let w = text_w(&f.semibold, &shown, fs);
+                    let mid = panel.left as f32 + panel.width as f32 / 2.0;
+                    text(pm, &f.semibold, &shown, mid - w / 2.0, cy, fs, TEXT);
+                }
+            }
         }
     }
     if let Some(bar) = lay.hint_bar {
@@ -335,6 +398,22 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
     if let (Some(panel), Some(l)) = (lay.loupe, &sc.loupe) {
         draw_loupe(pm, panel, l, s);
     }
+}
+
+/// `name` cut with an ellipsis to fit `max`.
+fn clip_text(font: &FontRef<'_>, name: &str, max: f32, px: f32) -> String {
+    if text_w(font, name, px) <= max {
+        return name.to_string();
+    }
+    let mut out = String::new();
+    for c in name.chars() {
+        out.push(c);
+        if text_w(font, &format!("{out}…"), px) > max {
+            out.pop();
+            break;
+        }
+    }
+    out + "…"
 }
 
 pub(crate) fn draw_loupe(pm: &mut PixmapMut<'_>, panel: Rect, l: &Loupe<'_>, s: f32) {

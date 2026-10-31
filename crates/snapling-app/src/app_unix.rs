@@ -358,6 +358,7 @@ fn region(cfg: &Config, auto: Option<Outcome>) -> Result<(), String> {
             gauss: cfg.blur.gauss,
             strength: cfg.blur.strength.min(2),
         },
+        style: cfg.draw.style(),
         targets: cap.targets.clone(),
         rail_at: cfg.capture.rail.map(|[x, y]| Point { x, y }),
         ..Options::default()
@@ -377,6 +378,7 @@ fn region(cfg: &Config, auto: Option<Outcome>) -> Result<(), String> {
     if prefs.blur.strength != cfg.blur.strength {
         Config::update(&path, "blur", "strength", i64::from(prefs.blur.strength))?;
     }
+    cfg.draw.store(&path, prefs.style)?;
     if let Some(p) = prefs
         .rail_at
         .filter(|p| cfg.capture.rail != Some([p.x, p.y]))

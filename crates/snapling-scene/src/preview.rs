@@ -142,7 +142,7 @@ fn render_mockup_scene() {
         kind: annotate::Kind::Arrow(
             Pt { x: 420.0, y: 380.0 },
             Pt { x: 700.0, y: 280.0 },
-            annotate::Head::Sharp,
+            annotate::ArrowStyle::default(),
         ),
         color: COLORS[0],
         size: SIZES[1],
@@ -173,6 +173,7 @@ fn render_mockup_scene() {
                         gauss: true,
                         strength: 1,
                     },
+                    style: annotate::DrawStyle::default(),
                     can_undo: true,
                     can_redo: false,
                     live: Some(&live),

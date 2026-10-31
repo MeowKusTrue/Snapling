@@ -1,7 +1,7 @@
 //! Feedback sounds: three packs of 16-bit mono WAV embedded in the program, built by
 //! `tools/sound_design.py`. System pack: freedesktop sound theme, see THIRD_PARTY_NOTICES.md.
 
-use crate::config::{SoundCfg, SoundPack};
+use crate::config::{SelectSound, SoundCfg, SoundPack};
 use crate::i18n::{t, tf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,6 +9,8 @@ pub enum Sound {
     Capture,
     Copy,
     Error,
+    /// A sample of `[sound] select`, for the settings window.
+    Select,
 }
 
 macro_rules! pack {
@@ -126,6 +128,7 @@ pub fn scale_wav(mut w: Vec<u8>, volume: u8) -> Result<Vec<u8>, String> {
 /// The sound to play: the user's file if set, else the pack's. An error names the file.
 pub fn load(cfg: &SoundCfg, sound: Sound) -> Result<Vec<u8>, String> {
     let file = match sound {
+        Sound::Select => return Ok(select_sample(cfg.select, cfg.volume)),
         Sound::Capture => &cfg.capture_file,
         Sound::Copy => &cfg.copy_file,
         Sound::Error => &cfg.error_file,
@@ -139,6 +142,89 @@ pub fn load(cfg: &SoundCfg, sound: Sound) -> Result<Vec<u8>, String> {
         return Err(tf("{file}: файл больше 10 МБ", &[("file", &file)]));
     }
     scale_wav(bytes, cfg.volume).map_err(|e| format!("{file}: {e}"))
+}
+
+/// Steps of pitch as a selection grows.
+pub const SELECT_LEVELS: usize = 12;
+const RATE: u32 = 44_100;
+
+/// One grain of the selection sound, 16-bit mono; a higher `level` sounds tighter.
+fn select_grain(kind: SelectSound, level: usize) -> Vec<i16> {
+    let level = level as f32;
+    let rate = RATE as f32;
+    let tau = std::f32::consts::TAU;
+    let tone = |ms: f32, f: &dyn Fn(f32) -> f32| -> Vec<i16> {
+        (0..(ms / 1000.0 * rate) as usize)
+            .map(|i| (f(i as f32 / rate).clamp(-1.0, 1.0) * 20_000.0) as i16)
+            .collect()
+    };
+    match kind {
+        SelectSound::Off => Vec::new(),
+        SelectSound::Ticks => tone(14.0, &|t| {
+            (tau * (1900.0 + level * 90.0) * t).sin() * (-t * 420.0).exp()
+        }),
+        SelectSound::Crackle => {
+            // A few sharp impulses at fixed pseudo-random places, like a ratchet catching.
+            let mut seed = 0x2F6E_2B1Du32.wrapping_add(level as u32 * 7919);
+            let mut out = vec![0i16; (0.022 * rate) as usize];
+            for _ in 0..5 {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let at = (seed >> 8) as usize % out.len();
+                let sign = if seed & 1 == 0 { 1.0 } else { -1.0 };
+                for (k, s) in out[at..].iter_mut().take(40).enumerate() {
+                    let v = sign * 15_000.0 * (-(k as f32) / 6.0).exp();
+                    *s = (f32::from(*s) + v).clamp(-30_000.0, 30_000.0) as i16;
+                }
+            }
+            out
+        }
+        SelectSound::Rubber => tone(52.0, &|t| {
+            let f = 150.0 + level * 34.0 + t * 1600.0;
+            let wobble = 1.0 + 0.35 * (tau * 70.0 * t).sin();
+            let edge = (t * 400.0).min(1.0) * (1.0 - t / 0.052).max(0.0);
+            (tau * f * t).sin() * wobble * edge * 0.9
+        }),
+    }
+}
+
+fn wav_from(samples: &[i16], volume: u8) -> Vec<u8> {
+    let gain = f32::from(volume.min(100)) / 100.0;
+    let bytes = samples.len() as u32 * 2;
+    let mut w = Vec::with_capacity(HEADER + bytes as usize);
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + bytes).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&RATE.to_le_bytes());
+    w.extend_from_slice(&(RATE * 2).to_le_bytes());
+    w.extend_from_slice(&2u16.to_le_bytes());
+    w.extend_from_slice(&16u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&bytes.to_le_bytes());
+    for s in samples {
+        w.extend_from_slice(&((f32::from(*s) * gain) as i16).to_le_bytes());
+    }
+    w
+}
+
+/// Grains from loose to tight, `None` when the sound is off.
+pub fn select_wavs(kind: SelectSound, volume: u8) -> Option<Vec<Vec<u8>>> {
+    (kind != SelectSound::Off).then(|| {
+        (0..SELECT_LEVELS)
+            .map(|l| wav_from(&select_grain(kind, l), volume))
+            .collect()
+    })
+}
+
+/// The grains one after another with pauses, the way a growing selection sounds.
+fn select_sample(kind: SelectSound, volume: u8) -> Vec<u8> {
+    let gap = vec![0i16; (0.05 * RATE as f32) as usize];
+    let samples: Vec<i16> = (0..SELECT_LEVELS)
+        .flat_map(|l| select_grain(kind, l).into_iter().chain(gap.iter().copied()))
+        .collect();
+    wav_from(&samples, volume)
 }
 
 #[cfg(test)]
@@ -240,5 +326,32 @@ mod tests {
         let a = wav(SoundPack::Soft, Sound::Capture, 100);
         assert_ne!(a, wav(SoundPack::Real, Sound::Capture, 100));
         assert_ne!(a, wav(SoundPack::System, Sound::Capture, 100));
+    }
+
+    #[test]
+    fn select_grains_are_audible_wavs_that_change_with_level() {
+        assert!(select_wavs(SelectSound::Off, 60).is_none());
+        for kind in [
+            SelectSound::Ticks,
+            SelectSound::Crackle,
+            SelectSound::Rubber,
+        ] {
+            let wavs = select_wavs(kind, 100).unwrap();
+            assert_eq!(wavs.len(), SELECT_LEVELS);
+            assert_ne!(wavs[0], wavs[SELECT_LEVELS - 1]);
+            for w in &wavs {
+                let (data, tag, bits) = wav_data(w).unwrap();
+                assert_eq!((tag, bits), (1, 16));
+                let body = &w[data];
+                assert!(
+                    body.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .any(|s| i16::from_le_bytes(*s) != 0)
+                );
+            }
+            let quiet = select_wavs(kind, 0).unwrap();
+            assert!(quiet[0][HEADER..].iter().all(|b| *b == 0));
+        }
     }
 }

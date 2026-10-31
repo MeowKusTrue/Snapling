@@ -263,6 +263,7 @@ fn rail_leaves_room_for_a_selection_on_the_left() {
         color: COLORS[0],
         size: SIZES[1],
         blur: annotate::BlurStyle::default(),
+        style: annotate::DrawStyle::default(),
         can_undo: false,
         can_redo: false,
         live: None,

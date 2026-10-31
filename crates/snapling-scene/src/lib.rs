@@ -30,7 +30,7 @@ use paint::*;
 pub use pill::*;
 pub use toast::*;
 
-use snapling_core::annotate::{self, FontRef, Pt};
+use snapling_core::annotate::{self, FontRef, Head, Pt, StepStyle};
 use snapling_core::color::ColorFormat;
 use snapling_core::i18n::{n, t};
 use snapling_core::selection::{Point, Rect};
@@ -119,6 +119,16 @@ pub enum Control {
     Picker,
     /// Text format of a picked color, an index into `ColorFormat::ALL`.
     ColorFormat(usize),
+    /// Arrow end, an index into `Head::ALL`.
+    Head(usize),
+    /// Arrow follows the hand: `true`, or a straight line.
+    Free(bool),
+    /// Arrow head where the drag began: `true`, or where it ended.
+    ToStart(bool),
+    /// Badge look, an index into `StepStyle::ALL`.
+    StepStyle(usize),
+    /// Next or previous installed font.
+    Font(bool),
 }
 
 /// Tool rail and annotations, on screen from the first frame.
@@ -136,6 +146,7 @@ pub struct Draw<'a> {
     pub color: [u8; 3],
     pub size: f32,
     pub blur: annotate::BlurStyle,
+    pub style: annotate::DrawStyle,
     pub can_undo: bool,
     pub can_redo: bool,
     /// Shape being dragged, in image coordinates and RGB.

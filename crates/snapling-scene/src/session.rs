@@ -2,9 +2,12 @@
 //! come out. Interaction follows EiSen's overlay (MIT, © 2026 Tran Trong Thuc). The windows that
 //! feed it are `snapling-win/overlay.rs` and `snapling-overlay`.
 
-use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
+use snapling_core::annotate::{
+    self, BlurStyle, DrawStyle, Element, Head, History, Kind, Pt, StepStyle,
+};
 use snapling_core::color::ColorFormat;
 use snapling_core::selection::{Corner, Hit, HoverChain, MIN_SELECTION_PX, Point, Rect, Selection};
+use std::time::{Duration, Instant};
 
 use crate::{
     Button, COLORS, Control, Draw, Hover, Layout, Loupe, SIZES, Scene, TOOLS, Target, Tool,
@@ -51,6 +54,9 @@ pub struct Options {
     pub picker: bool,
     pub color_format: ColorFormat,
     pub blur: BlurStyle,
+    pub style: DrawStyle,
+    /// Plays the stretch sound at this level, `snapling_core::sound::SELECT_LEVELS` of them.
+    pub on_stretch: Option<fn(usize)>,
     /// Windows under the overlay, topmost first, with their app names.
     pub targets: Vec<(Rect, String)>,
     /// Monitors and their DPI scales; empty: the shot is one monitor of `scale`.
@@ -65,6 +71,7 @@ pub struct Options {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prefs {
     pub blur: BlurStyle,
+    pub style: DrawStyle,
     pub picker: bool,
     pub color_format: ColorFormat,
     /// Desktop position of the rail.
@@ -113,12 +120,19 @@ struct Pen {
     color: [u8; 3],
     size: f32,
     blur: BlurStyle,
+    style: DrawStyle,
     history: History,
     live: Option<Element>,
     typing: Option<(Pt, String)>,
     picker: bool,
     color_format: ColorFormat,
 }
+
+/// A grain of the stretch sound per this much growth, no closer than the gap: each one cuts off
+/// the one before. `sound::SELECT_LEVELS` caps the level.
+const STRETCH_STEP: i32 = 30;
+const STRETCH_GAP: Duration = Duration::from_millis(55);
+const STRETCH_PER_LEVEL: i32 = 180;
 
 pub struct Session {
     shot: Shot,
@@ -140,6 +154,9 @@ pub struct Session {
     rail_at: Option<Point>,
     /// The position the next overlay gets: the end of the last drag.
     rail_kept: Option<Point>,
+    on_stretch: Option<fn(usize)>,
+    /// Width plus height at the last grain of the stretch sound, and when it played.
+    stretch: (i32, Option<Instant>),
     /// Press point inside the rail while it is being dragged.
     rail_grab: Option<Point>,
     /// The rail stays out next to a finished selection.
@@ -204,6 +221,7 @@ impl Session {
                 color: COLORS[0],
                 size: SIZES[1],
                 blur: opts.blur,
+                style: opts.style,
                 history: History::default(),
                 live: None,
                 typing: None,
@@ -216,6 +234,8 @@ impl Session {
             rail: Rect::default(),
             rail_at,
             rail_kept: opts.rail_at,
+            on_stretch: opts.on_stretch,
+            stretch: (0, None),
             rail_grab: None,
             rail_open: false,
             chain: HoverChain::default(),
@@ -413,6 +433,7 @@ impl Session {
                 color: self.pen.color,
                 size: self.pen.size,
                 blur: self.pen.blur,
+                style: self.pen.style,
                 can_undo: self.pen.history.can_undo(),
                 can_redo: self.pen.history.can_redo(),
                 live: self.pen.live.as_ref(),
@@ -493,7 +514,7 @@ impl Session {
     fn commit_text(&mut self) {
         if let Some((at, text)) = self.pen.typing.take() {
             let el = Element {
-                kind: Kind::Text(at, text.trim_end().to_string()),
+                kind: Kind::Text(at, text.trim_end().to_string(), self.pen.style.font),
                 color: self.pen.color,
                 size: self.pen.size,
             };
@@ -535,14 +556,14 @@ impl Session {
         let at = pen_point(p);
         let pen = &self.pen;
         let kind = match tool {
-            Tool::Arrow => Kind::Arrow(at, at, Head::Sharp),
+            Tool::Arrow => pen.style.new_arrow(at),
             Tool::Line => Kind::Line(at, at),
             Tool::Rect => Kind::Rect(at, at),
             Tool::Ellipse => Kind::Ellipse(at, at),
             Tool::Pen => Kind::Pen(vec![at]),
             Tool::Marker => Kind::Marker(vec![at]),
             Tool::Blur => Kind::Blur(vec![at], pen.blur),
-            Tool::Step => Kind::Step(at, pen.history.next_step()),
+            Tool::Step => Kind::Step(at, pen.history.next_step(), pen.style.step),
             Tool::Text => {
                 self.pen.typing = Some((at, String::new()));
                 return;
@@ -564,6 +585,7 @@ impl Session {
     pub fn prefs(&self) -> Prefs {
         Prefs {
             blur: self.pen.blur,
+            style: self.pen.style,
             picker: self.pen.picker,
             color_format: self.pen.color_format,
             rail_at: self.rail_kept,
@@ -606,6 +628,13 @@ impl Session {
             Control::Strength(i) => self.pen.blur.strength = i,
             Control::Picker => self.pen.picker = !self.pen.picker,
             Control::ColorFormat(i) => self.pen.color_format = ColorFormat::ALL[i],
+            Control::Head(i) => self.pen.style.arrow.head = Head::ALL[i],
+            Control::Free(f) => self.pen.style.free = f,
+            Control::ToStart(b) => self.pen.style.arrow.to_start = b,
+            Control::StepStyle(i) => self.pen.style.step = StepStyle::ALL[i],
+            Control::Font(forward) => {
+                self.pen.style.font = snapling_core::fonts::neighbor(self.pen.style.font, forward);
+            }
             Control::Undo | Control::Redo => {
                 self.pen.typing = None;
                 self.repaint_all = true;
@@ -675,6 +704,7 @@ impl Session {
         }
         if self.sel.is_dragging() {
             self.sel.drag(p, mods.shift);
+            self.stretch_sound();
             return true;
         }
         let hovered = self.update_hover(p);
@@ -684,7 +714,24 @@ impl Session {
         hovered || changed || self.loupe_on()
     }
 
+    fn stretch_sound(&mut self) {
+        let (Some(play), Some(r)) = (self.on_stretch, self.sel.rect()) else {
+            return;
+        };
+        let size = r.width + r.height;
+        let now = Instant::now();
+        let quiet = self
+            .stretch
+            .1
+            .is_none_or(|at| now.duration_since(at) >= STRETCH_GAP);
+        if quiet && (size - self.stretch.0).abs() >= STRETCH_STEP {
+            self.stretch = (size, Some(now));
+            play((size / STRETCH_PER_LEVEL) as usize);
+        }
+    }
+
     pub fn release(&mut self) -> Step {
+        self.stretch = (0, None);
         if self.rail_grab.take().is_some() {
             self.rail_kept = self.rail_at.map(|p| Point {
                 x: p.x + self.shot.x,
@@ -1145,6 +1192,53 @@ mod tests {
         };
         s.key(Key::Char('z'), ctrl);
         assert_eq!(s.annot, s.shot.bgra);
+    }
+
+    #[test]
+    fn panels_change_the_style_of_new_shapes() {
+        let mut s = session(Options::default());
+        s.control(Control::Head(2));
+        s.control(Control::ToStart(true));
+        s.control(Control::Free(true));
+        s.control(Control::StepStyle(4));
+        let style = s.prefs().style;
+        assert_eq!(style.arrow.head, Head::Double);
+        assert!(style.arrow.to_start && style.free);
+        assert_eq!(style.step, StepStyle::Pin);
+        assert!(matches!(
+            style.new_arrow(Pt::default()),
+            Kind::Curve(_, a) if a == style.arrow
+        ));
+    }
+
+    #[test]
+    fn stretching_plays_grains_with_gaps_and_stays_quiet_when_moved() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static PLAYED: AtomicUsize = AtomicUsize::new(0);
+        let mut s = session(Options {
+            on_stretch: Some(|_| {
+                PLAYED.fetch_add(1, Ordering::SeqCst);
+            }),
+            ..Options::default()
+        });
+        s.sel.set_rect(Rect {
+            left: 0,
+            top: 0,
+            width: 100,
+            height: 100,
+        });
+        s.stretch_sound();
+        assert_eq!(PLAYED.load(Ordering::SeqCst), 1);
+        s.stretch_sound();
+        assert_eq!(PLAYED.load(Ordering::SeqCst), 1, "same size, no grain");
+        s.sel.set_rect(Rect {
+            left: 0,
+            top: 0,
+            width: 500,
+            height: 100,
+        });
+        s.stretch_sound();
+        assert_eq!(PLAYED.load(Ordering::SeqCst), 1, "inside the gap");
     }
 
     #[test]

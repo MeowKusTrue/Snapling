@@ -31,6 +31,24 @@ pub(crate) const PIPETTE: [&str; 3] = [
     "M 16 4 C 17 3 19 3 20 4 C 21 5 21 7 20 8 L 17 11 L 13 7 Z",
     "M 14 9 L 6 17 L 5 20 L 8 19 L 16 11",
 ];
+pub(crate) const HEAD_SHARP: [&str; 2] = ["M 5 19 L 14 10", "M 11 5 H 19 V 13 Z"];
+pub(crate) const HEAD_SOFT: [&str; 2] = ["M 5 19 L 19 5", "M 10 5 H 19 V 14"];
+pub(crate) const HEAD_DOUBLE: [&str; 3] =
+    ["M 8 16 L 16 8", "M 12 5 H 19 V 12 Z", "M 5 12 V 19 H 12 Z"];
+pub(crate) const SHAPE_LINE: [&str; 1] = ["M 4 20 L 20 4"];
+pub(crate) const SHAPE_HAND: [&str; 1] = ["M 4 19 C 8 9 12 21 20 5"];
+pub(crate) const TO_END: [&str; 3] = [
+    "M 8 12 H 20",
+    "M 15 7 L 20 12 L 15 17",
+    "M 3 10 H 6 V 14 H 3 Z",
+];
+pub(crate) const TO_START: [&str; 3] = [
+    "M 4 12 H 16",
+    "M 9 7 L 4 12 L 9 17",
+    "M 18 10 H 21 V 14 H 18 Z",
+];
+pub(crate) const PREV: [&str; 1] = ["M 15 6 L 9 12 L 15 18"];
+pub(crate) const NEXT: [&str; 1] = ["M 9 6 L 15 12 L 9 18"];
 pub(crate) const DROP: [&str; 1] =
     ["M 12 4 C 12 4 6 11 6 15 C 6 18.3 8.7 21 12 21 C 15.3 21 18 18.3 18 15 C 18 11 12 4 12 4 Z"];
 

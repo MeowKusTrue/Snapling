@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "snapling-app"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "eframe",
  "egui-phosphor",
@@ -3833,7 +3833,7 @@ dependencies = [
 
 [[package]]
 name = "snapling-core"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "ab_glyph",
  "epaint_default_fonts",
@@ -3848,7 +3848,7 @@ dependencies = [
 
 [[package]]
 name = "snapling-overlay"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "snapling-core",
  "snapling-scene",
@@ -3859,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "snapling-scene"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "snapling-core",
  "tiny-skia 0.12.0",
@@ -3867,7 +3867,7 @@ dependencies = [
 
 [[package]]
 name = "snapling-translate"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "ort",
  "serde_json",
@@ -3881,7 +3881,7 @@ dependencies = [
 
 [[package]]
 name = "snapling-unix"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "ksni",
  "serde_json",
@@ -3892,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "snapling-win"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "snapling-core",
  "snapling-scene",

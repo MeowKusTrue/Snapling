@@ -727,6 +727,22 @@ pub fn live_icon(ui: &mut Ui, glyph: &str, tip: &str, turn: f32, grow: f32) -> R
     r.on_hover_text(tip)
 }
 
+/// Bar and words of a running download; keeps the window repainting while it lasts.
+pub fn download_bar(ui: &mut Ui, progress: &snapling_translate::Progress) {
+    let p = pal(ui.ctx());
+    ui.spacing_mut().item_spacing.y = 4.0;
+    if let Some(part) = progress.ratio() {
+        ui.add(
+            egui::ProgressBar::new(part)
+                .desired_height(6.0)
+                .fill(ACCENT),
+        );
+    }
+    short(ui, RichText::new(progress.text()).size(12.5).color(p.muted));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(200));
+}
+
 /// Placeholder of something still loading: a calm pulse, the frames only while it is on screen.
 pub fn skeleton(ui: &Ui, rect: Rect, radius: f32) {
     let ctx = ui.ctx();

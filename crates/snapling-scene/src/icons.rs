@@ -57,7 +57,7 @@ pub(crate) fn tool_icon(t: Tool) -> &'static [&'static str] {
 
 pub(crate) fn icon_data(b: Button) -> &'static [&'static str] {
     match b {
-        Button::Draw => tool_icon(Tool::Pen),
+        Button::Draw => tool_icon(Tool::Arrow),
         Button::Copy => &[
             "M 10.5 8 H 17.5 Q 20 8 20 10.5 V 17.5 Q 20 20 17.5 20 H 10.5 Q 8 20 8 17.5 V 10.5 Q 8 8 10.5 8 Z",
             "M 16 8 V 6 Q 16 4 14 4 H 6 Q 4 4 4 6 V 14 Q 4 16 6 16 H 8",

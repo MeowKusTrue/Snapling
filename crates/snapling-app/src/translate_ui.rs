@@ -6,8 +6,10 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use egui_phosphor::regular as icon;
 use snapling_core::config::{Config, Online};
 use snapling_core::i18n::{t, tf};
+use snapling_translate::Progress;
 use snapling_translate::{Direction, LANGS, Lang, Model, detect, lang_name, route, target_for};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub struct Hooks {
@@ -30,7 +32,7 @@ type Reply = (u64, Result<String, String>);
 enum Job {
     /// id, from, to, text, service and key (`None` = offline).
     Text(u64, Lang, Lang, String, Option<(Online, String)>),
-    Fetch(u64, Vec<&'static Direction>),
+    Fetch(u64, Vec<&'static Direction>, Arc<Progress>),
 }
 
 /// `text_only`: the result of recognition, translated only when asked.
@@ -83,11 +85,11 @@ fn worker(
     let mut loaded: Vec<(String, Model)> = Vec::new();
     for job in rx {
         let (id, res) = match job {
-            Job::Fetch(id, dirs) => {
+            Job::Fetch(id, dirs, progress) => {
                 let via = proxy();
-                let got = dirs
-                    .iter()
-                    .try_for_each(|d| snapling_translate::download(&models, d, via.as_deref()));
+                let got = dirs.iter().try_for_each(|d| {
+                    snapling_translate::download(&models, d, via.as_deref(), &progress)
+                });
                 (id, got.map(|()| String::new()))
             }
             Job::Text(id, from, to, text, Some((service, key))) => {
@@ -133,6 +135,7 @@ struct Window {
     /// Models this pair lacks: the pane asks to download them.
     need: Vec<&'static Direction>,
     fetching: bool,
+    fetched: Arc<Progress>,
     hooks: Hooks,
     tx: Sender<Job>,
     rx: Receiver<Reply>,
@@ -165,6 +168,7 @@ impl Window {
             to: target_for(from, &hooks.target),
             need: Vec::new(),
             fetching: false,
+            fetched: Arc::default(),
             original,
             translation: String::new(),
             text_only,
@@ -226,7 +230,11 @@ impl Window {
         self.pending = Some(self.next_id);
         self.fetching = true;
         self.status = t("Скачиваю модель…").into();
-        let _ = self.tx.send(Job::Fetch(self.next_id, self.need.clone()));
+        self.fetched = Arc::default();
+        self.fetched
+            .plan(self.need.len() * snapling_translate::FILES.len());
+        let job = Job::Fetch(self.next_id, self.need.clone(), self.fetched.clone());
+        let _ = self.tx.send(job);
     }
 
     /// Service button: key first, then a one-time confirmation, then the send.
@@ -577,6 +585,10 @@ impl eframe::App for Window {
                                     .add_enabled_ui(free, |ui| ui::primary(ui, label, None, 36.0));
                                 if r.inner.clicked() {
                                     self.fetch();
+                                }
+                                if self.fetching {
+                                    ui.add_space(8.0);
+                                    ui::download_bar(ui, &self.fetched);
                                 }
                                 return;
                             }

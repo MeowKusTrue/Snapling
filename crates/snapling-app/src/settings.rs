@@ -15,7 +15,9 @@ use snapling_core::i18n;
 use snapling_core::i18n::{n, t, tf};
 use snapling_core::sound::Sound;
 use snapling_core::storage;
+use snapling_translate::Progress;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 
 pub struct Hooks {
@@ -162,6 +164,7 @@ struct Settings {
     proxy: String,
     /// Row of the model being downloaded and its result.
     fetching: Option<(String, Receiver<Result<(), String>>)>,
+    fetched: Arc<Progress>,
     /// Update check under way and what it said.
     update: Option<Receiver<UpdateReply>>,
     update_text: String,
@@ -169,6 +172,7 @@ struct Settings {
     /// Installer to fetch, and the running download.
     update_setup: Option<(String, String)>,
     installing: Option<Receiver<Result<PathBuf, String>>>,
+    installed: Arc<Progress>,
 }
 
 type UpdateReply = Result<Option<snapling_translate::Release>, String>;
@@ -194,11 +198,13 @@ impl Settings {
             recording: None,
             refused: None,
             fetching: None,
+            fetched: Arc::default(),
             update: None,
             update_text: String::new(),
             update_page: None,
             update_setup: None,
             installing: None,
+            installed: Arc::default(),
         }
     }
 
@@ -1437,12 +1443,21 @@ impl Settings {
                 let (tx, rx) = channel();
                 let ctx = ui.ctx().clone();
                 let dir = self.hooks.models.join("update");
+                self.installed = Arc::default();
+                let progress = self.installed.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(snapling_translate::download_setup(&setup, &dir));
+                    let got = snapling_translate::download_setup(&setup, &dir, &progress);
+                    let _ = tx.send(got);
                     ctx.request_repaint();
                 });
                 self.installing = Some(rx);
                 self.update_text = t("Скачиваю…").into();
+            }
+            if self.installing.is_some() {
+                ui.vertical(|ui| {
+                    ui.set_width(280.0);
+                    ui::download_bar(ui, &self.installed);
+                });
             }
             if let Some(page) = &self.update_page
                 && ui::tone(ui, t("Открыть страницу выпуска"), None, 38.0).clicked()
@@ -1486,13 +1501,17 @@ impl Settings {
         &mut self,
         ctx: &egui::Context,
         id: &str,
-        work: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+        files: usize,
+        work: impl FnOnce(&Path, &Progress) -> Result<(), String> + Send + 'static,
     ) {
         let (tx, rx) = channel();
         let models = self.hooks.models.clone();
         let ctx = ctx.clone();
+        self.fetched = Arc::default();
+        self.fetched.plan(files);
+        let progress = self.fetched.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(work(&models));
+            let _ = tx.send(work(&models, &progress));
             ctx.request_repaint();
         });
         self.fetching = Some((id.to_string(), rx));
@@ -1502,7 +1521,10 @@ impl Settings {
     /// Download or Remove of one row, by whether its files are there.
     fn model_button(&self, ui: &mut egui::Ui, id: &str, installed: bool) -> Option<bool> {
         if self.fetching.as_ref().is_some_and(|f| f.0 == id) {
-            ui.label(RichText::new(t("Скачиваю…")).color(ui::pal(ui.ctx()).muted));
+            ui.vertical(|ui| {
+                ui.set_width(250.0);
+                ui::download_bar(ui, &self.fetched);
+            });
             return None;
         }
         let label = if installed {
@@ -1597,8 +1619,9 @@ impl Settings {
         match action {
             Some((None, false)) => {
                 let via = (self.hooks.get_proxy)();
-                self.start_fetch(&ctx, paddle::FOLDER, move |models| {
-                    paddle::download(models, via.as_deref())
+                let files = paddle::FILES.len();
+                self.start_fetch(&ctx, paddle::FOLDER, files, move |models, progress| {
+                    paddle::download(models, via.as_deref(), progress)
                 });
             }
             Some((None, true)) => {
@@ -1606,11 +1629,16 @@ impl Settings {
             }
             Some((Some(code), false)) => {
                 let via = (self.hooks.get_proxy)();
-                self.start_fetch(&ctx, code, move |models| {
+                let of_code = |d: &&snapling_translate::Direction| d.from == code || d.to == code;
+                let files =
+                    DIRECTIONS.iter().filter(of_code).count() * snapling_translate::FILES.len();
+                self.start_fetch(&ctx, code, files, move |models, progress| {
                     DIRECTIONS
                         .iter()
                         .filter(|d| d.from == code || d.to == code)
-                        .try_for_each(|d| snapling_translate::download(models, d, via.as_deref()))
+                        .try_for_each(|d| {
+                            snapling_translate::download(models, d, via.as_deref(), progress)
+                        })
                 });
             }
             Some((Some(code), true)) => {

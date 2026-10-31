@@ -343,9 +343,86 @@ pub fn latest_release() -> Result<Option<Release>, String> {
     Ok(parse_release(&json))
 }
 
+/// How far a download got, shared between its thread and the window showing it.
+#[derive(Default)]
+pub struct Progress(std::sync::Mutex<Fetched>);
+
+#[derive(Default)]
+struct Fetched {
+    done: u64,
+    total: u64,
+    file: usize,
+    files: usize,
+    started: Option<std::time::Instant>,
+}
+
+impl Progress {
+    /// Sets how many files the whole download has.
+    pub fn plan(&self, files: usize) {
+        if let Ok(mut f) = self.0.lock() {
+            f.files = files;
+        }
+    }
+
+    fn begin(&self, total: u64) {
+        if let Ok(mut f) = self.0.lock() {
+            f.done = 0;
+            f.total = total;
+            f.started = Some(std::time::Instant::now());
+        }
+    }
+
+    fn file_over(&self) {
+        if let Ok(mut f) = self.0.lock() {
+            f.file += 1;
+        }
+    }
+
+    fn got(&self, bytes: usize) {
+        if let Ok(mut f) = self.0.lock() {
+            f.done += bytes as u64;
+        }
+    }
+
+    /// Part of the current file; `None` while its size is unknown.
+    pub fn ratio(&self) -> Option<f32> {
+        let f = self.0.lock().ok()?;
+        (f.total > 0).then(|| f.done as f32 / f.total as f32)
+    }
+
+    /// For example «Файл 2 из 3 · 45.2 из 117.0 МБ · 3.2 МБ/с».
+    pub fn text(&self) -> String {
+        let Ok(f) = self.0.lock() else {
+            return String::new();
+        };
+        let Some(started) = f.started else {
+            return t("Скачиваю…").into();
+        };
+        let mb = |v: u64| format!("{:.1}", v as f64 / 1_048_576.0);
+        let per_second = f.done as f64 / started.elapsed().as_secs_f64().max(0.1);
+        let done = if f.total > 0 {
+            tf("{0} из {1} МБ", &[("0", &mb(f.done)), ("1", &mb(f.total))])
+        } else {
+            tf("{0} МБ", &[("0", &mb(f.done))])
+        };
+        let speed = tf("{0} МБ/с", &[("0", &mb(per_second as u64))]);
+        if f.files > 1 {
+            let n = (f.file + 1).min(f.files);
+            let of = tf("Файл {0} из {1}", &[("0", &n), ("1", &f.files)]);
+            format!("{of} · {done} · {speed}")
+        } else {
+            format!("{done} · {speed}")
+        }
+    }
+}
+
 /// Downloads the installer into `dir` and checks it against the SHA-256 file of the release.
 // ponytail: both come from the same release page; signing the hash needs a key the user holds.
-pub fn download_setup(setup: &(String, String), dir: &Path) -> Result<PathBuf, String> {
+pub fn download_setup(
+    setup: &(String, String),
+    dir: &Path,
+    progress: &Progress,
+) -> Result<PathBuf, String> {
     let mut sums = agent_via(None).get(&setup.1).call().map_err(err)?;
     let text = sums.body_mut().read_to_string().map_err(err)?;
     let want = text
@@ -359,17 +436,28 @@ pub fn download_setup(setup: &(String, String), dir: &Path) -> Result<PathBuf, S
     std::fs::create_dir_all(dir).map_err(err)?;
     let dest = dir.join(SETUP);
     let _ = std::fs::remove_file(&dest);
-    fetch_file(&setup.0, &dest, &want, None)?;
+    fetch_file(&setup.0, &dest, &want, None, progress)?;
     Ok(dest)
 }
 
 /// Fetches the model files from Hugging Face, checking each against its pinned SHA-256.
 /// The only network access of the offline translator; called only after the user agreed.
-pub fn download(models: &Path, d: &Direction, proxy: Option<&str>) -> Result<(), String> {
+pub fn download(
+    models: &Path,
+    d: &Direction,
+    proxy: Option<&str>,
+    progress: &Progress,
+) -> Result<(), String> {
     let root = models.join(d.model());
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     for file in FILES {
-        fetch_file(&d.url(file), &root.join(file), d.sha256(file), proxy)?;
+        fetch_file(
+            &d.url(file),
+            &root.join(file),
+            d.sha256(file),
+            proxy,
+            progress,
+        )?;
     }
     Ok(())
 }
@@ -380,10 +468,12 @@ pub(crate) fn fetch_file(
     dest: &Path,
     want: &str,
     proxy: Option<&str>,
+    progress: &Progress,
 ) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
     if dest.is_file() {
+        progress.file_over();
         return Ok(());
     }
     let file = dest
@@ -396,6 +486,7 @@ pub(crate) fn fetch_file(
             .get(url)
             .call()
             .map_err(|e| format!("{file}: {e}"))?;
+        progress.begin(resp.body().content_length().unwrap_or(0));
         let mut body = resp.into_body().into_reader();
         let mut out = std::fs::File::create(&part).map_err(err)?;
         let mut hash = Sha256::new();
@@ -407,6 +498,7 @@ pub(crate) fn fetch_file(
             }
             hash.update(&buf[..n]);
             out.write_all(&buf[..n]).map_err(err)?;
+            progress.got(n);
         }
         let got: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
         if got != want {
@@ -419,6 +511,7 @@ pub(crate) fn fetch_file(
         std::fs::rename(&part, dest).map_err(err)
     };
     let res = fetch();
+    progress.file_over();
     if res.is_err() {
         let _ = std::fs::remove_file(&part);
     }
@@ -562,6 +655,22 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_counts_files_and_bytes() {
+        let p = Progress::default();
+        p.plan(3);
+        assert_eq!(p.ratio(), None);
+        p.file_over();
+        p.begin(4 << 20);
+        p.got(1 << 20);
+        assert_eq!(p.ratio(), Some(0.25));
+        let text = p.text();
+        assert!(
+            text.contains("2") && text.contains("3") && text.contains("1.0"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn proxy_errors_do_not_repeat_the_address() {
@@ -721,7 +830,7 @@ Cancel",
             let mut text = text.to_string();
             let t0 = std::time::Instant::now();
             for d in route(from, to) {
-                download(&models, d, None).unwrap();
+                download(&models, d, None, &Progress::default()).unwrap();
                 text = Model::load(&models, d).unwrap().translate(&text).unwrap();
             }
             println!("{from}-{to} {:?}: {text}", t0.elapsed());

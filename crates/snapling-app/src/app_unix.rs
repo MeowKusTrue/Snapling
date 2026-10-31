@@ -202,7 +202,8 @@ fn read_text(bgra: &[u8], width: u32, height: u32) -> Result<String, String> {
         if !unix::ask(&q) {
             return Ok(String::new());
         }
-        paddle::download(&models, unix::secret_get(PROXY).as_deref())?;
+        let progress = snapling_translate::Progress::default();
+        paddle::download(&models, unix::secret_get(PROXY).as_deref(), &progress)?;
     }
     paddle::recognize(&models, bgra, width, height)
 }

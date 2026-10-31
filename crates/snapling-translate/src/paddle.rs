@@ -2,7 +2,7 @@
 //! and the East Slavic recognizer, which reads Russian and English on one line.
 //! Sessions live for one call, so the tray process does not keep the models in memory.
 
-use crate::{err, fetch_file, session};
+use crate::{Progress, err, fetch_file, session};
 use ort::session::Session;
 use ort::value::Tensor;
 use snapling_core::i18n::t;
@@ -13,7 +13,7 @@ pub const FOLDER: &str = "paddleocr";
 pub const REPO: &str = "monkt/paddleocr-onnx";
 pub const DOWNLOAD_MB: u32 = 11;
 
-const FILES: [(&str, &str, &str); 3] = [
+pub const FILES: [(&str, &str, &str); 3] = [
     (
         "det.onnx",
         "detection/v3/det.onnx",
@@ -45,12 +45,12 @@ pub fn installed(models: &Path) -> bool {
 }
 
 /// Called only after the user agreed.
-pub fn download(models: &Path, proxy: Option<&str>) -> Result<(), String> {
+pub fn download(models: &Path, proxy: Option<&str>, progress: &Progress) -> Result<(), String> {
     let root = models.join(FOLDER);
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     for (file, remote, sha) in FILES {
         let url = format!("https://huggingface.co/{REPO}/resolve/main/{remote}");
-        fetch_file(&url, &root.join(file), sha, proxy)?;
+        fetch_file(&url, &root.join(file), sha, proxy, progress)?;
     }
     Ok(())
 }

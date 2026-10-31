@@ -392,7 +392,8 @@ fn read_text(img: &snapling_win::Image, lang: &str, paddle: bool) -> Result<Stri
         }
         info!("model download: {}", engine::FOLDER);
         let proxy = snapling_win::secret::get(DEEPL_PROXY);
-        engine::download(&models, proxy.as_deref())?;
+        let progress = snapling_translate::Progress::default();
+        engine::download(&models, proxy.as_deref(), &progress)?;
     }
     engine::recognize(&models, &img.bgra, img.width, img.height)
 }

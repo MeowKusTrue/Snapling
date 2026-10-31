@@ -154,7 +154,8 @@ pub struct Recording {
 }
 
 impl Recording {
-    /// Records `area` (desktop pixels) into `path` until [`Recording::stop`] or `max_seconds`.
+    /// Records `area` (desktop pixels) into `path` until [`Recording::stop`] or `max_seconds`;
+    /// 0 has no limit.
     pub fn start(
         area: Rect,
         format: RecordFormat,
@@ -233,10 +234,10 @@ fn record(
     std::thread::sleep(Duration::from_millis(150));
     let step = Duration::from_millis(1000 / u64::from(fps));
     let begin = Instant::now();
-    let limit = Duration::from_secs(u64::from(max_seconds.max(1)));
+    let limit = (max_seconds > 0).then(|| Duration::from_secs(u64::from(max_seconds)));
     let mut last = None;
     let mut prev = begin;
-    while !stop.load(Ordering::Relaxed) && begin.elapsed() < limit {
+    while !stop.load(Ordering::Relaxed) && limit.is_none_or(|l| begin.elapsed() < l) {
         let tick = Instant::now();
         let frame = grab(area.left, area.top, area.width, area.height, cursor)?;
         let ms = prev.elapsed().as_millis().max(1) as u32;

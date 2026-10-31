@@ -1004,20 +1004,20 @@ impl Settings {
                 },
             );
             divider(ui);
-            row(
-                ui,
-                t("Останавливать через"),
-                t("Запись закончится сама."),
-                |ui| {
-                    let all = [60, 120, 300];
-                    let now = all.iter().position(|v| *v == rec.max_seconds).unwrap_or(1);
-                    let items = [t("1 мин"), t("2 мин"), t("5 мин")];
-                    if let Some(i) = segmented(ui, &items, now, 30.0) {
-                        rec.max_seconds = all[i];
-                        store.set("record", "max_seconds", i64::from(all[i]));
-                    }
-                },
-            );
+            let hint = if rec.max_seconds == 0 {
+                t("Запись идёт, пока не нажмёшь стоп.")
+            } else {
+                t("Запись закончится сама.")
+            };
+            row(ui, t("Останавливать"), hint, |ui| {
+                let all = [0, 60, 120, 300];
+                let now = all.iter().position(|v| *v == rec.max_seconds).unwrap_or(0);
+                let items = [t("Вручную"), t("1 мин"), t("2 мин"), t("5 мин")];
+                if let Some(i) = segmented(ui, &items, now, 30.0) {
+                    rec.max_seconds = all[i];
+                    store.set("record", "max_seconds", i64::from(all[i]));
+                }
+            });
             divider(ui);
             row(
                 ui,

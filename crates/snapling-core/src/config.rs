@@ -73,8 +73,8 @@ strength = 0
 format = "gif"
 # Кадров в секунду: 10, 15 или 30.
 fps = 15
-# Запись останавливается сама через столько секунд.
-max_seconds = 120
+# Запись останавливается сама через столько секунд. 0 — только вручную.
+max_seconds = 0
 # Показывать курсор на записи.
 cursor = true
 # Секунды отсчёта перед началом записи, 0 — сразу.
@@ -184,7 +184,7 @@ impl Default for Record {
         Self {
             format: RecordFormat::Gif,
             fps: 15,
-            max_seconds: 120,
+            max_seconds: 0,
             cursor: true,
             countdown: 0,
         }

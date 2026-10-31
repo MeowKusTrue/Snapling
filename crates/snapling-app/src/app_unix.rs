@@ -5,6 +5,7 @@ use crate::app_dir;
 use snapling_core::config::{Action, Config, Engine, Format, RecordFormat, Save};
 use snapling_core::i18n::{t, tf};
 use snapling_core::record::{Added, Stitcher};
+use snapling_core::selection::Point;
 use snapling_core::selection::Rect;
 use snapling_core::sound::{self, Sound};
 use snapling_core::storage::{self, Stamp};
@@ -357,23 +358,37 @@ fn region(cfg: &Config, auto: Option<Outcome>) -> Result<(), String> {
             strength: cfg.blur.strength.min(2),
         },
         targets: cap.targets.clone(),
+        rail_at: cfg.capture.rail.map(|[x, y]| Point { x, y }),
+        ..Options::default()
     };
     let ended = snapling_overlay::run(cap.shot.clone(), opts)?;
     let path = crate::ui::config_path();
-    if ended.picker != cfg.capture.picker {
-        Config::update(&path, "capture", "picker", ended.picker)?;
+    let prefs = ended.prefs;
+    if prefs.picker != cfg.capture.picker {
+        Config::update(&path, "capture", "picker", prefs.picker)?;
     }
-    if ended.color_format != cfg.capture.color_format {
-        Config::update(&path, "capture", "color_format", ended.color_format.key())?;
+    if prefs.color_format != cfg.capture.color_format {
+        Config::update(&path, "capture", "color_format", prefs.color_format.key())?;
     }
-    if ended.blur.gauss != cfg.blur.gauss {
-        Config::update(&path, "blur", "gauss", ended.blur.gauss)?;
+    if prefs.blur.gauss != cfg.blur.gauss {
+        Config::update(&path, "blur", "gauss", prefs.blur.gauss)?;
     }
-    if ended.blur.strength != cfg.blur.strength {
-        Config::update(&path, "blur", "strength", i64::from(ended.blur.strength))?;
+    if prefs.blur.strength != cfg.blur.strength {
+        Config::update(&path, "blur", "strength", i64::from(prefs.blur.strength))?;
+    }
+    if let Some(p) = prefs
+        .rail_at
+        .filter(|p| cfg.capture.rail != Some([p.x, p.y]))
+    {
+        Config::update(
+            &path,
+            "capture",
+            "rail",
+            vec![i64::from(p.x), i64::from(p.y)],
+        )?;
     }
     let mut cfg = cfg.clone();
-    cfg.capture.color_format = ended.color_format;
+    cfg.capture.color_format = prefs.color_format;
     match ended.result {
         Some((img, outcome)) => after(&cfg, &cap, img, outcome),
         None => Ok(()),

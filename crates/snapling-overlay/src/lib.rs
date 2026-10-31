@@ -1,12 +1,12 @@
 //! Selection overlay on winit and softbuffer, for systems without the Win32 one: a fullscreen
 //! window showing the shot. All behavior is in [`Session`]; this file only feeds it events.
 
-mod session;
-
 mod pin;
 
 pub use pin::run as pin;
-pub use session::{Key, Mods, Options, Outcome, Pointer, Session, Shot, Step};
+pub use snapling_scene::session::{
+    Key, Mods, Options, Outcome, Pointer, Prefs, Session, Shot, Step,
+};
 
 use snapling_core::selection::Point;
 use std::num::NonZeroU32;
@@ -196,9 +196,7 @@ impl ApplicationHandler for App {
 /// What an overlay ended with, and what its panels should keep for the next one.
 pub struct Ended {
     pub result: Option<(Shot, Outcome)>,
-    pub blur: snapling_core::annotate::BlurStyle,
-    pub picker: bool,
-    pub color_format: snapling_core::color::ColorFormat,
+    pub prefs: Prefs,
 }
 
 /// Shows the shot and blocks until the user is done.
@@ -218,15 +216,10 @@ pub fn run(shot: Shot, opts: Options) -> Result<Ended, String> {
         done: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
-    let (blur, picker, color_format) = app.session.prefs();
+    let prefs = app.session.prefs();
     let result = match app.done {
         Some(Step::Done(out)) => app.session.result(out).map(|img| (img, out)),
         _ => None,
     };
-    Ok(Ended {
-        result,
-        blur,
-        picker,
-        color_format,
-    })
+    Ok(Ended { result, prefs })
 }

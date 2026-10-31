@@ -100,7 +100,12 @@ pub fn run(file: &Path, hooks: Hooks) {
         options,
         Box::new(move |cc| {
             ui::init(cc);
-            Ok(Box::new(Editor::new(base, raw.app, hooks)))
+            Ok(Box::new(Editor::new(
+                base,
+                raw.app,
+                hooks,
+                cc.egui_ctx.clone(),
+            )))
         }),
     );
     if let Err(e) = res {
@@ -131,10 +136,13 @@ struct Editor {
     zoom: Option<f32>,
     pan: Vec2,
     status: String,
+    /// A save running on its thread.
+    saving: Option<std::thread::JoinHandle<Result<PathBuf, String>>>,
+    ctx: egui::Context,
 }
 
 impl Editor {
-    fn new(base: Pixmap, app: String, hooks: Hooks) -> Self {
+    fn new(base: Pixmap, app: String, hooks: Hooks, ctx: egui::Context) -> Self {
         Self {
             base,
             app,
@@ -162,6 +170,8 @@ impl Editor {
             zoom: None,
             pan: Vec2::ZERO,
             status: String::new(),
+            saving: None,
+            ctx,
         }
     }
 
@@ -211,13 +221,35 @@ impl Editor {
         }
     }
 
+    /// Encodes on its own thread: a 4K PNG takes ~0.3 s. A press during a save is ignored.
     fn save(&mut self) {
+        if self.saving.is_some() {
+            return;
+        }
         let (bgra, w, h) = self.export();
-        // ponytail: encodes on the UI thread (a 4K PNG freezes ~0.3 s); move to a thread if it bothers.
-        self.status = match (self.hooks.save)(&bgra, w, h, &self.app) {
-            Ok(p) => tf("Сохранено: {0}", &[("0", &p.display())]),
-            Err(e) => tf("Не удалось сохранить: {e}", &[("e", &e)]),
-        };
+        let (save, app, ctx) = (self.hooks.save, self.app.clone(), self.ctx.clone());
+        self.saving = Some(std::thread::spawn(move || {
+            let done = save(&bgra, w, h, &app);
+            ctx.request_repaint();
+            done
+        }));
+        self.status = t("Сохраняю…").into();
+    }
+
+    fn poll_save(&mut self) {
+        if self.saving.as_ref().is_some_and(|h| h.is_finished()) {
+            self.status = self.save_result();
+        }
+    }
+
+    /// Waits for the running save: what it says for the status line.
+    fn save_result(&mut self) -> String {
+        match self.saving.take().map(std::thread::JoinHandle::join) {
+            Some(Ok(Ok(p))) => tf("Сохранено: {0}", &[("0", &p.display())]),
+            Some(Ok(Err(e))) => tf("Не удалось сохранить: {e}", &[("e", &e)]),
+            Some(Err(_)) => tf("Не удалось сохранить: {e}", &[("e", &"panic")]),
+            None => String::new(),
+        }
     }
 
     fn save_as(&mut self) {
@@ -885,6 +917,7 @@ fn swatch(ui: &mut egui::Ui, c: [u8; 3], on: bool) -> egui::Response {
 impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui::preview(ui.ctx());
+        self.poll_save();
         self.shortcuts(ui.ctx());
         let ctx = ui.ctx().clone();
         ui::frame_edges(&ctx);
@@ -897,6 +930,11 @@ impl eframe::App for Editor {
         self.rail(&ctx);
         self.inspector(&ctx);
         self.zoom_pill(&ctx, k);
+    }
+
+    /// A save still running would lose its file with the process.
+    fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        self.save_result();
     }
 }
 

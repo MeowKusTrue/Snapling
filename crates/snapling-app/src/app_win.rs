@@ -4,7 +4,7 @@ use snapling_core::config::{
 };
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n::{t, tf};
-use snapling_core::selection::Rect;
+use snapling_core::selection::{Point, Rect};
 use snapling_core::sound::{self, Sound};
 use snapling_core::{annotate, history, storage};
 use snapling_scene::{MenuIcon, MenuRow, ToastAction};
@@ -818,12 +818,17 @@ fn start_recording(img: snapling_win::Image, app: String) {
 fn save_prefs(p: snapling_win::overlay::Prefs) {
     snapling_win::overlay::set_blur(p.blur.gauss, p.blur.strength);
     snapling_win::overlay::set_color(p.picker, p.color_format);
+    snapling_win::overlay::set_rail(p.rail_at);
     let path = crate::ui::config_path();
     let Ok(cfg) = Config::load_or_create(&path) else {
         return;
     };
     if cfg.capture.picker != p.picker {
         let _ = Config::update(&path, "capture", "picker", p.picker);
+    }
+    if let Some(at) = p.rail_at.filter(|a| cfg.capture.rail != Some([a.x, a.y])) {
+        let at = vec![i64::from(at.x), i64::from(at.y)];
+        let _ = Config::update(&path, "capture", "rail", at);
     }
     if cfg.capture.color_format != p.color_format {
         let _ = Config::update(&path, "capture", "color_format", p.color_format.key());
@@ -1009,6 +1014,7 @@ fn apply_config(cfg: &Config) {
     snapling_win::overlay::set_instant_copy(cfg.capture.instant_copy);
     snapling_win::overlay::set_loupe(cfg.capture.loupe);
     snapling_win::overlay::set_color(cfg.capture.picker, cfg.capture.color_format);
+    snapling_win::overlay::set_rail(cfg.capture.rail.map(|[x, y]| Point { x, y }));
     DELAY.set(cfg.capture.delay.clamp(1, 60));
     RECORD.set(cfg.record);
     snapling_win::overlay::set_blur(cfg.blur.gauss, cfg.blur.strength.min(2));

@@ -269,6 +269,8 @@ pub struct Capture {
     pub loupe: bool,
     pub picker: bool,
     pub color_format: ColorFormat,
+    /// Where the tool rail was dragged, on the desktop.
+    pub rail: Option<[i32; 2]>,
     pub toast: bool,
 }
 
@@ -282,6 +284,7 @@ impl Default for Capture {
             loupe: true,
             picker: false,
             color_format: ColorFormat::Hex,
+            rail: None,
             toast: true,
         }
     }

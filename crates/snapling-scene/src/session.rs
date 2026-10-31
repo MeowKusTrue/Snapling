@@ -1,10 +1,12 @@
 //! Everything the selection overlay does, with no window: input goes in, a frame and an outcome
-//! come out. Same behavior as `snapling-win/overlay.rs`, which keeps its own Win32 copy.
+//! come out. Interaction follows EiSen's overlay (MIT, © 2026 Tran Trong Thuc). The windows that
+//! feed it are `snapling-win/overlay.rs` and `snapling-overlay`.
 
 use snapling_core::annotate::{self, BlurStyle, Element, Head, History, Kind, Pt};
 use snapling_core::color::ColorFormat;
-use snapling_core::selection::{Corner, Hit, MIN_SELECTION_PX, Point, Rect, Selection};
-use snapling_scene::{
+use snapling_core::selection::{Corner, Hit, HoverChain, MIN_SELECTION_PX, Point, Rect, Selection};
+
+use crate::{
     Button, COLORS, Control, Draw, Hover, Layout, Loupe, SIZES, Scene, TOOLS, Target, Tool,
     dim_into,
 };
@@ -51,6 +53,31 @@ pub struct Options {
     pub blur: BlurStyle,
     /// Windows under the overlay, topmost first, with their app names.
     pub targets: Vec<(Rect, String)>,
+    /// Monitors and their DPI scales; empty: the shot is one monitor of `scale`.
+    pub monitors: Vec<(Rect, f32)>,
+    /// Cursor at open.
+    pub mouse: Point,
+    /// Where the tool rail was left, on the desktop; `None`: its usual place.
+    pub rail_at: Option<Point>,
+}
+
+/// What the panels change and the next overlay should remember.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prefs {
+    pub blur: BlurStyle,
+    pub picker: bool,
+    pub color_format: ColorFormat,
+    /// Desktop position of the rail.
+    pub rail_at: Option<Point>,
+}
+
+/// The window asks for the elements of the hovered target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ask {
+    /// Index in `Options::targets`.
+    pub window: usize,
+    /// The cursor came to this target just now: its app name is wanted too.
+    pub entered: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +135,22 @@ pub struct Session {
     armed: bool,
     lasso: Vec<Pt>,
     stroke: Vec<Pt>,
+    /// Monitor of the rail.
+    rail: Rect,
+    rail_at: Option<Point>,
+    /// The position the next overlay gets: the end of the last drag.
+    rail_kept: Option<Point>,
+    /// Press point inside the rail while it is being dragged.
+    rail_grab: Option<Point>,
+    /// The rail stays out next to a finished selection.
+    rail_open: bool,
+    chain: HoverChain,
+    chain_win: Option<usize>,
+    /// App name of the hovered window.
+    app: String,
+    ask: Option<Ask>,
+    /// The next repaint takes the whole screen.
+    repaint_all: bool,
     opts: Options,
 }
 
@@ -118,15 +161,41 @@ fn pen_point(p: Point) -> Pt {
     }
 }
 
+fn clip(r: Rect, to: Rect) -> Rect {
+    let l = r.left.max(to.left);
+    let t = r.top.max(to.top);
+    Rect {
+        left: l,
+        top: t,
+        width: (r.right().min(to.right()) - l).max(0),
+        height: (r.bottom().min(to.bottom()) - t).max(0),
+    }
+}
+
+/// Copies `area` between two frames `width` pixels wide.
+fn copy_area(dst: &mut [u8], src: &[u8], width: u32, area: Rect) {
+    let row = width as usize * 4;
+    let (l, e) = (area.left as usize * 4, area.right() as usize * 4);
+    for y in area.top as usize..area.bottom() as usize {
+        let at = y * row;
+        dst[at + l..at + e].copy_from_slice(&src[at + l..at + e]);
+    }
+}
+
 impl Session {
     pub fn new(shot: Shot, opts: Options) -> Self {
         let len = shot.bgra.len();
-        Self {
+        let rail_at = opts.rail_at.map(|p| Point {
+            x: p.x - shot.x,
+            y: p.y - shot.y,
+        });
+        let mouse = opts.mouse;
+        let mut s = Self {
             annot: shot.bgra.clone(),
             dim: vec![0; len],
             dim_level: None,
             sel: Selection::new(shot.width as i32, shot.height as i32),
-            mouse: Point::default(),
+            mouse,
             layout: Layout::default(),
             hover_btn: None,
             pen: Pen {
@@ -144,9 +213,22 @@ impl Session {
             armed: false,
             lasso: Vec::new(),
             stroke: Vec::new(),
+            rail: Rect::default(),
+            rail_at,
+            rail_kept: opts.rail_at,
+            rail_grab: None,
+            rail_open: false,
+            chain: HoverChain::default(),
+            chain_win: None,
+            app: String::new(),
+            ask: None,
+            repaint_all: false,
             shot,
             opts,
-        }
+        };
+        s.rail = s.monitor_at(rail_at.unwrap_or(mouse)).0;
+        s.update_hover(mouse);
+        s
     }
 
     fn bounds(&self) -> Rect {
@@ -158,42 +240,157 @@ impl Session {
         }
     }
 
-    fn handle_size(&self) -> i32 {
-        (8.0 * self.opts.scale).round() as i32
+    /// The monitor at `p`, or the nearest, with its scale.
+    fn monitor_at(&self, p: Point) -> (Rect, f32) {
+        let away = |m: &&(Rect, f32)| {
+            let dx = (m.0.left - p.x).max(p.x - m.0.right() + 1).max(0);
+            let dy = (m.0.top - p.y).max(p.y - m.0.bottom() + 1).max(0);
+            dx + dy
+        };
+        let near = self.opts.monitors.iter().min_by_key(away);
+        near.copied().unwrap_or((self.bounds(), self.opts.scale))
+    }
+
+    fn handle_size(&self, p: Point) -> i32 {
+        (8.0 * self.monitor_at(p).1).round().max(1.0) as i32
     }
 
     fn free(&self) -> bool {
         self.pen.tool.is_none() && !self.pen.lasso_mode
     }
 
-    fn hover_rect(&self) -> Option<(Rect, Target, &str)> {
-        if self.sel.rect().is_some() || self.sel.is_dragging() || !self.free() {
-            return None;
+    /// Window or monitor under `p`; a window also asks for its elements.
+    /// Returns whether the highlighted rect changed.
+    fn update_hover(&mut self, p: Point) -> bool {
+        if self.sel.confirmed() || self.sel.is_dragging() || !self.free() {
+            return false;
         }
-        let win = self.opts.targets.iter().find(|t| t.0.contains(self.mouse));
-        Some(match win {
-            Some((r, app)) => (*r, Target::Window, app.as_str()),
-            None => (self.bounds(), Target::Screen, ""),
-        })
+        let before = self.chain.current();
+        let win = self.opts.targets.iter().position(|t| t.0.contains(p));
+        let same = win == self.chain_win && !self.chain.is_empty();
+        if same && self.chain.deepest().is_some_and(|r| r.contains(p)) {
+            return false;
+        }
+        if same {
+            self.chain.retain_containing(p);
+        } else {
+            let monitors = &self.opts.monitors;
+            let base = win
+                .map(|i| self.opts.targets[i].0)
+                .or_else(|| monitors.iter().map(|m| m.0).find(|m| m.contains(p)))
+                .or_else(|| monitors.is_empty().then(|| self.bounds()));
+            self.chain = HoverChain::new(base.into_iter().collect());
+            self.chain_win = win;
+            self.app = win.map_or_else(String::new, |i| self.opts.targets[i].1.clone());
+        }
+        if let Some(window) = win {
+            self.ask = Some(Ask {
+                window,
+                entered: !same,
+            });
+        }
+        before != self.chain.current()
+    }
+
+    /// What the window should look up after the last event.
+    pub fn take_ask(&mut self) -> Option<Ask> {
+        self.ask.take()
+    }
+
+    pub fn set_app(&mut self, name: String) {
+        self.app = name;
+    }
+
+    /// Elements of a target, outermost first. Any chain for the hovered target is useful even if
+    /// the cursor moved on (replies take 60–180 ms in Discord): its levels under the cursor stay.
+    pub fn add_levels(&mut self, window: usize, rects: Vec<Rect>) -> bool {
+        let Some(base) = self.chain.outermost() else {
+            return false;
+        };
+        if Some(window) != self.chain_win || self.sel.confirmed() || self.sel.is_dragging() {
+            return false;
+        }
+        let mut all = vec![base];
+        all.extend(
+            rects
+                .into_iter()
+                .skip(1)
+                .map(|r| clip(r, base))
+                .take_while(|r| r.contains(self.mouse)),
+        );
+        let fresh = HoverChain::new(all);
+        if fresh.deepest() == self.chain.deepest() || fresh.len() < self.chain.len() {
+            return false;
+        }
+        self.chain = fresh;
+        true
+    }
+
+    /// Wheel: one element level out or in.
+    pub fn scroll(&mut self, outward: bool) -> bool {
+        !self.sel.confirmed() && self.free() && self.chain.step(outward)
+    }
+
+    pub fn typing(&self) -> bool {
+        self.pen.typing.is_some()
+    }
+
+    /// Area of everything on top of the frame.
+    pub fn scene_bounds(&self) -> Option<Rect> {
+        crate::layout(&self.scene()).bounds
+    }
+
+    /// Bounds of what the last `render` drew.
+    pub fn drawn_bounds(&self) -> Option<Rect> {
+        self.layout.bounds
+    }
+
+    /// The next frame changes more than the scene: shapes can be anywhere on screen.
+    pub fn repaint_all(&mut self) -> bool {
+        let wide = self.pen.live.is_some() || self.pen.typing.is_some();
+        std::mem::take(&mut self.repaint_all) || wide || self.dim_level != Some(self.dim_wanted())
+    }
+
+    /// A finished selection has its own panel: the rail waits for a tool.
+    fn rail_hidden(&self) -> bool {
+        self.sel.confirmed() && !self.rail_open && self.pen.tool.is_none() && !self.pen.picker
     }
 
     fn loupe_on(&self) -> bool {
         let aiming = !self.sel.confirmed() || self.sel.is_dragging();
         let on = self.pen.picker || (self.opts.loupe && aiming);
-        on && self.free() && self.hover_btn.is_none()
+        on && self.free() && self.hover_btn.is_none() && self.rail_grab.is_none()
     }
 
     fn scene(&self) -> Scene<'_> {
         let drawing = !self.stroke.is_empty();
-        let bounds = self.bounds();
         let lasso = if drawing { &self.stroke } else { &self.lasso };
-        let hover = self
-            .hover_rect()
-            .map(|(rect, target, app)| Hover { rect, target, app });
+        let hovering = self.sel.rect().is_none() && !self.sel.is_dragging() && self.free();
+        let hover = hovering
+            .then(|| self.chain.current())
+            .flatten()
+            .map(|rect| Hover {
+                rect,
+                target: match self.chain_win {
+                    None => Target::Screen,
+                    Some(_) if self.chain.current() == self.chain.outermost() => Target::Window,
+                    Some(_) => Target::Element,
+                },
+                app: &self.app,
+            });
+        let anchor = self
+            .sel
+            .rect()
+            .or(hover.as_ref().map(|h| h.rect))
+            .map_or(self.mouse, |r| Point {
+                x: r.right() - 1,
+                y: r.bottom() - 1,
+            });
+        let (monitor, scale) = self.monitor_at(anchor);
         Scene {
-            scale: self.opts.scale,
-            monitor: bounds,
-            cursor_monitor: bounds,
+            scale,
+            monitor,
+            cursor_monitor: self.monitor_at(self.mouse).0,
             selection: self.sel.rect().filter(|_| !drawing),
             confirmed: self.sel.confirmed() && !drawing,
             dragging: self.sel.is_dragging() || drawing,
@@ -207,15 +404,17 @@ impl Session {
                 format: self.pen.color_format,
             }),
             tools: Some(Draw {
-                monitor: bounds,
+                monitor: self.rail,
+                rail_at: self.rail_at,
+                rail_hidden: self.rail_hidden(),
                 lasso_mode: self.pen.lasso_mode,
                 lasso: (!lasso.is_empty()).then_some(lasso.as_slice()),
                 tool: self.pen.tool,
                 color: self.pen.color,
                 size: self.pen.size,
                 blur: self.pen.blur,
-                can_undo: !self.pen.history.doc.elements.is_empty(),
-                can_redo: false,
+                can_undo: self.pen.history.can_undo(),
+                can_redo: self.pen.history.can_redo(),
                 live: self.pen.live.as_ref(),
                 caret: self
                     .pen
@@ -238,41 +437,40 @@ impl Session {
 
     /// One whole frame into `back`, BGRA of the shot's size.
     pub fn render(&mut self, back: &mut [u8]) {
+        self.render_area(back, self.bounds());
+    }
+
+    /// `dirty` and the scene into `back`: the frame is laid again under every decoration, so
+    /// glass never blurs its own last frame. Returns the area that changed.
+    pub fn render_area(&mut self, back: &mut [u8], dirty: Rect) -> Rect {
         let level = self.dim_wanted();
         if self.dim_level != Some(level) {
             self.dim_level = Some(level);
             dim_into(&mut self.dim, &self.annot, level);
         }
-        back.copy_from_slice(&self.dim);
         let (w, h) = (self.shot.width, self.shot.height);
-        let lasso_on = !self.lasso.is_empty() || !self.stroke.is_empty();
-        if let Some(r) = self.sel.rect().filter(|_| !lasso_on) {
-            let row = w as usize * 4;
-            for y in r.top.max(0)..r.bottom().min(h as i32) {
-                let at = y as usize * row;
-                let (l, e) = (
-                    r.left.max(0) as usize * 4,
-                    r.right().min(w as i32) as usize * 4,
-                );
-                back[at + l..at + e].copy_from_slice(&self.annot[at + l..at + e]);
-            }
+        let all = self.bounds();
+        let sc = self.scene();
+        let lay = crate::layout(&sc);
+        let area = lay
+            .bounds
+            .and_then(|b| crate::union(Some(dirty), b))
+            .map_or(dirty, |u| clip(u, all));
+        copy_area(back, &self.dim, w, area);
+        let lasso = sc.tools.as_ref().and_then(|t| t.lasso);
+        if let Some(r) = sc.selection.filter(|_| lasso.is_none()) {
+            copy_area(back, &self.annot, w, clip(r, area));
         }
-        let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(back, w, h) else {
-            return;
-        };
-        let lay = {
-            let sc = self.scene();
-            if let (Some(pts), Some(from)) = (
-                sc.tools.as_ref().and_then(|t| t.lasso),
-                tiny_skia::PixmapRef::from_bytes(&self.annot, w, h),
-            ) {
-                snapling_scene::paint_region(&mut pm, from, pts);
+        if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(back, w, h) {
+            if let (Some(pts), Some(from)) =
+                (lasso, tiny_skia::PixmapRef::from_bytes(&self.annot, w, h))
+            {
+                crate::paint_region(&mut pm, from, pts);
             }
-            let lay = snapling_scene::layout(&sc);
-            snapling_scene::draw(&mut pm, &sc, &lay);
-            lay
-        };
+            crate::draw(&mut pm, &sc, &lay);
+        }
         self.layout = lay;
+        area
     }
 
     /// Re-renders `annot` = shot + committed shapes.
@@ -281,7 +479,7 @@ impl Session {
         let (w, h) = (self.shot.width, self.shot.height);
         if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(&mut self.annot, w, h) {
             for e in &self.pen.history.doc.elements {
-                snapling_scene::draw_element(&mut pm, e);
+                crate::draw_element(&mut pm, e);
             }
         }
         self.dim_level = None;
@@ -306,6 +504,7 @@ impl Session {
     fn set_mode(&mut self, lasso: bool) {
         self.pen.tool = None;
         self.pen.lasso_mode = lasso;
+        self.repaint_all = true;
         if lasso || !self.lasso.is_empty() {
             self.lasso.clear();
             self.sel = Selection::new(self.shot.width as i32, self.shot.height as i32);
@@ -361,9 +560,14 @@ impl Session {
         }
     }
 
-    /// Blur style, eyedropper and color format as the panels left them.
-    pub fn prefs(&self) -> (BlurStyle, bool, ColorFormat) {
-        (self.pen.blur, self.pen.picker, self.pen.color_format)
+    /// What the panels look like now, for the next overlay.
+    pub fn prefs(&self) -> Prefs {
+        Prefs {
+            blur: self.pen.blur,
+            picker: self.pen.picker,
+            color_format: self.pen.color_format,
+            rail_at: self.rail_kept,
+        }
     }
 
     fn control(&mut self, c: Control) -> Step {
@@ -383,12 +587,19 @@ impl Session {
                     Button::Pin => Step::Done(Outcome::Pin),
                     Button::Record => Step::Done(Outcome::Record),
                     Button::Scroll => Step::Done(Outcome::Scroll),
+                    Button::Draw => {
+                        self.rail_open = true;
+                        Step::Stay
+                    }
                     Button::Blur => Step::Stay,
                     Button::Cancel => Step::Cancel,
                 };
             }
             Control::Select | Control::Lasso => self.set_mode(c == Control::Lasso),
-            Control::Tool(t) => self.pen.tool = (self.pen.tool != Some(t)).then_some(t),
+            Control::Tool(t) => {
+                self.rail_open = true;
+                self.pen.tool = (self.pen.tool != Some(t)).then_some(t);
+            }
             Control::Color(i) => self.pen.color = COLORS[i],
             Control::Size(i) => self.pen.size = SIZES[i],
             Control::Gauss(g) => self.pen.blur.gauss = g,
@@ -397,6 +608,7 @@ impl Session {
             Control::ColorFormat(i) => self.pen.color_format = ColorFormat::ALL[i],
             Control::Undo | Control::Redo => {
                 self.pen.typing = None;
+                self.repaint_all = true;
                 let changed = if c == Control::Undo {
                     self.pen.history.undo()
                 } else {
@@ -412,13 +624,21 @@ impl Session {
 
     pub fn press(&mut self, p: Point, mods: Mods) -> Step {
         self.mouse = p;
-        if let Some(c) = snapling_scene::button_at(&self.layout, p) {
+        self.update_hover(p);
+        if let Some(c) = crate::button_at(&self.layout, p) {
             return self.control(c);
+        }
+        if let Some(g) = self.layout.grip.filter(|g| g.contains(p)) {
+            self.rail_grab = Some(Point {
+                x: p.x - g.left,
+                y: p.y - g.top,
+            });
+            return Step::Stay;
         }
         if self.pen.picker && self.pen.tool.is_none() {
             return Step::Done(Outcome::Color);
         }
-        let hs = self.handle_size();
+        let hs = self.handle_size(p);
         let corner = self.lasso.is_empty() && matches!(self.sel.hit(p, hs), Hit::Corner(_));
         if let Some(tool) = self.pen.tool.filter(|_| !corner) {
             self.pen_down(tool, p);
@@ -431,23 +651,47 @@ impl Session {
         Step::Stay
     }
 
-    pub fn moved(&mut self, p: Point, mods: Mods) {
+    /// Returns whether anything on screen changed.
+    pub fn moved(&mut self, p: Point, mods: Mods) -> bool {
         self.mouse = p;
         let at = pen_point(p);
+        if let Some(g) = self.rail_grab {
+            self.rail = self.monitor_at(p).0;
+            self.rail_at = Some(Point {
+                x: p.x - g.x,
+                y: p.y - g.y,
+            });
+            return true;
+        }
         if let Some(el) = &mut self.pen.live {
             annotate::drag_to(&mut el.kind, at, mods.shift, 1.5);
-        } else if let Some(last) = self.stroke.last() {
+            return true;
+        }
+        if let Some(last) = self.stroke.last() {
             if (last.x - at.x).hypot(last.y - at.y) >= 2.0 {
                 self.stroke.push(at);
             }
-        } else if self.sel.is_dragging() {
-            self.sel.drag(p, mods.shift);
-        } else {
-            self.hover_btn = snapling_scene::button_at(&self.layout, p);
+            return true;
         }
+        if self.sel.is_dragging() {
+            self.sel.drag(p, mods.shift);
+            return true;
+        }
+        let hovered = self.update_hover(p);
+        let button = crate::button_at(&self.layout, p);
+        let changed = button != self.hover_btn;
+        self.hover_btn = button;
+        hovered || changed || self.loupe_on()
     }
 
     pub fn release(&mut self) -> Step {
+        if self.rail_grab.take().is_some() {
+            self.rail_kept = self.rail_at.map(|p| Point {
+                x: p.x + self.shot.x,
+                y: p.y + self.shot.y,
+            });
+            return Step::Stay;
+        }
         let selected = if let Some(el) = self.pen.live.take() {
             self.commit(el);
             false
@@ -456,9 +700,10 @@ impl Session {
             self.sel.confirmed()
         } else if std::mem::take(&mut self.armed) {
             self.sel.release();
-            // A click without a drag picks the highlighted window or the screen.
+            // A click without a drag picks the highlighted window, element or screen.
+            let m = self.mouse;
             if !self.sel.confirmed()
-                && let Some((r, ..)) = self.hover_rect()
+                && let Some(r) = self.chain.current().filter(|r| r.contains(m))
             {
                 self.sel.set_rect(r);
             }
@@ -482,6 +727,8 @@ impl Session {
         self.lasso.clear();
         self.stroke.clear();
         self.armed = false;
+        self.rail_open = false;
+        self.update_hover(self.mouse);
         Step::Stay
     }
 
@@ -561,8 +808,9 @@ impl Session {
             Key::Char(c) if mods.ctrl => match c.to_ascii_lowercase() {
                 'z' if !mods.shift => self.control(Control::Undo),
                 'z' | 'y' => self.control(Control::Redo),
-                's' if confirmed => Step::Done(Outcome::Save),
-                _ => Step::Stay,
+                'v' | 'l' | 'i' => Step::Stay,
+                // Ctrl+S saves and Ctrl+C copies, as the plain letters do.
+                c => self.letter(c, confirmed),
             },
             Key::Char(c) => self.letter(c.to_ascii_lowercase(), confirmed),
             _ => Step::Stay,
@@ -596,11 +844,15 @@ impl Session {
 
     /// Which pointer fits the spot.
     pub fn cursor(&self) -> Pointer {
-        if self.hover_btn.is_some() {
+        let p = self.mouse;
+        if crate::button_at(&self.layout, p).is_some() {
             return Pointer::Hand;
         }
+        if self.rail_grab.is_some() || self.layout.grip.is_some_and(|g| g.contains(p)) {
+            return Pointer::Move;
+        }
         let hit = if self.lasso.is_empty() {
-            self.sel.hit(self.mouse, self.handle_size())
+            self.sel.hit(p, self.handle_size(p))
         } else {
             Hit::Outside
         };
@@ -711,6 +963,128 @@ mod tests {
     }
 
     #[test]
+    fn dim_keeps_black_near_black_and_alpha_opaque() {
+        let src = [255u8, 255, 255, 0, 0, 0, 0, 0];
+        let mut dst = [0u8; 8];
+        dim_into(&mut dst, &src, DIM_SELECT);
+        assert_eq!(dst[3], 255);
+        assert!(dst[0] > 140 && dst[0] < 160, "{dst:?}");
+        assert!(dst[4] < 10, "{dst:?}");
+    }
+
+    /// `cargo test --release -p snapling-scene bench_dim -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_dim() {
+        let len = 4480 * 1527 * 4;
+        let src = vec![90u8; len];
+        let mut dst = vec![0u8; len];
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            dim_into(std::hint::black_box(&mut dst), &src, DIM_SELECT);
+            std::hint::black_box(&dst);
+            println!("dim 4480x1527: {} us", t0.elapsed().as_micros());
+        }
+    }
+
+    #[test]
+    fn the_rail_waits_for_a_tool_next_to_a_finished_selection() {
+        let mut s = session(Options::default());
+        assert!(!s.rail_hidden());
+        drag(&mut s, pt(20, 30), pt(120, 80));
+        assert!(s.rail_hidden());
+        assert_eq!(s.control(Control::Action(Button::Draw)), Step::Stay);
+        assert!(!s.rail_hidden());
+        s.cancel_click();
+        drag(&mut s, pt(20, 30), pt(120, 80));
+        assert!(s.rail_hidden());
+        s.key(Key::Char('3'), NONE);
+        assert!(!s.rail_hidden());
+    }
+
+    #[test]
+    fn the_rail_moves_by_its_grip_and_keeps_the_end_of_the_drag() {
+        let mut s = session(Options::default());
+        let mut back = vec![0u8; 400 * 300 * 4];
+        s.render(&mut back);
+        let g = s.layout.grip.unwrap();
+        let from = pt(g.left + 4, g.top + 4);
+        s.press(from, NONE);
+        assert_eq!(s.prefs().rail_at, None, "only the end of a drag is kept");
+        assert!(s.moved(pt(from.x + 90, from.y + 5), NONE));
+        assert_eq!(s.release(), Step::Stay);
+        let kept = s.prefs().rail_at.unwrap();
+        assert_eq!((kept.x, kept.y), (g.left + 190, g.top + 55), "desktop");
+        assert_eq!(s.sel.rect(), None, "the drag selected nothing");
+        s.render(&mut back);
+        assert_eq!(s.layout.grip.unwrap().left, g.left + 90);
+    }
+
+    #[test]
+    fn a_partial_frame_touches_only_its_area_and_the_scene() {
+        let mut s = session(Options {
+            loupe: false,
+            ..Options::default()
+        });
+        let mut back = vec![7u8; 400 * 300 * 4];
+        let dirty = Rect {
+            left: 300,
+            top: 10,
+            width: 20,
+            height: 20,
+        };
+        let area = s.render_area(&mut back, dirty);
+        assert!(area.left <= 300 && area.right() >= 320);
+        assert_ne!(back[(20 * 400 + 310) * 4], 7, "inside");
+    }
+
+    #[test]
+    fn the_hover_walks_elements_and_a_click_takes_the_level_shown() {
+        let win = Rect {
+            left: 50,
+            top: 40,
+            width: 100,
+            height: 80,
+        };
+        let inner = Rect {
+            left: 60,
+            top: 50,
+            width: 30,
+            height: 30,
+        };
+        let mut s = session(Options {
+            targets: vec![(win, String::new())],
+            ..Options::default()
+        });
+        s.moved(pt(70, 60), NONE);
+        let ask = s.take_ask().unwrap();
+        assert_eq!((ask.window, ask.entered), (0, true));
+        assert!(s.add_levels(0, vec![win, inner]));
+        assert_eq!(s.chain.current(), Some(inner));
+        s.press(pt(70, 60), NONE);
+        s.release();
+        assert_eq!(s.sel.rect(), Some(inner));
+    }
+
+    #[test]
+    fn each_monitor_has_its_own_scale() {
+        let a = Rect {
+            left: 0,
+            top: 0,
+            width: 200,
+            height: 300,
+        };
+        let b = Rect { left: 200, ..a };
+        let s = session(Options {
+            monitors: vec![(a, 1.0), (b, 2.0)],
+            ..Options::default()
+        });
+        assert_eq!(s.handle_size(pt(10, 10)), 8);
+        assert_eq!(s.handle_size(pt(300, 10)), 16);
+        assert_eq!(s.monitor_at(pt(900, 10)).0, b, "the nearest one");
+    }
+
+    #[test]
     fn a_drag_selects_and_enter_copies_that_area() {
         let mut s = session(Options::default());
         assert_eq!(drag(&mut s, pt(20, 30), pt(120, 80)), Step::Stay);
@@ -810,11 +1184,11 @@ mod tests {
         assert!(s.loupe_on(), "the loupe comes with the picker");
         s.moved(pt(5, 6), NONE);
         assert_eq!(s.press(pt(5, 6), NONE), Step::Done(Outcome::Color));
-        assert_eq!(s.prefs().2, ColorFormat::Rgb);
+        assert_eq!(s.prefs().color_format, ColorFormat::Rgb);
         s.control(Control::ColorFormat(4));
-        assert_eq!(s.prefs().2, ColorFormat::Cmyk);
+        assert_eq!(s.prefs().color_format, ColorFormat::Cmyk);
         s.control(Control::Picker);
-        assert!(!s.prefs().1);
+        assert!(!s.prefs().picker);
     }
 
     #[test]

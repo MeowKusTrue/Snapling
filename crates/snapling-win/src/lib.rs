@@ -341,30 +341,134 @@ pub fn autostart_blocked() -> bool {
     has_run_entry() && res.is_ok() && approved_off(&value[..size as usize])
 }
 
-pub fn autostart() -> bool {
-    has_run_entry() && !autostart_blocked()
+/// Name of the logon task. Explorer holds the Run entries back after a logon, a logon task
+/// starts at once; the Run entry stays as the fallback where the task is refused.
+const TASK: &str = "Snapling";
+
+fn schtasks(args: &[&std::ffi::OsStr]) -> bool {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const NO_WINDOW: u32 = 0x0800_0000;
+    Command::new("schtasks")
+        .args(args)
+        .creation_flags(NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
-/// Keeps the Run entry on this exe after it was moved or updated.
-pub fn refresh_autostart() {
-    if has_run_entry() {
-        let _ = write_run_entry();
+fn has_task() -> bool {
+    schtasks(&["/Query".as_ref(), "/TN".as_ref(), TASK.as_ref()])
+}
+
+/// The task definition: no delay, normal priority, no time limit, on battery too.
+fn task_xml(exe: &str, user: &str) -> String {
+    let safe = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let (exe, user) = (safe(exe), safe(user));
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>4</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe}</Command>
+    </Exec>
+  </Actions>
+</Task>
+"#
+    )
+}
+
+/// Creates the logon task for this exe, or points the existing one at it.
+fn write_task() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let var = |name| std::env::var(name).unwrap_or_default();
+    let user = format!("{}\\{}", var("USERDOMAIN"), var("USERNAME"));
+    let xml = task_xml(&exe.display().to_string(), &user);
+    let bytes: Vec<u8> = [0xFEFF]
+        .into_iter()
+        .chain(xml.encode_utf16())
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let file = std::env::temp_dir().join("snapling-autostart.xml");
+    std::fs::write(&file, bytes).map_err(|e| e.to_string())?;
+    let made = schtasks(&[
+        "/Create".as_ref(),
+        "/TN".as_ref(),
+        TASK.as_ref(),
+        "/XML".as_ref(),
+        file.as_ref(),
+        "/F".as_ref(),
+    ]);
+    let _ = std::fs::remove_file(&file);
+    made.then_some(()).ok_or_else(|| "schtasks".to_string())
+}
+
+fn delete_run_entry() -> Result<(), String> {
+    let e = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("Snapling")) };
+    if e.is_ok() || e == ERROR_FILE_NOT_FOUND {
+        Ok(())
+    } else {
+        Err(format!("автозапуск: {e:?}"))
     }
 }
 
-pub fn set_autostart(on: bool) -> Result<(), String> {
-    let fail = |e| format!("автозапуск: {e:?}");
-    unsafe {
-        if !on {
-            let e = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("Snapling"));
-            return if e.is_ok() || e == ERROR_FILE_NOT_FOUND {
-                Ok(())
-            } else {
-                Err(fail(e))
-            };
+pub fn autostart() -> bool {
+    has_task() || (has_run_entry() && !autostart_blocked())
+}
+
+/// Keeps autostart on this exe after a move or an update, and moves a Run entry to the task.
+/// A second start at logon would open a window, so both never stay. On its own thread: the
+/// tray does not wait for `schtasks`.
+pub fn refresh_autostart() {
+    std::thread::spawn(|| {
+        let wanted = has_task() || (has_run_entry() && !autostart_blocked());
+        if wanted && write_task().is_ok() {
+            let _ = delete_run_entry();
+        } else if has_run_entry() {
+            let _ = write_run_entry();
         }
-        // Lifts a block from Task Manager: the user has just asked for autostart here.
-        let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, APPROVED_KEY, w!("Snapling"));
+    });
+}
+
+pub fn set_autostart(on: bool) -> Result<(), String> {
+    if !on {
+        schtasks(&[
+            "/Delete".as_ref(),
+            "/TN".as_ref(),
+            TASK.as_ref(),
+            "/F".as_ref(),
+        ]);
+        return delete_run_entry();
+    }
+    // Lifts a block from Task Manager: the user has just asked for autostart here.
+    let _ = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, APPROVED_KEY, w!("Snapling")) };
+    if write_task().is_ok() {
+        return delete_run_entry();
     }
     write_run_entry()
 }
@@ -922,6 +1026,13 @@ fn put_clipboard(blocks: &[(u32, HGLOBAL)]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_logon_task_escapes_its_values() {
+        let xml = task_xml(r"C:\A&B\snapling.exe", r"PC\me");
+        assert!(xml.contains(r"<Command>C:\A&amp;B\snapling.exe</Command>"));
+        assert_eq!(xml.matches(r"<UserId>PC\me</UserId>").count(), 2);
+    }
 
     #[test]
     fn vk_codes() {

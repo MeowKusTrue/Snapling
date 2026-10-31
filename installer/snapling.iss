@@ -58,6 +58,10 @@ Filename: "{app}\snapling.exe"; Description: "{cm:Launch}"; Flags: nowait postin
 ; An update runs silently and brings the app back.
 Filename: "{app}\snapling.exe"; Flags: nowait; Check: WizardSilent
 
+[UninstallRun]
+; Autostart turned on in the app lives in this task.
+Filename: "schtasks"; Parameters: "/Delete /TN Snapling /F"; Flags: runhidden; RunOnceId: "autostart"
+
 [Code]
 procedure CurUninstallStepChanged(Step: TUninstallStep);
 begin

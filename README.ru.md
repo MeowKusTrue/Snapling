@@ -61,12 +61,15 @@ Snapling выходит в сеть только по твоей просьбе:
 
 ### Arch, CachyOS
 
+Готового Linux-релиза пока нет; поддержка ранняя и собирается из исходников:
+
 ```bash
-cd packaging/aur
+git clone https://github.com/MeowKusTrue/Snapling.git
+cd Snapling/packaging/aur
 makepkg -si
 ```
 
-Поддержка Linux ранняя. Нужны `grim`, `wl-clipboard` и `pipewire`. По желанию: `wf-recorder` и `ffmpeg` для записи, `wlrctl` для длинных скриншотов, `libnotify`, `libsecret`, `zenity`.
+Нужны `grim`, `slurp`, `wl-clipboard` и `pipewire`. По желанию: `wf-recorder` и `ffmpeg` для записи, `wlrctl` для длинных скриншотов, `libnotify`, `libsecret`, `zenity`. OCR на Linux использует PaddleOCR; модель скачивается только после подтверждения.
 
 В Wayland у программ нет глобальных сочетаний, поэтому они задаются в `hyprland.conf`:
 
@@ -85,6 +88,8 @@ windowrulev2 = pin, title:^(Snapling pin)$
 ```
 
 Второй вызов `snapling --record` останавливает запись, `snapling --record-cancel` отменяет её. На X11 те же флаги, нужны `xclip` и `ffmpeg`.
+
+`snapling --help` показывает доступные команды, `snapling --version` — версию, commit и target. Неизвестный флаг завершается с кодом 2 и не запускает GUI.
 
 ### macOS
 

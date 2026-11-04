@@ -19,8 +19,14 @@ fn config() -> Config {
     Config::load_or_create(&crate::ui::config_path()).unwrap_or_default()
 }
 
+/// History is state: `~/.local/state/snapling`. Moves the file from data once, where it lived.
 fn history_file() -> PathBuf {
-    app_dir("LOCALAPPDATA").join("history.jsonl")
+    let path = app_dir("STATE").join("history.jsonl");
+    let old = app_dir("LOCALAPPDATA").join("history.jsonl");
+    if !path.exists() && old.exists() && std::fs::create_dir_all(app_dir("STATE")).is_ok() {
+        let _ = std::fs::rename(&old, &path);
+    }
+    path
 }
 
 fn models_dir() -> PathBuf {
@@ -28,7 +34,7 @@ fn models_dir() -> PathBuf {
 }
 
 fn temp_dir() -> PathBuf {
-    app_dir("LOCALAPPDATA").join("edit")
+    app_dir("CACHE").join("edit")
 }
 
 fn play(cfg: &Config, s: Sound) {
@@ -345,7 +351,8 @@ fn after(cfg: &Config, cap: &unix::Capture, img: Shot, outcome: Outcome) -> Resu
     Ok(())
 }
 
-fn region(cfg: &Config, auto: Option<Outcome>) -> Result<(), String> {
+/// `false` when the selection was cancelled.
+fn region(cfg: &Config, auto: Option<Outcome>) -> Result<bool, String> {
     let cap = unix::capture()?;
     let opts = Options {
         scale: 0.0,
@@ -393,17 +400,41 @@ fn region(cfg: &Config, auto: Option<Outcome>) -> Result<(), String> {
     let mut cfg = cfg.clone();
     cfg.capture.color_format = prefs.color_format;
     match ended.result {
-        Some((img, outcome)) => after(&cfg, &cap, img, outcome),
-        None => Ok(()),
+        Some((img, outcome)) => after(&cfg, &cap, img, outcome).map(|()| true),
+        None => Ok(false),
     }
 }
 
 /// Runs one action of a flag; `false`: not an action flag.
-pub fn run_flag(flag: &str) -> bool {
+pub const ACTIONS: &[&str] = &[
+    "--region",
+    "--screen",
+    "--ocr",
+    "--ocr-translate",
+    "--long",
+    "--delay",
+    "--record",
+    "--record-cancel",
+];
+
+/// Exit code of an action flag, `None` for another flag.
+pub fn run_flag(flag: &str) -> Option<i32> {
+    if !ACTIONS.contains(&flag) {
+        return None;
+    }
     let cfg = config();
+    #[cfg(target_os = "linux")]
+    if let Err((code, e)) = unix::doctor::preflight(flag) {
+        eprintln!("snapling: {e}");
+        fail(&cfg, &e);
+        return Some(code);
+    }
     let res = match flag {
         "--region" => region(&cfg, None),
-        "--screen" => unix::capture().map(|cap| deliver(&cfg, &cap.shot, "screen", false)),
+        "--screen" => unix::capture().map(|cap| {
+            deliver(&cfg, &cap.shot, "screen", false);
+            true
+        }),
         "--ocr" => region(&cfg, Some(Outcome::Text)),
         "--ocr-translate" => region(&cfg, Some(Outcome::Translate)),
         "--long" => region(&cfg, Some(Outcome::Scroll)),
@@ -420,21 +451,26 @@ pub fn run_flag(flag: &str) -> bool {
                     let _ = std::fs::remove_file(path);
                 }
             }
-            Ok(())
+            Ok(true)
         }
         "--record" => match unix::recording() {
             Some(run) => {
                 stop_recording(&cfg, run);
-                Ok(())
+                Ok(true)
             }
             None => region(&cfg, Some(Outcome::Record)),
         },
-        _ => return false,
+        _ => return None,
     };
-    if let Err(e) = res {
-        fail(&cfg, &e);
-    }
-    true
+    Some(match res {
+        Ok(true) => 0,
+        Ok(false) => 5,
+        Err(e) => {
+            eprintln!("snapling: {e}");
+            fail(&cfg, &e);
+            1
+        }
+    })
 }
 
 /// Colors of a 32×32 RGBA icon as the ARGB the tray takes.

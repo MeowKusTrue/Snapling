@@ -10,6 +10,7 @@ use snapling_core::selection::{Point, Rect};
 use snapling_scene::session::{Key, Mods, Options, Pointer, Session, Shot, Step};
 pub use snapling_scene::session::{Outcome, Prefs};
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -52,6 +53,8 @@ struct State {
 }
 
 const WM_UIA: u32 = 0x8000 + 1;
+/// Unique across overlay openings, so a late worker reply cannot enter a new session.
+static NEXT_UIA_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static HWND_OVERLAY: Cell<HWND> = Cell::new(HWND::default());
@@ -105,7 +108,7 @@ fn pump(s: &mut State) {
         if ask.entered {
             s.session.set_app(crate::app_name_of(hwnd));
         }
-        s.chain_seq += 1;
+        s.chain_seq = NEXT_UIA_REQUEST.fetch_add(1, Ordering::Relaxed);
         let mouse = s.session.mouse();
         let req = uia::Request {
             seq: s.chain_seq,
@@ -126,12 +129,15 @@ fn pump(s: &mut State) {
     }
 }
 
-/// Merges a finished UIA chain if it still belongs to the hovered window.
+/// Merges only the newest reply for the currently open overlay and its hovered window.
 fn apply_uia() -> bool {
-    let Some((hwnd, rects)) = uia::RESULT.lock().ok().and_then(|mut r| r.take()) else {
+    let Some((hwnd, seq, rects)) = uia::RESULT.lock().ok().and_then(|mut r| r.take()) else {
         return false;
     };
     with(|s| {
+        if seq != s.chain_seq {
+            return false;
+        }
         let Some(window) = s.windows.iter().position(|w| *w == hwnd) else {
             return false;
         };

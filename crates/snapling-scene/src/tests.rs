@@ -212,20 +212,24 @@ fn toast_draws_a_shot_and_finds_its_buttons() {
         sub: &long,
         shot: (&shot, 40, 20),
         hover: Some(ToastAction::Text),
+        file: true,
     };
     let mut pm = PixmapMut::from_bytes(&mut buf, w, h).unwrap();
     draw_toast(&mut pm, &tt);
     let at = |x: u32, y: u32| buf[((y * w + x) * 4) as usize];
     assert_eq!(at(60, 48), 200, "the shot fills the thumbnail");
     assert_eq!(buf[3], 0, "corners stay transparent");
-    let (b, a, _) = toast_buttons(1.0)[1];
+    let buttons = toast_buttons(1.0, true);
+    let last = buttons[3].0;
+    assert!(last.right() <= w as i32 - 8, "four buttons fit");
+    let (b, a, _) = buttons[1];
     let p = Point {
         x: b.left + 2,
         y: b.top + 2,
     };
     assert_eq!(a, ToastAction::Text);
-    assert_eq!(toast_at(1.0, p), Some(ToastAction::Text));
-    assert_eq!(toast_at(1.0, Point { x: 5, y: 5 }), None);
+    assert_eq!(toast_at(1.0, true, p), Some(ToastAction::Text));
+    assert_eq!(toast_at(1.0, true, Point { x: 5, y: 5 }), None);
     let cut = fit_text(&fonts().regular, &long, 12.0, 200.0);
     assert!(cut.ends_with('…') && text_w(&fonts().regular, &cut, 12.0) <= 200.0);
 }

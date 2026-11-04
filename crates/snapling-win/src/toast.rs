@@ -33,6 +33,7 @@ struct State {
     sub: String,
     scale: f32,
     hover: Option<ToastAction>,
+    file: bool,
     on_click: OnClick,
 }
 
@@ -108,7 +109,8 @@ fn place() -> (i32, i32, f32) {
     (r.right - w as i32 - gap, r.bottom - h as i32 - gap, scale)
 }
 
-pub fn show(img: Image, title: String, sub: String, on_click: OnClick) {
+/// `file`: the shot has a saved file, so the buttons offer it.
+pub fn show(img: Image, title: String, sub: String, file: bool, on_click: OnClick) {
     let hwnd = HWND_TOAST.get();
     if hwnd.is_invalid() {
         return;
@@ -121,6 +123,7 @@ pub fn show(img: Image, title: String, sub: String, on_click: OnClick) {
             sub,
             scale,
             hover: None,
+            file,
             on_click,
         })
     });
@@ -212,6 +215,7 @@ fn render(hwnd: HWND) {
                 sub: &s.sub,
                 shot: (&s.img.bgra, s.img.width, s.img.height),
                 hover: s.hover,
+                file: s.file,
             };
             draw_toast(pm, &toast);
         });
@@ -220,8 +224,8 @@ fn render(hwnd: HWND) {
 
 fn action_at(lp: LPARAM) -> Option<ToastAction> {
     let p = crate::lparam_point(lp);
-    let scale = STATE.with(|s| s.borrow().as_ref().map(|s| s.scale))?;
-    toast_at(scale, p)
+    let (scale, file) = STATE.with(|s| s.borrow().as_ref().map(|s| (s.scale, s.file)))?;
+    toast_at(scale, file, p)
 }
 
 fn cursor_inside(hwnd: HWND) -> bool {

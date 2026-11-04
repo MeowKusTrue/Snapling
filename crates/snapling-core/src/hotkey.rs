@@ -20,6 +20,8 @@ const NAMED: &[&str] = &[
     "Right",
     "Pause",
     "ScrollLock",
+    "Mouse4",
+    "Mouse5",
 ];
 
 /// Every key a hotkey can use, canonical spelling.
@@ -91,6 +93,8 @@ fn canonical_key(k: &str) -> Option<String> {
         "RETURN" => "Enter",
         "PGUP" => "PageUp",
         "PGDN" => "PageDown",
+        "XBUTTON1" | "MB4" => "Mouse4",
+        "XBUTTON2" | "MB5" => "Mouse5",
         _ => k,
     };
     NAMED
@@ -162,10 +166,8 @@ pub fn check(
 /// Snapling replaces Windows' "copy active window" with the same action.
 pub fn reserved_on_windows(hk: &Hotkey) -> Option<&'static str> {
     let k = hk.key.as_str();
-    let fkey_high = k
-        .strip_prefix('F')
-        .and_then(|n| n.parse::<u8>().ok())
-        .is_some_and(|n| n >= 13);
+    // F-keys, navigation and mouse buttons alone are fine; letters and Enter are not.
+    let typing = k.len() == 1 || matches!(k, "Space" | "Tab" | "Enter" | "Escape");
     Some(match (hk.ctrl, hk.alt, hk.shift, hk.win, k) {
         (false, false, true, true, "S") => t("занято «Ножницами» Windows"),
         (false, false, false, true, "PrintScreen") => t("снимок экрана Windows в «Изображения»"),
@@ -182,8 +184,7 @@ pub fn reserved_on_windows(hk: &Hotkey) -> Option<&'static str> {
             false,
             "A" | "C" | "F" | "N" | "O" | "P" | "S" | "T" | "V" | "W" | "X" | "Y" | "Z",
         ) => t("перехватит стандартное сочетание во всех программах"),
-        (false, false, false, false, "PrintScreen" | "Pause" | "ScrollLock") => return None,
-        (false, false, false, false, _) if !fkey_high => {
+        (false, false, false, false, _) if typing => {
             t("без модификаторов клавиша перестанет работать в других программах")
         }
         _ => return None,
@@ -244,7 +245,7 @@ mod tests {
             "Ctrl+C",
             "Alt+F4",
             "A",
-            "F5",
+            "Enter",
             "Ctrl+Shift+Escape",
         ] {
             assert!(r(bad), "{bad}");
@@ -254,6 +255,9 @@ mod tests {
             "Alt+PrintScreen",
             "Ctrl+Shift+S",
             "F13",
+            "F5",
+            "PageUp",
+            "Mouse4",
             "Ctrl+Alt+S",
             "Pause",
         ] {

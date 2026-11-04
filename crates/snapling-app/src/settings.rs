@@ -7,8 +7,8 @@ use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, Sense,
 use egui_phosphor::regular as icon;
 use snapling_core::color::ColorFormat;
 use snapling_core::config::{
-    Action, Config, Engine, Format, Online, PanelSide, RecordFormat, SelectSound, SoundCfg,
-    SoundPack, Theme, TrayIcon,
+    Action, Config, Engine, Format, Hotkeys, Online, PanelSide, RecordFormat, SelectSound,
+    SoundCfg, SoundPack, Theme, TrayIcon,
 };
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n;
@@ -934,10 +934,17 @@ impl Settings {
         self.store.set("hotkeys", action.key(), combo);
     }
 
-    /// One action with its combo; says whether the combo or its cross was pressed.
-    fn hotkey_row(&self, ui: &mut egui::Ui, a: Action, problems: &[String]) -> (bool, bool) {
+    /// One action with its combo; says whether the combo was pressed and the combo its cross or
+    /// reset button asks for.
+    fn hotkey_row(
+        &self,
+        ui: &mut egui::Ui,
+        a: Action,
+        problems: &[String],
+    ) -> (bool, Option<String>) {
         let p = ui::pal(ui.ctx());
-        let (mut clicked, mut cleared) = (false, false);
+        let (mut clicked, mut set) = (false, None);
+        let default = Hotkeys::default().combo(a).to_string();
         let problem = problems
             .iter()
             .find(|m| m.starts_with(&format!("«{}»", a.title())));
@@ -967,7 +974,18 @@ impl Settings {
                         if !combo.is_empty()
                             && ui::ghost_icon(ui, icon::X, 30.0, t("Убрать сочетание")).clicked()
                         {
-                            cleared = true;
+                            set = Some(String::new());
+                        }
+                        if combo != default
+                            && ui::ghost_icon(
+                                ui,
+                                icon::ARROW_COUNTER_CLOCKWISE,
+                                30.0,
+                                t("Вернуть по умолчанию"),
+                            )
+                            .clicked()
+                        {
+                            set = Some(default.clone());
                         }
                         let g =
                             ui.painter()
@@ -991,7 +1009,7 @@ impl Settings {
                     ui.label(RichText::new(text).size(12.5).color(p.warn));
                 }
             });
-        (clicked, cleared)
+        (clicked, set)
     }
 
     fn record_card(&mut self, ui: &mut egui::Ui) {
@@ -1075,15 +1093,15 @@ impl Settings {
         );
     }
 
-    fn hotkey_pressed(&mut self, click: Option<Action>, clear: Option<Action>) {
+    fn hotkey_pressed(&mut self, click: Option<Action>, set: Option<(Action, String)>) {
         if let Some(a) = click {
             self.refused = None;
             self.start_recording(a);
         }
-        if let Some(a) = clear {
+        if let Some((a, combo)) = set {
             self.stop_recording();
-            self.cfg.hotkeys.set_combo(a, String::new());
-            self.store.set("hotkeys", a.key(), "");
+            self.cfg.hotkeys.set_combo(a, combo.clone());
+            self.store.set("hotkeys", a.key(), combo);
         }
     }
 
@@ -1110,22 +1128,22 @@ impl Settings {
         }
         let (_, problems) = hotkey::check(&self.cfg.hotkeys, self.hooks.reserved);
         let mut click = None;
-        let mut clear = None;
+        let mut set = None;
         card(ui, |ui| {
             for (i, a) in Action::ALL.into_iter().enumerate() {
                 if i > 0 {
                     divider(ui);
                 }
-                let (clicked, cleared) = self.hotkey_row(ui, a, &problems);
+                let (clicked, combo) = self.hotkey_row(ui, a, &problems);
                 if clicked {
                     click = Some(a);
                 }
-                if cleared {
-                    clear = Some(a);
+                if let Some(combo) = combo {
+                    set = Some((a, combo));
                 }
             }
         });
-        self.hotkey_pressed(click, clear);
+        self.hotkey_pressed(click, set);
         ui.label(
             RichText::new(t(
                 "Нажми на сочетание, затем нужные клавиши: Windows и другие программы на них \
@@ -1183,8 +1201,8 @@ impl Settings {
         let a = Action::CaptureRegion;
         let (_, problems) = hotkey::check(&self.cfg.hotkeys, self.hooks.reserved);
         caption(ui, t("Сочетание для снимка"));
-        let (clicked, cleared) = card(ui, |ui| self.hotkey_row(ui, a, &problems));
-        self.hotkey_pressed(clicked.then_some(a), cleared.then_some(a));
+        let (clicked, combo) = card(ui, |ui| self.hotkey_row(ui, a, &problems));
+        self.hotkey_pressed(clicked.then_some(a), combo.map(|c| (a, c)));
         self.snipping_card(ui);
         caption(ui, t("Папка снимков"));
         self.folder_card(ui);

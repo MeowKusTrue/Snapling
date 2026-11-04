@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "linux")]
+pub mod doctor;
+#[cfg(target_os = "linux")]
 pub mod tray;
 #[cfg(target_os = "linux")]
 mod x11;
@@ -70,7 +72,7 @@ fn feed(tool: &str, args: &[&str], data: &[u8]) -> Result<(), String> {
     }
 }
 
-fn runtime_dir() -> PathBuf {
+pub fn runtime_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from)
 }
 
@@ -578,8 +580,26 @@ pub fn ui_language() -> &'static str {
     if lang.starts_with("ru") { "ru" } else { "en" }
 }
 
+/// `XDG_PICTURES_DIR` of `user-dirs.dirs`, else `~/Pictures`.
 pub fn pictures_dir() -> Option<PathBuf> {
-    Some(home().join("Pictures"))
+    let config =
+        std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home().join(".config"), PathBuf::from);
+    let text = std::fs::read_to_string(config.join("user-dirs.dirs")).unwrap_or_default();
+    Some(user_dir(&text, "XDG_PICTURES_DIR", &home()).unwrap_or_else(|| home().join("Pictures")))
+}
+
+/// A folder of `user-dirs.dirs`: `KEY="$HOME/Name"` or an absolute path.
+fn user_dir(text: &str, key: &str, home: &Path) -> Option<PathBuf> {
+    let value = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(key)?.trim_start().strip_prefix('='))?
+        .trim()
+        .trim_matches('"');
+    let path = match value.strip_prefix("$HOME") {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(value),
+    };
+    (path.has_root() && path != home).then_some(path)
 }
 
 fn record_state() -> PathBuf {
@@ -698,6 +718,23 @@ pub fn stop_recording(run: Running) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_dirs_resolve_home_and_skip_the_home_itself() {
+        let home = Path::new("/home/a");
+        let text = "# xdg-user-dirs\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_PICTURES_DIR=\"$HOME/Изображения\"\n";
+        let got = user_dir(text, "XDG_PICTURES_DIR", home);
+        assert_eq!(got, Some(PathBuf::from("/home/a/Изображения")));
+        assert_eq!(
+            user_dir("XDG_PICTURES_DIR=\"/data/pics\"", "XDG_PICTURES_DIR", home),
+            Some(PathBuf::from("/data/pics"))
+        );
+        assert_eq!(
+            user_dir("XDG_PICTURES_DIR=\"$HOME/\"", "XDG_PICTURES_DIR", home),
+            None
+        );
+        assert_eq!(user_dir("", "XDG_PICTURES_DIR", home), None);
+    }
 
     #[test]
     fn ppm_reads_with_comments_and_keeps_colors() {

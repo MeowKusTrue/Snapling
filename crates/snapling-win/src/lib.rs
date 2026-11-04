@@ -44,9 +44,9 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetSystemMetrics, HHOOK, IDYES, KBDLLHOOKSTRUCT, MB_ICONQUESTION,
-    MB_ICONWARNING, MB_YESNO, MessageBoxW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    MB_ICONWARNING, MB_YESNO, MSLLHOOKSTRUCT, MessageBoxW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WM_KEYDOWN, WM_SYSKEYDOWN,
+    WH_MOUSE_LL, WM_KEYDOWN, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -214,6 +214,7 @@ pub fn watch_show() {
 }
 
 static RECORD_HOOK: AtomicIsize = AtomicIsize::new(0);
+static RECORD_MOUSE: AtomicIsize = AtomicIsize::new(0);
 static RECORD_MODS: AtomicU8 = AtomicU8::new(0);
 static RECORDED: Mutex<Option<String>> = Mutex::new(None);
 
@@ -267,6 +268,35 @@ unsafe extern "system" fn record_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRES
     unsafe { CallNextHookEx(None, code, wp, lp) }
 }
 
+/// `VK_XBUTTON1`/`VK_XBUTTON2` of a side-button message, `None` for other mouse input.
+fn side_button(msg: u32, lp: LPARAM) -> Option<u32> {
+    if msg != WM_XBUTTONDOWN && msg != WM_XBUTTONUP {
+        return None;
+    }
+    let data = unsafe { (*(lp.0 as *const MSLLHOOKSTRUCT)).mouseData };
+    match data >> 16 {
+        1 => Some(0x05),
+        2 => Some(0x06),
+        _ => None,
+    }
+}
+
+/// Side mouse buttons while recording; they are kept from other programs like keys.
+unsafe extern "system" fn record_mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code >= 0
+        && let Some(vk) = side_button(wp.0 as u32, lp)
+    {
+        if wp.0 as u32 == WM_XBUTTONDOWN {
+            let hk = recorded_hotkey(vk, RECORD_MODS.load(Ordering::Relaxed));
+            if let (Some(hk), Ok(mut slot)) = (hk, RECORDED.lock()) {
+                *slot = Some(hk.to_string());
+            }
+        }
+        return LRESULT(1);
+    }
+    unsafe { CallNextHookEx(None, code, wp, lp) }
+}
+
 /// Starts or stops catching the keyboard for hotkey recording. Runs on a thread with a message
 /// loop; Windows drops the hook by itself if that thread stops answering.
 pub fn record_keys(on: bool) {
@@ -278,8 +308,16 @@ pub fn record_keys(on: bool) {
     if let Ok(mut slot) = RECORDED.lock() {
         *slot = None;
     }
+    let old = RECORD_MOUSE.swap(0, Ordering::Relaxed);
+    if old != 0 {
+        let _ = unsafe { UnhookWindowsHookEx(HHOOK(old as _)) };
+    }
     if on && let Ok(h) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(record_proc), None, 0) } {
         RECORD_HOOK.store(h.0 as isize, Ordering::Relaxed);
+    }
+    if on && let Ok(h) = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(record_mouse_proc), None, 0) }
+    {
+        RECORD_MOUSE.store(h.0 as isize, Ordering::Relaxed);
     }
 }
 
@@ -291,6 +329,9 @@ pub fn recorded_combo() -> Option<String> {
 /// so check for those first.
 pub fn hotkey_free(hk: &Hotkey) -> bool {
     const PROBE: i32 = 0x7FFF;
+    if is_mouse(hk) {
+        return true;
+    }
     let free = register_hotkey(PROBE, hk).is_ok();
     if free {
         unregister_hotkey(PROBE);
@@ -650,7 +691,72 @@ pub fn ask(text: &str) -> bool {
     }
 }
 
+fn is_mouse(hk: &Hotkey) -> bool {
+    hk.key.starts_with("Mouse")
+}
+
+/// Modifier bits as `RECORD_MODS` keeps them, read from the keyboard state now.
+fn held_mods() -> u8 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    let down = |vk: i32| unsafe { GetAsyncKeyState(vk) } < 0;
+    u8::from(down(0x10))
+        | u8::from(down(0x11)) << 1
+        | u8::from(down(0x12)) << 2
+        | u8::from(down(0x5B) || down(0x5C)) << 3
+}
+
+/// Side-button bindings of the tray: id, modifier bits, button.
+static MOUSE_BINDS: Mutex<Vec<(i32, u8, u32)>> = Mutex::new(Vec::new());
+static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+/// A bound side button posts `WM_HOTKEY` to the tray thread, which owns this hook, and is kept
+/// from other programs; unbound ones pass.
+unsafe extern "system" fn bound_mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code >= 0
+        && let Some(vk) = side_button(wp.0 as u32, lp)
+    {
+        let mods = held_mods();
+        let id = MOUSE_BINDS.lock().ok().and_then(|b| {
+            b.iter()
+                .find(|(_, m, v)| *m == mods && *v == vk)
+                .map(|b| b.0)
+        });
+        if let Some(id) = id {
+            if wp.0 as u32 == WM_XBUTTONDOWN {
+                use windows::Win32::System::Threading::GetCurrentThreadId;
+                use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_HOTKEY};
+                let thread = unsafe { GetCurrentThreadId() };
+                let _ = unsafe {
+                    PostThreadMessageW(thread, WM_HOTKEY, WPARAM(id as usize), LPARAM(0))
+                };
+            }
+            return LRESULT(1);
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wp, lp) }
+}
+
+fn register_mouse(id: i32, hk: &Hotkey) -> Result<(), String> {
+    let vk =
+        vk_code(&hk.key).ok_or_else(|| tf("{hk}: клавиша не поддерживается", &[("hk", &hk)]))?;
+    let mods =
+        u8::from(hk.shift) | u8::from(hk.ctrl) << 1 | u8::from(hk.alt) << 2 | u8::from(hk.win) << 3;
+    if let Ok(mut binds) = MOUSE_BINDS.lock() {
+        binds.retain(|b| b.0 != id);
+        binds.push((id, mods, vk));
+    }
+    if MOUSE_HOOK.load(Ordering::Relaxed) == 0 {
+        let h = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(bound_mouse_proc), None, 0) }
+            .map_err(|e| tf("{hk} не зарегистрировано: {e}", &[("hk", &hk), ("e", &e)]))?;
+        MOUSE_HOOK.store(h.0 as isize, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 pub fn register_hotkey(id: i32, hk: &Hotkey) -> Result<(), String> {
+    if is_mouse(hk) {
+        return register_mouse(id, hk);
+    }
     let vk =
         vk_code(&hk.key).ok_or_else(|| tf("{hk}: клавиша не поддерживается", &[("hk", &hk)]))?;
     let mut mods = MOD_NOREPEAT;
@@ -677,6 +783,15 @@ pub fn register_hotkey(id: i32, hk: &Hotkey) -> Result<(), String> {
 }
 
 pub fn unregister_hotkey(id: i32) {
+    if let Ok(mut binds) = MOUSE_BINDS.lock() {
+        binds.retain(|b| b.0 != id);
+        if binds.is_empty() {
+            let old = MOUSE_HOOK.swap(0, Ordering::Relaxed);
+            if old != 0 {
+                let _ = unsafe { UnhookWindowsHookEx(HHOOK(old as _)) };
+            }
+        }
+    }
     let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(None, id) };
 }
 
@@ -794,6 +909,8 @@ fn vk_code(key: &str) -> Option<u32> {
         "Right" => 0x27,
         "Pause" => 0x13,
         "ScrollLock" => 0x91,
+        "Mouse4" => 0x05,
+        "Mouse5" => 0x06,
         _ => return None,
     })
 }
@@ -1091,6 +1208,8 @@ mod tests {
             "Right",
             "Pause",
             "ScrollLock",
+            "Mouse4",
+            "Mouse5",
         ] {
             let hk = Hotkey::parse(k).unwrap();
             assert!(vk_code(&hk.key).is_some(), "{k}");

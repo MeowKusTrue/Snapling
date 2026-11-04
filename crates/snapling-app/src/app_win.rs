@@ -261,8 +261,11 @@ fn history_file() -> PathBuf {
     app_dir("LOCALAPPDATA").join("history.jsonl")
 }
 
+/// Where a shot was written, once the worker is done; the notification reads it on a click.
+type Saved = std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>;
+
 /// Encodes and writes on a worker thread so PNG of a 4K screen never blocks the UI.
-fn save_async(img: snapling_win::Image, app: String, kind: &'static str) {
+fn save_async(img: snapling_win::Image, app: String, kind: &'static str, slot: Saved) {
     let Some((dir, cfg)) = SAVE.with(|s| s.borrow().clone()) else {
         warn!("save skipped: no valid folder");
         return;
@@ -284,6 +287,9 @@ fn save_async(img: snapling_win::Image, app: String, kind: &'static str) {
         });
         match saved {
             Ok(path) => {
+                if let Ok(mut slot) = slot.lock() {
+                    *slot = Some(path.clone());
+                }
                 info!(
                     "saved {} in {} ms",
                     path.display(),
@@ -324,8 +330,9 @@ fn deliver(
         copy(&img, t0);
     }
     let auto_save = SAVE.with(|s| s.borrow().as_ref().is_some_and(|(_, c)| c.auto_save));
+    let saved = Saved::default();
     if TOAST.get() && !EDITOR_ON_CAPTURE.get() && !snapling_win::fullscreen_game() {
-        notify(&img, &app, copied);
+        notify(&img, &app, copied, auto_save.then(|| saved.clone()));
     }
     match (auto_save, EDITOR_ON_CAPTURE.get()) {
         (true, true) => {
@@ -333,17 +340,18 @@ fn deliver(
                 bgra: img.bgra.clone(),
                 ..img
             };
-            save_async(copy, app.clone(), kind);
+            save_async(copy, app.clone(), kind, saved);
             open_editor(img, app);
         }
-        (true, false) => save_async(img, app, kind),
+        (true, false) => save_async(img, app, kind, saved),
         (false, true) => open_editor(img, app),
         (false, false) => {}
     }
 }
 
 /// Notification with the shot; its buttons get the image, so nothing stays behind after it.
-fn notify(img: &snapling_win::Image, app: &str, copied: bool) {
+/// `saved`: the file the shot is being written to.
+fn notify(img: &snapling_win::Image, app: &str, copied: bool, saved: Option<Saved>) {
     let shot = snapling_win::Image {
         bgra: img.bgra.clone(),
         ..*img
@@ -359,16 +367,36 @@ fn notify(img: &snapling_win::Image, app: &str, copied: bool) {
         format!("{app} · {} × {}", img.width, img.height)
     };
     let app = app.to_string();
+    let file = saved.is_some();
+    let path = move || saved.as_ref().and_then(|s| s.lock().ok()?.clone());
     snapling_win::toast::show(
         shot,
         title.to_string(),
         sub,
+        file,
         Box::new(move |action, img| match action {
             ToastAction::Editor => open_editor(img, app),
             ToastAction::Text => recognize(img),
-            ToastAction::Folder => open_shots_folder(),
+            ToastAction::Folder => match path() {
+                Some(p) => select_in_explorer(&p),
+                None => open_shots_folder(),
+            },
+            ToastAction::CopyPath => match path() {
+                Some(p) => match snapling_win::copy_text(&p.to_string_lossy()) {
+                    Ok(()) => play(Sound::Copy),
+                    Err(e) => snapling_win::warn(&e),
+                },
+                None => snapling_win::warn(t("Файл ещё не сохранён.")),
+            },
         }),
     );
+}
+
+/// Explorer with the file selected.
+fn select_in_explorer(path: &Path) {
+    use std::os::windows::process::CommandExt;
+    let arg = format!("/select,\"{}\"", path.display());
+    let _ = std::process::Command::new("explorer").raw_arg(arg).spawn();
 }
 
 fn open_shots_folder() {
@@ -408,6 +436,8 @@ fn read_text(img: &snapling_win::Image, lang: &str, paddle: bool) -> Result<Stri
     use snapling_translate::paddle as engine;
     let models = models_dir();
     let windows = || snapling_win::ocr::recognize(&img.bgra, img.width, img.height, lang);
+    // Windows without its OCR language: PaddleOCR instead of an error.
+    let paddle = paddle || snapling_win::ocr::language_problem(lang).is_some();
     if !paddle {
         return windows();
     }
@@ -622,23 +652,7 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         can_update: std::env::current_exe().is_ok_and(|e| crate::portable_dir(&e).is_none()),
         ask: snapling_win::ask,
         gallery: history_hooks,
-        run_update: |setup| {
-            use std::os::windows::process::CommandExt;
-            const NO_WINDOW: u32 = 0x0800_0000;
-            // The installer refuses while the tray runs and cannot replace a running exe: the
-            // others go first, this process leaves right after starting it.
-            let others = format!("PID ne {}", std::process::id());
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "snapling.exe", "/FI", &others])
-                .creation_flags(NO_WINDOW)
-                .status();
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            std::process::Command::new(setup)
-                .arg("/SILENT")
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            std::process::exit(0)
-        },
+        run_update,
         get_proxy: || snapling_win::secret::get(DEEPL_PROXY),
         set_proxy: |url| {
             if url.is_empty() {
@@ -787,7 +801,7 @@ fn capture_region(auto: Option<Outcome>) {
             Outcome::Copy => deliver(img, Instant::now(), app, "region", true),
             Outcome::Save => {
                 play(Sound::Capture);
-                save_async(img, app, "region");
+                save_async(img, app, "region", Saved::default());
             }
             Outcome::Edit => {
                 play(Sound::Capture);
@@ -954,7 +968,8 @@ fn finish_jobs() {
                         .is_ok();
                 play(Sound::Copy);
                 if TOAST.get() {
-                    notify(&done.last, &app, copied);
+                    let saved = Saved::new(std::sync::Mutex::new(Some(done.path.clone())));
+                    notify(&done.last, &app, copied, Some(saved));
                 }
             }
             Err(e) => {
@@ -1187,20 +1202,57 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// `[ui] check_updates`: asks GitHub once and offers the settings window, where the update is.
+/// `[ui] check_updates`: asks GitHub once and offers to install a newer version right away.
 fn offer_update() {
     let Ok(Some(release)) = snapling_translate::latest_release() else {
         return;
     };
-    if snapling_translate::is_newer(&release.tag, snapling_core::VERSION)
-        && snapling_win::ask(&tf(
-            "Есть версия {0}. Открыть настройки, чтобы обновить?",
-            &[("0", &release.tag)],
-        ))
-        && let Ok(exe) = std::env::current_exe()
-    {
-        let _ = std::process::Command::new(exe).arg("--settings").spawn();
+    if !snapling_translate::is_newer(&release.tag, snapling_core::VERSION) {
+        return;
     }
+    let installed = std::env::current_exe().is_ok_and(|e| crate::portable_dir(&e).is_none());
+    let setup = release.setup.filter(|_| installed);
+    let Some(setup) = setup else {
+        if snapling_win::ask(&tf(
+            "Есть версия {0}. Открыть страницу выпуска?",
+            &[("0", &release.tag)],
+        )) && release.page.starts_with("https://github.com/")
+        {
+            open_path(Path::new(&release.page));
+        }
+        return;
+    };
+    if !snapling_win::ask(&tf(
+        "Есть версия {0}. Скачать и установить сейчас? Snapling перезапустится.",
+        &[("0", &release.tag)],
+    )) {
+        return;
+    }
+    let dir = models_dir().join("update");
+    let got = snapling_translate::download_setup(&setup, &dir, &Default::default());
+    if let Err(e) = got.and_then(|path| run_update(&path)) {
+        warn!("update: {e}");
+        snapling_win::warn(&tf("Не получилось: {e}", &[("e", &e)]));
+    }
+}
+
+/// Starts the installer and leaves.
+fn run_update(setup: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const NO_WINDOW: u32 = 0x0800_0000;
+    // The installer refuses while the tray runs and cannot replace a running exe: the
+    // others go first, this process leaves right after starting it.
+    let others = format!("PID ne {}", std::process::id());
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/IM", "snapling.exe", "/FI", &others])
+        .creation_flags(NO_WINDOW)
+        .status();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::process::Command::new(setup)
+        .arg("/SILENT")
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    std::process::exit(0)
 }
 
 pub fn run() {

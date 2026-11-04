@@ -15,6 +15,19 @@ pub fn draw_pill(pm: &mut PixmapMut<'_>, label: &str, cancel: Option<&str>, s: f
     }
     let font = &fonts().semibold;
     let main = if cancel.is_some() { w * PILL_STOP } else { w };
+    // The stop half is a red button, so it reads as one.
+    let inset = 4.0 * s;
+    if cancel.is_some()
+        && let Some(p) = rrect(
+            inset,
+            inset,
+            main - inset * 1.5,
+            h - inset * 2.0,
+            h / 2.0 - inset,
+        )
+    {
+        pm.fill_path(&p, &paint([255, 69, 58, 235]), FillRule::Winding, id, None);
+    }
     let label = fit_text(font, label, 13.5 * s, main - 24.0 * s);
     let width = text_w(font, &label, 13.5 * s);
     text(

@@ -7,6 +7,8 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      SNAPLING_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - run: choco install innosetup --no-progress -y

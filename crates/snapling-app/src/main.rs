@@ -17,7 +17,8 @@ fn portable_dir(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     dir.join("portable.txt").is_file().then(|| dir.join("data"))
 }
 
-/// Settings (`APPDATA`) and data (`LOCALAPPDATA`) folders, or the portable folder.
+/// Settings (`APPDATA`) and data (`LOCALAPPDATA`) folders, or the portable folder. Linux and
+/// macOS also take `STATE` (history) and `CACHE` (temporary files).
 fn app_dir(env: &str) -> std::path::PathBuf {
     let portable = std::env::current_exe().ok();
     portable
@@ -38,10 +39,17 @@ fn system_dir(env: &str) -> std::path::PathBuf {
 fn system_dir(env: &str) -> std::path::PathBuf {
     let home = std::env::var_os("HOME").map_or_else(std::env::temp_dir, std::path::PathBuf::from);
     if cfg!(target_os = "macos") {
-        return home.join("Library/Application Support/Snapling");
+        let lib = if env == "CACHE" {
+            "Library/Caches"
+        } else {
+            "Library/Application Support"
+        };
+        return home.join(lib).join("Snapling");
     }
     let (var, fallback) = match env {
         "APPDATA" => ("XDG_CONFIG_HOME", ".config"),
+        "STATE" => ("XDG_STATE_HOME", ".local/state"),
+        "CACHE" => ("XDG_CACHE_HOME", ".cache"),
         _ => ("XDG_DATA_HOME", ".local/share"),
     };
     std::env::var_os(var)
@@ -49,8 +57,116 @@ fn system_dir(env: &str) -> std::path::PathBuf {
         .join("snapling")
 }
 
+/// Folders and files Snapling uses, for `--print-paths` and `--doctor`.
+fn paths() -> Vec<(&'static str, std::path::PathBuf)> {
+    let data = app_dir("LOCALAPPDATA");
+    let mut list = vec![
+        ("config", ui::config_path()),
+        ("data", data.clone()),
+        ("models", data.join("models")),
+    ];
+    #[cfg(windows)]
+    list.push(("log", data.join("snapling.log")));
+    #[cfg(not(windows))]
+    {
+        list.push(("state", app_dir("STATE")));
+        list.push(("cache", app_dir("CACHE")));
+        list.push(("runtime", snapling_unix::runtime_dir()));
+        if let Some(p) = snapling_unix::pictures_dir() {
+            list.push(("pictures", p.join("Snapling")));
+        }
+    }
+    list
+}
+
+const HELP: &str = r#"Snapling — screenshots, annotations, OCR and translation
+
+Usage: snapling [OPTION] [FILE]
+
+  -h, --help             Show this help and exit
+  -V, --version          Show version, commit and target
+      --region           Select a screen region (Linux/macOS)
+      --screen           Capture the screen (Linux/macOS)
+      --ocr              Recognize text in a region (Linux/macOS)
+      --ocr-translate    Recognize and translate a region (Linux/macOS)
+      --record           Start or stop recording (Linux/macOS)
+      --record-cancel    Cancel recording and delete its file (Linux/macOS)
+      --long             Take a scrolling screenshot (Linux/macOS)
+      --delay            Select after the configured delay (Linux/macOS)
+      --settings         Open settings
+      --gallery          Open the gallery
+      --welcome          Open the welcome screen
+      --edit FILE        Edit an image
+      --text FILE        Open recognized text
+      --translate FILE   Open the translation window
+      --pin FILE         Pin an image
+      --print-paths      Show config, data and other folders
+      --doctor [--json]  Check the session and tools, print install commands (Linux)
+
+Exit codes: 0 success, 1 error, 2 invalid arguments, 3 missing tool,
+4 no graphical session, 5 cancelled."#;
+
+fn validate_args(args: &[std::ffi::OsString]) -> Result<(), String> {
+    let Some(flag) = args.get(1) else {
+        return Ok(());
+    };
+    let Some(flag) = flag.to_str() else {
+        return Err("argument is not valid UTF-8".into());
+    };
+    let file_arg = matches!(flag, "--edit" | "--translate" | "--pin" | "--text");
+    let window = matches!(flag, "--settings" | "--welcome" | "--gallery");
+    let window = window || flag == "--print-paths";
+    #[cfg(not(windows))]
+    let action = app_unix::ACTIONS.contains(&flag);
+    #[cfg(windows)]
+    let action = false;
+    let doctor = cfg!(target_os = "linux")
+        && flag == "--doctor"
+        && (args.len() == 2 || (args.len() == 3 && args[2] == "--json"));
+    let valid = doctor || (file_arg && args.len() == 3) || ((window || action) && args.len() == 2);
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("unknown option or wrong arguments: {flag}"))
+    }
+}
+
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
+        println!("{HELP}");
+        return;
+    }
+    if args.len() == 2 && (args[1] == "--version" || args[1] == "-V") {
+        println!(
+            "snapling {} ({}, {})",
+            env!("CARGO_PKG_VERSION"),
+            env!("SNAPLING_COMMIT"),
+            env!("SNAPLING_TARGET")
+        );
+        return;
+    }
+    if let Err(e) = validate_args(&args) {
+        eprintln!("snapling: {e}\nTry 'snapling --help' for more information.");
+        std::process::exit(2);
+    }
+    if args.len() == 2 && args[1] == "--print-paths" {
+        for (name, path) in paths() {
+            println!("{name:<9} {}", path.display());
+        }
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if args.get(1).is_some_and(|a| a == "--doctor") {
+        let dirs: Vec<_> = paths()
+            .into_iter()
+            .map(|(n, p)| match p.parent() {
+                Some(dir) if n == "config" => (n, dir.to_path_buf()),
+                _ => (n, p),
+            })
+            .collect();
+        std::process::exit(snapling_unix::doctor::report(&dirs, args.len() == 3));
+    }
     let cfg = snapling_core::config::Config::load_or_create(&ui::config_path());
     ui::apply_language(&cfg.map_or("auto".to_string(), |c| c.ui.language));
     if args.len() == 3 && args[1] == "--edit" {
@@ -68,8 +184,10 @@ fn main() {
         return app_unix::run_pin(std::path::Path::new(&args[2]));
     }
     #[cfg(not(windows))]
-    if args.len() == 2 && args[1].to_str().is_some_and(app_unix::run_flag) {
-        return;
+    if args.len() == 2
+        && let Some(code) = args[1].to_str().and_then(app_unix::run_flag)
+    {
+        std::process::exit(code);
     }
     if args.len() == 3 && args[1] == "--text" {
         return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), true);
@@ -121,7 +239,24 @@ fn text_hooks() -> translate_ui::Hooks {
 
 #[cfg(test)]
 mod tests {
-    use super::portable_dir;
+    use super::{portable_dir, validate_args};
+
+    fn args(parts: &[&str]) -> Vec<std::ffi::OsString> {
+        parts.iter().map(Into::into).collect()
+    }
+
+    #[test]
+    fn cli_rejects_unknown_flags_and_missing_file_arguments() {
+        assert!(validate_args(&args(&["snapling"])).is_ok());
+        assert!(validate_args(&args(&["snapling", "--edit", "shot.raw"])).is_ok());
+        assert!(validate_args(&args(&["snapling", "--settings"])).is_ok());
+        assert!(validate_args(&args(&["snapling", "--hlep"])).is_err());
+        assert!(validate_args(&args(&["snapling", "--edit"])).is_err());
+        assert!(validate_args(&args(&["snapling", "--settings", "extra"])).is_err());
+        assert!(validate_args(&args(&["snapling", "--help", "extra"])).is_err());
+        assert!(validate_args(&args(&["snapling", "--print-paths"])).is_ok());
+        assert!(validate_args(&args(&["snapling", "--doctor", "--yaml"])).is_err());
+    }
 
     #[test]
     fn a_marker_next_to_the_exe_makes_it_portable() {

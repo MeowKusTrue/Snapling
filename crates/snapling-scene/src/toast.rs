@@ -5,7 +5,9 @@ use super::*;
 pub enum ToastAction {
     Editor,
     Text,
+    /// The folder, or the file selected in it when there is one.
     Folder,
+    CopyPath,
 }
 
 pub struct Toast<'a> {
@@ -15,37 +17,46 @@ pub struct Toast<'a> {
     /// BGRA, width, height.
     pub shot: (&'a [u8], u32, u32),
     pub hover: Option<ToastAction>,
+    /// The shot has a file: «Show» and «Path» instead of «Folder».
+    pub file: bool,
 }
 
-pub(crate) const TOAST: (f32, f32) = (392.0, 96.0);
+pub(crate) const TOAST: (f32, f32) = (430.0, 96.0);
 pub(crate) const TOAST_THUMB: (f32, f32) = (116.0, 76.0);
-pub(crate) const TOAST_BUTTONS: [(ToastAction, &str); 3] = [
+const TOAST_BUTTONS: [(ToastAction, &str); 3] = [
     (ToastAction::Editor, n("Редактор")),
     (ToastAction::Text, n("Текст")),
     (ToastAction::Folder, n("Папка")),
+];
+const FILE_BUTTONS: [(ToastAction, &str); 4] = [
+    (ToastAction::Editor, n("Редактор")),
+    (ToastAction::Text, n("Текст")),
+    (ToastAction::Folder, n("Показать")),
+    (ToastAction::CopyPath, n("Путь")),
 ];
 
 pub fn toast_size(s: f32) -> (u32, u32) {
     ((TOAST.0 * s).ceil() as u32, (TOAST.1 * s).ceil() as u32)
 }
 
-pub(crate) fn toast_buttons(s: f32) -> Vec<(Rect, ToastAction, &'static str)> {
+pub(crate) fn toast_buttons(s: f32, file: bool) -> Vec<(Rect, ToastAction, &'static str)> {
     let mut x = 138.0 * s;
     let y = 56.0 * s;
-    TOAST_BUTTONS
-        .map(|(a, label)| {
+    let list: &[_] = if file { &FILE_BUTTONS } else { &TOAST_BUTTONS };
+    list.iter()
+        .map(|&(a, label)| {
             let label = t(label);
             let w = text_w(&fonts().semibold, label, 12.5 * s) + 22.0 * s;
             let b = r(x, y, w, 30.0 * s);
             x += w + 4.0 * s;
             (b, a, label)
         })
-        .to_vec()
+        .collect()
 }
 
 /// The button under a point of the notification.
-pub fn toast_at(s: f32, p: Point) -> Option<ToastAction> {
-    toast_buttons(s)
+pub fn toast_at(s: f32, file: bool, p: Point) -> Option<ToastAction> {
+    toast_buttons(s, file)
         .into_iter()
         .find(|(b, ..)| b.contains(p))
         .map(|(_, a, _)| a)
@@ -129,7 +140,7 @@ pub fn draw_toast(pm: &mut PixmapMut<'_>, tt: &Toast<'_>) {
     );
     let sub = fit_text(&f.regular, tt.sub, 12.0 * s, right - x);
     text(pm, &f.regular, &sub, x, 42.0 * s, 12.0 * s, ICON_MUTED);
-    for (i, (b, a, label)) in toast_buttons(s).into_iter().enumerate() {
+    for (i, (b, a, label)) in toast_buttons(s, tt.file).into_iter().enumerate() {
         let on = tt.hover == Some(a);
         let fill = match (i, on) {
             (0, true) => Some([59, 108, 245, 90]),

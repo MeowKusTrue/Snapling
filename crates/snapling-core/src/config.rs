@@ -10,7 +10,8 @@ pub const TEMPLATE: &str = r#"# Snapling — настройки. Изменен�
 [hotkeys]
 # Формат: модификаторы + клавиша через «+». Модификаторы: Ctrl, Alt, Shift, Win.
 # Клавиши: A–Z, 0–9, F1–F24, PrintScreen, Space, Tab, Enter, Escape, Insert, Delete,
-#          Home, End, PageUp, PageDown, Up, Down, Left, Right, Pause, ScrollLock.
+#          Home, End, PageUp, PageDown, Up, Down, Left, Right, Pause, ScrollLock,
+#          Mouse4, Mouse5 (боковые кнопки мыши).
 # Пустая строка "" — действие без горячей клавиши.
 
 # Выделить область (с подсветкой окон и элементов)
@@ -287,7 +288,8 @@ pub struct Ui {
     pub panel_side: PanelSide,
     pub panel_width: u32,
     pub welcomed: bool,
-    /// Asks GitHub for a new version at start. Off: nothing leaves the machine unasked.
+    /// Asks GitHub for a new version at start and offers to install it. Off: nothing leaves the
+    /// machine unasked.
     pub check_updates: bool,
 }
 

@@ -54,7 +54,7 @@ fn label() -> String {
     }
     let secs = BEGIN.get().map_or(0, |b| b.elapsed().as_secs());
     tf(
-        "● {0}:{1} · Стоп",
+        "Стоп · {0}:{1}",
         &[("0", &(secs / 60)), ("1", &format!("{:02}", secs % 60))],
     )
 }

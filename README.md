@@ -61,12 +61,15 @@ Requires Windows 10 2004 or newer, x64. To free the PrtScn key from the Snipping
 
 ### Arch, CachyOS
 
+There is no prebuilt Linux release yet; support is early and currently built from source:
+
 ```bash
-cd packaging/aur
+git clone https://github.com/MeowKusTrue/Snapling.git
+cd Snapling/packaging/aur
 makepkg -si
 ```
 
-Linux support is early. It needs `grim`, `wl-clipboard` and `pipewire`. Optional: `wf-recorder` and `ffmpeg` for recording, `wlrctl` for long screenshots, `libnotify`, `libsecret`, `zenity`.
+It needs `grim`, `slurp`, `wl-clipboard` and `pipewire`. Optional: `wf-recorder` and `ffmpeg` for recording, `wlrctl` for long screenshots, `libnotify`, `libsecret`, `zenity`. Linux OCR uses PaddleOCR; its model is downloaded only after confirmation.
 
 Wayland gives apps no global hotkeys, so bind them in `hyprland.conf`:
 
@@ -85,6 +88,8 @@ windowrulev2 = pin, title:^(Snapling pin)$
 ```
 
 `snapling --record` a second time stops the recording, `snapling --record-cancel` drops it. On X11 use the same flags with `xclip` and `ffmpeg`.
+
+`snapling --help` lists the available commands, and `snapling --version` prints the version, commit and target. An unknown flag exits with code 2 instead of opening the GUI.
 
 ### macOS
 

@@ -3,7 +3,7 @@
 use snapling_core::hotkey::{self, Hotkey};
 use snapling_core::i18n::{t, tf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicIsize, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HOTKEY_ALREADY_REGISTERED, GetLastError,
     GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM,
@@ -43,8 +43,8 @@ use windows::Win32::UI::Shell::{
     IFileSaveDialog, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetSystemMetrics, HHOOK, IDYES, KBDLLHOOKSTRUCT, MB_ICONQUESTION,
-    MB_ICONWARNING, MB_YESNO, MSLLHOOKSTRUCT, MessageBoxW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    CallNextHookEx, GetSystemMetrics, IDYES, KBDLLHOOKSTRUCT, MB_ICONQUESTION, MB_ICONWARNING,
+    MB_YESNO, MSLLHOOKSTRUCT, MessageBoxW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
     WH_MOUSE_LL, WM_KEYDOWN, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
@@ -213,8 +213,8 @@ pub fn watch_show() {
     });
 }
 
-static RECORD_HOOK: AtomicIsize = AtomicIsize::new(0);
-static RECORD_MOUSE: AtomicIsize = AtomicIsize::new(0);
+/// Thread that holds the recording hooks, 0 when none.
+static RECORD_THREAD: AtomicU32 = AtomicU32::new(0);
 static RECORD_MODS: AtomicU8 = AtomicU8::new(0);
 static RECORDED: Mutex<Option<String>> = Mutex::new(None);
 
@@ -303,27 +303,104 @@ unsafe extern "system" fn record_mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -
     unsafe { CallNextHookEx(None, code, wp, lp) }
 }
 
-/// Starts or stops catching the keyboard for hotkey recording. Runs on a thread with a message
-/// loop; Windows drops the hook by itself if that thread stops answering.
+/// The recording helper process, while one runs.
+static RECORD_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+/// Starts or stops catching the keyboard and side mouse buttons for hotkey recording, in a
+/// `snapling --record-key` process: in the settings window's own process Windows never called
+/// the hooks, while the same hooks in a process of their own see every key, Win and PrtScn too.
 pub fn record_keys(on: bool) {
-    let old = RECORD_HOOK.swap(0, Ordering::Relaxed);
+    use std::io::BufRead;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    if let Some(mut child) = RECORD_CHILD.lock().ok().and_then(|mut c| c.take()) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if let Ok(mut slot) = RECORDED.lock() {
+        *slot = None;
+    }
+    if !on {
+        return;
+    }
+    const NO_WINDOW: u32 = 0x0800_0000;
+    let spawned = std::env::current_exe().and_then(|exe| {
+        Command::new(exe)
+            .arg("--record-key")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .creation_flags(NO_WINDOW)
+            .spawn()
+    });
+    let Ok(mut child) = spawned else {
+        return;
+    };
+    if let Some(out) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            if std::io::BufReader::new(out).read_line(&mut line).is_ok()
+                && !line.trim().is_empty()
+                && let Ok(mut slot) = RECORDED.lock()
+            {
+                *slot = Some(line.trim().to_string());
+            }
+        });
+    }
+    if let Ok(mut c) = RECORD_CHILD.lock() {
+        *c = Some(child);
+    }
+}
+
+/// `snapling --record-key`: hooks the keyboard and side buttons, prints the first combo and
+/// exits. Also exits when the parent goes (its end of stdin closes) or after half a minute, so
+/// the keyboard is never held for long.
+pub fn record_key_process() {
+    use std::io::Read;
+    std::thread::spawn(|| {
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        std::process::exit(0);
+    });
+    hook_here(true);
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(30) {
+        if let Some(combo) = recorded_combo() {
+            println!("{combo}");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    hook_here(false);
+}
+
+/// The recording hooks on a thread of this process with a plain message loop: Windows calls a
+/// low-level hook through the installing thread's queue.
+fn hook_here(on: bool) {
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, PostThreadMessageW, WM_QUIT};
+    let old = RECORD_THREAD.swap(0, Ordering::Relaxed);
     if old != 0 {
-        let _ = unsafe { UnhookWindowsHookEx(HHOOK(old as _)) };
+        let _ = unsafe { PostThreadMessageW(old, WM_QUIT, WPARAM(0), LPARAM(0)) };
     }
     RECORD_MODS.store(0, Ordering::Relaxed);
     if let Ok(mut slot) = RECORDED.lock() {
         *slot = None;
     }
-    let old = RECORD_MOUSE.swap(0, Ordering::Relaxed);
-    if old != 0 {
-        let _ = unsafe { UnhookWindowsHookEx(HHOOK(old as _)) };
+    if !on {
+        return;
     }
-    if on && let Ok(h) = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(record_proc), None, 0) } {
-        RECORD_HOOK.store(h.0 as isize, Ordering::Relaxed);
-    }
-    if on && let Ok(h) = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(record_mouse_proc), None, 0) }
-    {
-        RECORD_MOUSE.store(h.0 as isize, Ordering::Relaxed);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || unsafe {
+        let keys = SetWindowsHookExW(WH_KEYBOARD_LL, Some(record_proc), None, 0);
+        let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(record_mouse_proc), None, 0);
+        let _ = tx.send(GetCurrentThreadId());
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+        for h in [keys, mouse].into_iter().flatten() {
+            let _ = UnhookWindowsHookEx(h);
+        }
+    });
+    if let Ok(id) = rx.recv() {
+        RECORD_THREAD.store(id, Ordering::Relaxed);
     }
 }
 
@@ -713,10 +790,12 @@ fn held_mods() -> u8 {
 
 /// Side-button bindings of the tray: id, modifier bits, button.
 static MOUSE_BINDS: Mutex<Vec<(i32, u8, u32)>> = Mutex::new(Vec::new());
-static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+/// Thread that gets `WM_HOTKEY` for a bound side button: the one that registered it (the tray).
+static MOUSE_TARGET: AtomicU32 = AtomicU32::new(0);
+static MOUSE_HOOKED: AtomicBool = AtomicBool::new(false);
 
-/// A bound side button posts `WM_HOTKEY` to the tray thread, which owns this hook, and is kept
-/// from other programs; unbound ones pass.
+/// A bound side button posts `WM_HOTKEY` to the tray thread and is kept from other programs;
+/// unbound ones pass.
 unsafe extern "system" fn bound_mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code >= 0
         && let Some(vk) = side_button(wp.0 as u32, lp)
@@ -729,9 +808,8 @@ unsafe extern "system" fn bound_mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) ->
         });
         if let Some(id) = id {
             if wp.0 as u32 == WM_XBUTTONDOWN {
-                use windows::Win32::System::Threading::GetCurrentThreadId;
                 use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_HOTKEY};
-                let thread = unsafe { GetCurrentThreadId() };
+                let thread = MOUSE_TARGET.load(Ordering::Relaxed);
                 let _ = unsafe {
                     PostThreadMessageW(thread, WM_HOTKEY, WPARAM(id as usize), LPARAM(0))
                 };
@@ -751,10 +829,27 @@ fn register_mouse(id: i32, hk: &Hotkey) -> Result<(), String> {
         binds.retain(|b| b.0 != id);
         binds.push((id, mods, vk));
     }
-    if MOUSE_HOOK.load(Ordering::Relaxed) == 0 {
-        let h = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(bound_mouse_proc), None, 0) }
-            .map_err(|e| tf("{hk} не зарегистрировано: {e}", &[("hk", &hk), ("e", &e)]))?;
-        MOUSE_HOOK.store(h.0 as isize, Ordering::Relaxed);
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    MOUSE_TARGET.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+    // Its own thread and message loop, so a busy tray (a capture, OCR) never delays the hook:
+    // Windows removes a low-level hook that answers late. It stays for the life of the process;
+    // with no bindings it lets every click through.
+    if !MOUSE_HOOKED.swap(true, Ordering::Relaxed) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG};
+            let hooked = SetWindowsHookExW(WH_MOUSE_LL, Some(bound_mouse_proc), None, 0);
+            let _ = tx.send(hooked.as_ref().map(|_| ()).map_err(ToString::to_string));
+            let mut msg = MSG::default();
+            while hooked.is_ok() && GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+        });
+        if let Ok(Err(e)) = rx.recv() {
+            MOUSE_HOOKED.store(false, Ordering::Relaxed);
+            return Err(tf(
+                "{hk} не зарегистрировано: {e}",
+                &[("hk", &hk), ("e", &e)],
+            ));
+        }
     }
     Ok(())
 }
@@ -791,12 +886,6 @@ pub fn register_hotkey(id: i32, hk: &Hotkey) -> Result<(), String> {
 pub fn unregister_hotkey(id: i32) {
     if let Ok(mut binds) = MOUSE_BINDS.lock() {
         binds.retain(|b| b.0 != id);
-        if binds.is_empty() {
-            let old = MOUSE_HOOK.swap(0, Ordering::Relaxed);
-            if old != 0 {
-                let _ = unsafe { UnhookWindowsHookEx(HHOOK(old as _)) };
-            }
-        }
     }
     let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(None, id) };
 }
@@ -1375,4 +1464,42 @@ pub fn play_wav(wav: &'static [u8]) {
             SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
         )
     };
+}
+
+#[cfg(test)]
+mod record_probe {
+    /// Recording catches keys while the thread that started it does not pump messages, like a
+    /// busy egui frame. Sends real key presses (the hook keeps them from other programs).
+    /// `cargo test -p snapling-win record_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn record_probe() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+            SendInput, VIRTUAL_KEY,
+        };
+        let key = |vk: u16, up: bool| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        KEYBD_EVENT_FLAGS(0)
+                    },
+                    ..Default::default()
+                },
+            },
+        };
+        for vk in [0x74u16, 0x21, 0xAF] {
+            super::hook_here(true);
+            std::thread::spawn(move || unsafe {
+                SendInput(&[key(vk, false), key(vk, true)], size_of::<INPUT>() as i32);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            println!("{vk:#x} -> {:?}", super::recorded_combo());
+            super::hook_here(false);
+        }
+    }
 }

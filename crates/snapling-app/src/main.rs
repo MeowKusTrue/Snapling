@@ -133,6 +133,11 @@ fn validate_args(args: &[std::ffi::OsString]) -> Result<(), String> {
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    // Internal: the settings window records a hotkey through this process.
+    #[cfg(windows)]
+    if args.len() == 2 && args[1] == "--record-key" {
+        return snapling_win::record_key_process();
+    }
     if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
         println!("{HELP}");
         return;

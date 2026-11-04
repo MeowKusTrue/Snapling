@@ -247,9 +247,9 @@ pub fn reserved_on_windows(hk: &Hotkey) -> Option<&'static str> {
             false,
             "A" | "C" | "F" | "N" | "O" | "P" | "S" | "T" | "V" | "W" | "X" | "Y" | "Z",
         ) => t("перехватит стандартное сочетание во всех программах"),
-        (false, false, false, false, _) if typing => {
-            t("без модификаторов клавиша перестанет работать в других программах")
-        }
+        (false, false, false, false, _) if typing => t(
+            "без Ctrl, Alt или Shift клавиша будет делать снимок во всех программах и перестанет печататься",
+        ),
         _ => return None,
     })
 }

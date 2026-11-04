@@ -87,6 +87,42 @@ const TABS: [(Tab, &str, &str); 7] = [
 /// Narrowest the settings panel gets by dragging its edge.
 const PANEL_MIN: f32 = 640.0;
 const REPO: &str = "https://github.com/MeowKusTrue/Snapling";
+/// The first key press with its modifiers, as a combo `Hotkey::parse` takes; modifiers alone and
+/// keys without a hotkey name are skipped.
+fn egui_combo(events: &[egui::Event]) -> Option<String> {
+    events.iter().find_map(|e| {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } = e
+        else {
+            return None;
+        };
+        let name = match key.name() {
+            "Equals" => "Equal",
+            "Backtick" => "Backquote",
+            "OpenBracket" => "BracketLeft",
+            "CloseBracket" => "BracketRight",
+            n => n,
+        };
+        let mut combo = String::new();
+        for (on, m) in [
+            (modifiers.ctrl, "Ctrl+"),
+            (modifiers.alt, "Alt+"),
+            (modifiers.shift, "Shift+"),
+        ] {
+            if on {
+                combo.push_str(m);
+            }
+        }
+        combo.push_str(name);
+        Hotkey::parse(&combo).ok().map(|hk| hk.to_string())
+    })
+}
+
 const RECORD_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub fn run(hooks: Hooks, page: Page) {
@@ -158,7 +194,8 @@ struct Settings {
     panel_width: f32,
     welcome: bool,
     autostart: bool,
-    recording: Option<(Action, std::time::Instant)>,
+    /// Action being recorded, since when, and whether the window has had focus since.
+    recording: Option<(Action, std::time::Instant, bool)>,
     /// Why the last pressed combo was refused.
     refused: Option<(Action, String)>,
     proxy: String,
@@ -885,20 +922,28 @@ impl Settings {
     fn start_recording(&mut self, a: Action) {
         self.stop_recording();
         (self.hooks.record_keys)(true);
-        self.recording = Some((a, std::time::Instant::now()));
+        self.recording = Some((a, std::time::Instant::now(), false));
     }
 
     fn poll_recording(&mut self, ctx: &egui::Context) {
-        let Some((action, started)) = self.recording else {
+        let Some((action, started, had_focus)) = self.recording else {
             return;
         };
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        // The whole keyboard is ours while recording, so it never lasts long.
-        if !focused || started.elapsed() > RECORD_LIMIT {
+        // The whole keyboard is ours while recording, so it never lasts long and ends when the
+        // user goes elsewhere. A window Windows never gave focus to (the panel can open without
+        // it) keeps recording: stopping there made every key unbindable.
+        if (had_focus && !focused) || started.elapsed() > RECORD_LIMIT {
             return self.stop_recording();
         }
-        let Some(combo) = (self.hooks.recorded_combo)() else {
+        if focused && !had_focus {
+            self.recording = Some((action, started, true));
+        }
+        // The window's own keys first: the hook was seen not to fire in this process on some
+        // systems. The hook still brings what Windows keeps from windows (PrtScn, Win+…).
+        let typed = ctx.input(|i| egui_combo(&i.events));
+        let Some(combo) = typed.or_else(|| (self.hooks.recorded_combo)()) else {
             return;
         };
         self.stop_recording();
@@ -1763,5 +1808,49 @@ impl eframe::App for Settings {
         }
         self.panel(&ctx);
         self.panel_open |= std::mem::take(&mut self.panel_opening);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::egui::{Event, Key, Modifiers};
+    use super::egui_combo;
+
+    fn press(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn window_keys_become_combos() {
+        let none = Modifiers::NONE;
+        assert_eq!(egui_combo(&[press(Key::F5, none)]).as_deref(), Some("F5"));
+        assert_eq!(
+            egui_combo(&[press(Key::PageUp, none)]).as_deref(),
+            Some("PageUp")
+        );
+        assert_eq!(
+            egui_combo(&[press(Key::ArrowLeft, none)]).as_deref(),
+            Some("Left")
+        );
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..none
+        };
+        assert_eq!(
+            egui_combo(&[press(Key::K, ctrl_shift)]).as_deref(),
+            Some("Ctrl+Shift+K")
+        );
+        assert_eq!(
+            egui_combo(&[press(Key::Equals, none)]).as_deref(),
+            Some("Equal")
+        );
+        assert_eq!(egui_combo(&[]), None);
     }
 }

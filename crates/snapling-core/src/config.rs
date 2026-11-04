@@ -11,7 +11,8 @@ pub const TEMPLATE: &str = r#"# Snapling — настройки. Изменен�
 # Формат: модификаторы + клавиша через «+». Модификаторы: Ctrl, Alt, Shift, Win.
 # Клавиши: A–Z, 0–9, F1–F24, PrintScreen, Space, Tab, Enter, Escape, Insert, Delete,
 #          Home, End, PageUp, PageDown, Up, Down, Left, Right, Pause, ScrollLock,
-#          Mouse4, Mouse5 (боковые кнопки мыши).
+#          Mouse4, Mouse5 (боковые кнопки мыши), Numpad0–Numpad9, VolumeUp, MediaPlayPause и др.
+#          Любая другая клавиша — по коду: Vk + две hex-цифры, например VkB7.
 # Пустая строка "" — действие без горячей клавиши.
 
 # Выделить область (с подсветкой окон и элементов)
@@ -139,7 +140,7 @@ target = "ru"
 
 [ui]
 # Язык: "en", "ru", "auto" — как в системе, или свой файл из папки i18n рядом с этим файлом.
-language = "en"
+language = "auto"
 # Тема окон: "system", "dark", "light", "black".
 theme = "system"
 # Значок в трее: "auto" — под цвет панели задач, "white", "black".
@@ -296,7 +297,7 @@ pub struct Ui {
 impl Default for Ui {
     fn default() -> Self {
         Self {
-            language: "en".into(),
+            language: "auto".into(),
             theme: Theme::default(),
             tray_icon: TrayIcon::default(),
             panel_side: PanelSide::default(),

@@ -229,8 +229,14 @@ fn modifier_bit(vk: u32) -> Option<u8> {
     }
 }
 
+/// Any key but a modifier: by name when it has one, else by its code.
 fn recorded_hotkey(vk: u32, mods: u8) -> Option<Hotkey> {
-    let key = hotkey::key_names().find(|k| vk_code(k) == Some(vk))?;
+    if vk == 0 || vk > 0xFE || modifier_bit(vk).is_some() {
+        return None;
+    }
+    let key = hotkey::key_names()
+        .find(|k| vk_code(k) == Some(vk))
+        .unwrap_or_else(|| format!("Vk{vk:02X}"));
     Some(Hotkey {
         shift: mods & 1 != 0,
         ctrl: mods & 2 != 0,
@@ -911,7 +917,41 @@ fn vk_code(key: &str) -> Option<u32> {
         "ScrollLock" => 0x91,
         "Mouse4" => 0x05,
         "Mouse5" => 0x06,
-        _ => return None,
+        "Backspace" => 0x08,
+        "CapsLock" => 0x14,
+        "NumLock" => 0x90,
+        "Apps" => 0x5D,
+        "NumpadMultiply" => 0x6A,
+        "NumpadAdd" => 0x6B,
+        "NumpadSubtract" => 0x6D,
+        "NumpadDecimal" => 0x6E,
+        "NumpadDivide" => 0x6F,
+        "Semicolon" => 0xBA,
+        "Equal" => 0xBB,
+        "Comma" => 0xBC,
+        "Minus" => 0xBD,
+        "Period" => 0xBE,
+        "Slash" => 0xBF,
+        "Backquote" => 0xC0,
+        "BracketLeft" => 0xDB,
+        "Backslash" => 0xDC,
+        "BracketRight" => 0xDD,
+        "Quote" => 0xDE,
+        "VolumeMute" => 0xAD,
+        "VolumeDown" => 0xAE,
+        "VolumeUp" => 0xAF,
+        "MediaNext" => 0xB0,
+        "MediaPrev" => 0xB1,
+        "MediaStop" => 0xB2,
+        "MediaPlayPause" => 0xB3,
+        k => {
+            if let Some(n) = k.strip_prefix("Numpad").and_then(|n| n.parse::<u32>().ok()) {
+                return (n <= 9).then_some(0x60 + n);
+            }
+            return k
+                .strip_prefix("Vk")
+                .and_then(|h| u32::from_str_radix(h, 16).ok());
+        }
     })
 }
 
@@ -1174,6 +1214,17 @@ mod tests {
         assert_eq!(hk.to_string(), "Win+S");
         assert_eq!(modifier_bit(0x41), None);
         assert!(recorded_hotkey(0xFF, 0).is_none());
+        assert!(
+            recorded_hotkey(0xA2, 0).is_none(),
+            "a modifier alone is no key"
+        );
+        assert_eq!(recorded_hotkey(0xAF, 0).unwrap().to_string(), "VolumeUp");
+        assert_eq!(recorded_hotkey(0x63, 0).unwrap().to_string(), "Numpad3");
+        // A key without a name keeps its code and registers by it.
+        let odd = recorded_hotkey(0xB7, 0).unwrap();
+        assert_eq!(odd.to_string(), "VkB7");
+        assert_eq!(Hotkey::parse("vkb7").unwrap(), odd);
+        assert_eq!(vk_code(&odd.key), Some(0xB7));
     }
 
     #[test]

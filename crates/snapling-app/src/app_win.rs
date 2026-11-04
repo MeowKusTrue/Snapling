@@ -69,6 +69,7 @@ thread_local! {
     static COPY_ON_CAPTURE: Cell<bool> = const { Cell::new(true) };
     /// The language problem check ran at least once.
     static CHECKED_OCR: Cell<bool> = const { Cell::new(false) };
+    static ASKED_SNIP: Cell<bool> = const { Cell::new(false) };
     /// `[capture] toast`.
     static TOAST: Cell<bool> = const { Cell::new(true) };
     /// `[capture] open_editor`.
@@ -441,17 +442,8 @@ fn read_text(img: &snapling_win::Image, lang: &str, paddle: bool) -> Result<Stri
     if !paddle {
         return windows();
     }
+    // The user asked for text: the model (~11 MB, once) comes without a question.
     if !engine::installed(&models) {
-        let q = tf(
-            "Для PaddleOCR нужна модель, ~{0} МБ.
-Скачать её с huggingface.co ({1})?
-
-После скачивания распознавание работает без интернета.",
-            &[("0", &engine::DOWNLOAD_MB), ("1", &engine::REPO)],
-        );
-        if !snapling_win::ask(&q) {
-            return windows();
-        }
         info!("model download: {}", engine::FOLDER);
         let proxy = snapling_win::secret::get(DEEPL_PROXY);
         let progress = snapling_translate::Progress::default();
@@ -1089,7 +1081,8 @@ fn apply_config(cfg: &Config) {
     report(&problems);
 }
 
-/// Checks the language off the UI thread: WinRT must not change this thread's COM apartment.
+/// Logs the languages off the UI thread: WinRT must not change this thread's COM apartment. No
+/// dialog: without a Windows language `read_text` takes PaddleOCR.
 fn apply_ocr(lang: &str) {
     let lang = lang.trim().to_string();
     let same = OCR_LANG.with(|l| l.replace(lang.clone())) == lang;
@@ -1099,12 +1092,7 @@ fn apply_ocr(lang: &str) {
     std::thread::spawn(move || {
         info!("ocr languages: {:?}", snapling_win::ocr::languages());
         if let Some(p) = snapling_win::ocr::language_problem(&lang) {
-            warn!("{p}");
-            snapling_win::warn(&tf(
-                "Настройки:
-{p}",
-                &[("p", &p)],
-            ));
+            info!("{p} PaddleOCR is used instead.");
         }
     });
 }
@@ -1168,6 +1156,7 @@ fn apply_hotkeys(cfg: &Config) -> Vec<String> {
         }
         if hk == Hotkey::parse("PrintScreen").expect("valid")
             && snapling_win::snipping_owns_printscreen()
+            && !take_printscreen()
         {
             problems.push(
                 t(
@@ -1179,6 +1168,20 @@ fn apply_hotkeys(cfg: &Config) -> Vec<String> {
         }
     }
     problems
+}
+
+/// Asks once per run to give PrtScn from the Snipping Tool to Snapling; `true` when it is ours.
+fn take_printscreen() -> bool {
+    if ASKED_SNIP.replace(true) {
+        return false;
+    }
+    let yes = snapling_win::ask(t(
+        "Клавишу PrtScn сейчас забирают «Ножницы» Windows, и снимок Snapling не открывается. \
+         Отдать PrtScn Snapling?",
+    ));
+    yes && snapling_win::free_printscreen()
+        .inspect_err(|e| warn!("PrtScn: {e}"))
+        .is_ok()
 }
 
 fn report(problems: &[String]) {

@@ -1505,10 +1505,7 @@ impl Settings {
                 self.update_text = t("Скачиваю…").into();
             }
             if self.installing.is_some() {
-                ui.vertical(|ui| {
-                    ui.set_width(280.0);
-                    ui::download_bar(ui, &self.installed);
-                });
+                ui::centered_download(ui, &self.installed, 280.0);
             }
             if let Some(page) = &self.update_page
                 && ui::tone(ui, t("Открыть страницу выпуска"), None, 38.0).clicked()

@@ -197,17 +197,11 @@ pub fn run_pin(path: &Path) {
     }
 }
 
-/// OCR has one engine here: PaddleOCR, with the model asked for on first use.
+/// OCR has one engine here: PaddleOCR, its model fetched on first use.
 fn read_text(bgra: &[u8], width: u32, height: u32) -> Result<String, String> {
     let models = models_dir();
+    // The user asked for text: the model (~11 MB, once) comes without a question.
     if !paddle::installed(&models) {
-        let q = tf(
-            "Для PaddleOCR нужна модель, ~{0} МБ.\nСкачать её с huggingface.co ({1})?\n\nПосле скачивания распознавание работает без интернета.",
-            &[("0", &paddle::DOWNLOAD_MB), ("1", &paddle::REPO)],
-        );
-        if !unix::ask(&q) {
-            return Ok(String::new());
-        }
         let progress = snapling_translate::Progress::default();
         paddle::download(&models, unix::secret_get(PROXY).as_deref(), &progress)?;
     }

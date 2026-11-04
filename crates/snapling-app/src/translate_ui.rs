@@ -135,6 +135,8 @@ struct Window {
     /// Models this pair lacks: the pane asks to download them.
     need: Vec<&'static Direction>,
     fetching: bool,
+    /// The missing model was fetched once without asking; a second miss shows the button.
+    auto_fetched: bool,
     fetched: Arc<Progress>,
     hooks: Hooks,
     tx: Sender<Job>,
@@ -168,6 +170,7 @@ impl Window {
             to: target_for(from, &hooks.target),
             need: Vec::new(),
             fetching: false,
+            auto_fetched: false,
             fetched: Arc::default(),
             original,
             translation: String::new(),
@@ -211,6 +214,10 @@ impl Window {
             if !self.need.is_empty() {
                 self.pending = None;
                 self.status.clear();
+                // The user asked for a translation: the model comes without a second question.
+                if !std::mem::replace(&mut self.auto_fetched, true) {
+                    self.fetch();
+                }
                 return;
             }
         }
@@ -569,6 +576,20 @@ impl eframe::App for Window {
                         ui.set_height(h - 24.0);
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             ui.set_width(ui.available_width());
+                            if !self.need.is_empty() && self.fetching {
+                                let mb: u32 = self.need.iter().map(|d| d.mb).sum();
+                                ui.add_space(ui.available_height() / 3.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(tf(
+                                        "Скачиваю модель перевода, ~{0} МБ. Это один раз, \
+                                         дальше всё работает без интернета.",
+                                        &[("0", &mb)],
+                                    ));
+                                });
+                                ui.add_space(8.0);
+                                ui::centered_download(ui, &self.fetched, 320.0);
+                                return;
+                            }
                             if !self.need.is_empty() {
                                 let mb: u32 = self.need.iter().map(|d| d.mb).sum();
                                 ui.label(tf(

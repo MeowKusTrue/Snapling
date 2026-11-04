@@ -771,6 +771,18 @@ pub fn download_bar(ui: &mut Ui, progress: &snapling_translate::Progress) {
         .request_repaint_after(std::time::Duration::from_millis(200));
 }
 
+/// `download_bar` of `width` in the middle of the line, its text centered under it.
+pub fn centered_download(ui: &mut Ui, progress: &snapling_translate::Progress, width: f32) {
+    let width = width.min(ui.available_width());
+    ui.horizontal(|ui| {
+        ui.add_space((ui.available_width() - width) / 2.0);
+        ui.vertical_centered(|ui| {
+            ui.set_width(width);
+            download_bar(ui, progress);
+        });
+    });
+}
+
 /// Placeholder of something still loading: a calm pulse, the frames only while it is on screen.
 pub fn skeleton(ui: &Ui, rect: Rect, radius: f32) {
     let ctx = ui.ctx();

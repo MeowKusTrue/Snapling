@@ -22,6 +22,43 @@ const NAMED: &[&str] = &[
     "ScrollLock",
     "Mouse4",
     "Mouse5",
+    "Backspace",
+    "CapsLock",
+    "NumLock",
+    "Apps",
+    "Numpad0",
+    "Numpad1",
+    "Numpad2",
+    "Numpad3",
+    "Numpad4",
+    "Numpad5",
+    "Numpad6",
+    "Numpad7",
+    "Numpad8",
+    "Numpad9",
+    "NumpadMultiply",
+    "NumpadAdd",
+    "NumpadSubtract",
+    "NumpadDecimal",
+    "NumpadDivide",
+    "Semicolon",
+    "Equal",
+    "Comma",
+    "Minus",
+    "Period",
+    "Slash",
+    "Backquote",
+    "BracketLeft",
+    "Backslash",
+    "BracketRight",
+    "Quote",
+    "VolumeMute",
+    "VolumeDown",
+    "VolumeUp",
+    "MediaNext",
+    "MediaPrev",
+    "MediaStop",
+    "MediaPlayPause",
 ];
 
 /// Every key a hotkey can use, canonical spelling.
@@ -39,7 +76,8 @@ pub struct Hotkey {
     pub alt: bool,
     pub shift: bool,
     pub win: bool,
-    /// Canonical: `A`-`Z`, `0`-`9`, `F1`-`F24` or an entry of `NAMED`.
+    /// Canonical: `A`-`Z`, `0`-`9`, `F1`-`F24`, an entry of `NAMED`, or `VkXX`: any other key
+    /// by its Windows virtual-key code in hex.
     pub key: String,
 }
 
@@ -84,6 +122,11 @@ fn canonical_key(k: &str) -> Option<String> {
     }
     if let Some(n) = up.strip_prefix('F').and_then(|n| n.parse::<u8>().ok()) {
         return (1..=24).contains(&n).then(|| format!("F{n}"));
+    }
+    if let Some(code) = up.strip_prefix("VK").filter(|h| h.len() == 2)
+        && let Ok(code) = u8::from_str_radix(code, 16)
+    {
+        return (code != 0).then(|| format!("Vk{code:02X}"));
     }
     let alias = match up.as_str() {
         "PRTSC" | "PRTSCN" | "PRINT" => "PrintScreen",
@@ -167,7 +210,27 @@ pub fn check(
 pub fn reserved_on_windows(hk: &Hotkey) -> Option<&'static str> {
     let k = hk.key.as_str();
     // F-keys, navigation and mouse buttons alone are fine; letters and Enter are not.
-    let typing = k.len() == 1 || matches!(k, "Space" | "Tab" | "Enter" | "Escape");
+    let typing = k.len() == 1
+        || matches!(
+            k,
+            "Space"
+                | "Tab"
+                | "Enter"
+                | "Escape"
+                | "Backspace"
+                | "CapsLock"
+                | "Semicolon"
+                | "Equal"
+                | "Comma"
+                | "Minus"
+                | "Period"
+                | "Slash"
+                | "Backquote"
+                | "BracketLeft"
+                | "Backslash"
+                | "BracketRight"
+                | "Quote"
+        );
     Some(match (hk.ctrl, hk.alt, hk.shift, hk.win, k) {
         (false, false, true, true, "S") => t("занято «Ножницами» Windows"),
         (false, false, false, true, "PrintScreen") => t("снимок экрана Windows в «Изображения»"),

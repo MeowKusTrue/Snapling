@@ -15,6 +15,7 @@ use snapling_core::annotate::{
 };
 use snapling_core::config::{Config, DrawCfg};
 use snapling_core::i18n::{n, t, tf};
+use snapling_core::{project, storage};
 use std::path::{Path, PathBuf};
 
 type SaveAs = fn(&[u8], u32, u32, &str) -> Result<Option<PathBuf>, String>;
@@ -74,16 +75,29 @@ const TOOLS: [(Tool, &str, &str, Key); 11] = [
     (Tool::Crop, icon::CROP, n("Обрезка"), Key::C),
 ];
 
+/// `file`: a hand-off `.raw` (deleted once read) or a `.snapling.json` project.
 pub fn run(file: &Path, hooks: Hooks) {
-    let raw = match annotate::read_raw(file) {
-        Ok(r) => r,
+    let opened = if project::is_project(file) {
+        project::load(file)
+    } else {
+        let raw = annotate::read_raw(file);
+        let _ = std::fs::remove_file(file);
+        raw.and_then(|raw| {
+            let base = annotate::pixmap_from_bgra(&raw.bgra, raw.width, raw.height)
+                .ok_or_else(|| t("неверный размер").to_string())?;
+            Ok(project::Project {
+                base,
+                app: raw.app,
+                doc: annotate::Doc::default(),
+                image: PathBuf::new(),
+            })
+        })
+    };
+    let opened = match opened {
+        Ok(p) => p,
         Err(e) => return (hooks.warn)(&tf("Не удалось открыть снимок.\n{e}", &[("e", &e)])),
     };
-    let _ = std::fs::remove_file(file);
-    let Some(base) = annotate::pixmap_from_bgra(&raw.bgra, raw.width, raw.height) else {
-        return (hooks.warn)(t("Не удалось открыть снимок: неверный размер."));
-    };
-    let (w, h) = (raw.width as f32, raw.height as f32);
+    let (w, h) = (opened.base.width() as f32, opened.base.height() as f32);
     let big = w > 1040.0 || h > 700.0;
     let size = [
         (w + 380.0).clamp(1000.0, 1440.0),
@@ -102,12 +116,7 @@ pub fn run(file: &Path, hooks: Hooks) {
         options,
         Box::new(move |cc| {
             ui::init(cc);
-            Ok(Box::new(Editor::new(
-                base,
-                raw.app,
-                hooks,
-                cc.egui_ctx.clone(),
-            )))
+            Ok(Box::new(Editor::new(opened, hooks, cc.egui_ctx.clone())))
         }),
     );
     if let Err(e) = res {
@@ -118,6 +127,9 @@ pub fn run(file: &Path, hooks: Hooks) {
 struct Editor {
     base: Pixmap,
     app: String,
+    /// The image an opened project belongs to: a save writes over it. Empty for a new shot.
+    image: PathBuf,
+    save_cfg: snapling_core::config::Save,
     hooks: Hooks,
     history: History,
     tex: Option<TextureHandle>,
@@ -131,7 +143,12 @@ struct Editor {
     blur: BlurStyle,
     drag: Option<Element>,
     /// Text being typed: image position and content.
-    typing: Option<(Pt, String)>,
+    /// Text being typed: position, content, the dragged frame (width, height) if any.
+    typing: Option<(Pt, String, Option<Vec2>)>,
+    /// Index the label being re-typed came from; it goes back there.
+    retyping: Option<usize>,
+    /// The picked label's frame is being dragged wider or narrower.
+    resizing: bool,
     /// Element under the «Выбор» tool.
     picked: Option<usize>,
     /// Picked element is being dragged, image position of the last step.
@@ -146,15 +163,17 @@ struct Editor {
 }
 
 impl Editor {
-    fn new(base: Pixmap, app: String, hooks: Hooks, ctx: egui::Context) -> Self {
+    fn new(opened: project::Project, hooks: Hooks, ctx: egui::Context) -> Self {
         let cfg = Config::load_or_create(&ui::config_path()).unwrap_or_default();
         // The font list is slow to build the first time: not on the frame that opens the panel.
         std::thread::spawn(snapling_core::fonts::families);
         Self {
-            base,
-            app,
+            base: opened.base,
+            app: opened.app,
+            image: opened.image,
+            save_cfg: cfg.save.clone(),
             hooks,
-            history: History::default(),
+            history: History::new(opened.doc),
             tex: None,
             dirty: true,
             tool: Tool::Arrow,
@@ -168,6 +187,8 @@ impl Editor {
             draw_cfg: cfg.draw,
             drag: None,
             typing: None,
+            retyping: None,
+            resizing: false,
             picked: None,
             moving: None,
             zoom: None,
@@ -187,15 +208,51 @@ impl Editor {
     }
 
     fn commit_text(&mut self) {
-        if let Some((at, text)) = self.typing.take() {
-            let el = self.el(Kind::Text(at, text.trim_end().to_string(), self.style.font));
-            self.history.push(el);
+        if let Some((at, text, frame)) = self.typing.take() {
+            let font = self.style.font;
+            let text = text.trim_end().to_string();
+            let el = self.el(Kind::Text(at, text, font, frame.map(|f| (f.x, f.y))));
+            match self.retyping.take() {
+                // Its removal is the undo step: one undo brings back the old text.
+                Some(i) if !el_empty(&el) => {
+                    let els = &mut self.history.doc.elements;
+                    els.insert(i.min(els.len()), el);
+                }
+                Some(_) => {}
+                None => self.history.push(el),
+            }
             self.dirty = true;
         }
     }
 
+    /// Takes the label at `i` back into the text box; false if it is not text.
+    fn retype(&mut self, i: usize) -> bool {
+        self.commit_text();
+        let Some(el) = self.history.doc.elements.get(i).cloned() else {
+            return false;
+        };
+        let Element {
+            kind: Kind::Text(at, text, font, frame),
+            color,
+            size,
+        } = el
+        else {
+            return false;
+        };
+        self.history.change(|d| {
+            d.elements.remove(i);
+        });
+        (self.color, self.size, self.style.font) = (color, size, font);
+        self.typing = Some((at, text, frame.map(|(w, h)| vec2(w, h))));
+        self.retyping = Some(i);
+        self.picked = None;
+        self.dirty = true;
+        true
+    }
+
     fn undo(&mut self) {
         self.typing = None;
+        self.retyping = None;
         self.picked = None;
         self.dirty |= self.history.undo();
     }
@@ -231,10 +288,17 @@ impl Editor {
         }
         let (bgra, w, h) = self.export();
         let (save, app, ctx) = (self.hooks.save, self.app.clone(), self.ctx.clone());
+        let (image, quality) = (self.image.clone(), self.save_cfg.jpeg_quality);
+        let keep = self.keep_project();
         self.saving = Some(std::thread::spawn(move || {
-            let done = save(&bgra, w, h, &app);
+            let done = if image.as_os_str().is_empty() {
+                save(&bgra, w, h, &app)
+            } else {
+                let format = project::format_of(&image);
+                storage::write_bgra(&bgra, w, h, &image, format, quality).map(|()| image)
+            };
             ctx.request_repaint();
-            done
+            done.inspect(|p| keep(p))
         }));
         self.status = t("Сохраняю…").into();
     }
@@ -258,10 +322,28 @@ impl Editor {
     fn save_as(&mut self) {
         let (bgra, w, h) = self.export();
         self.status = match (self.hooks.save_as)(&bgra, w, h, &self.app) {
-            Ok(Some(p)) => tf("Сохранено: {0}", &[("0", &p.display())]),
+            Ok(Some(p)) => {
+                self.keep_project()(&p);
+                tf("Сохранено: {0}", &[("0", &p.display())])
+            }
             Ok(None) => String::new(),
             Err(e) => tf("Не удалось сохранить: {e}", &[("e", &e)]),
         };
+    }
+
+    /// Writes the project next to a saved image, when enabled; a failure only goes to the log.
+    fn keep_project(&self) -> impl Fn(&Path) + Send + 'static {
+        let on = self.save_cfg.project;
+        let (base, app, doc) = (
+            self.base.clone(),
+            self.app.clone(),
+            self.history.doc.clone(),
+        );
+        move |image: &Path| {
+            if on && let Err(e) = project::save(image, &base, &app, &doc) {
+                tracing::warn!("project: {e}");
+            }
+        }
     }
 
     fn delete_picked(&mut self) {
@@ -341,7 +423,7 @@ impl Editor {
     fn top_bar(&mut self, ctx: &egui::Context) {
         let p = ui::pal(ctx);
         let width = ctx.content_rect().width() - 32.0;
-        let (mut copy, mut save_as, mut text) = (false, false, false);
+        let (mut copy, mut save_as, mut text, mut original) = (false, false, false, false);
         let (w, h) = (self.base.width(), self.base.height());
         egui::Area::new(egui::Id::new("top"))
             .anchor(Align2::LEFT_TOP, vec2(16.0, 16.0))
@@ -366,6 +448,9 @@ impl Editor {
                             copy = ui::primary(ui, t("Копировать и закрыть"), None, 38.0).clicked();
                             save_as = ui::tone(ui, t("Сохранить как…"), None, 38.0).clicked();
                             text = ui::ghost_text(ui, t("Текст и перевод"), 38.0).clicked();
+                            original = ui::ghost_text(ui, t("Оригинал"), 38.0)
+                                .on_hover_text(t("Сохранить снимок без пометок и обрезки"))
+                                .clicked();
                             let left = egui::Layout::left_to_right(egui::Align::Center);
                             ui.with_layout(left, |ui| {
                                 ui.vertical(|ui| {
@@ -390,6 +475,14 @@ impl Editor {
         }
         if save_as {
             self.save_as();
+        }
+        if original {
+            let (bgra, w, h) = annotate::export(&self.base, &annotate::Doc::default());
+            self.status = match (self.hooks.save_as)(&bgra, w, h, &self.app) {
+                Ok(Some(p)) => tf("Сохранено: {0}", &[("0", &p.display())]),
+                Ok(None) => String::new(),
+                Err(e) => tf("Не удалось сохранить: {e}", &[("e", &e)]),
+            };
         }
         if text {
             let (bgra, w, h) = self.export();
@@ -497,7 +590,7 @@ impl Editor {
             _ => self.style.step,
         };
         let font_now = match picked.map(|e| &e.kind) {
-            Some(Kind::Text(_, _, f)) => *f,
+            Some(Kind::Text(_, _, f, _)) => *f,
             _ => self.style.font,
         };
         let drawing_new = picked.is_none();
@@ -694,7 +787,7 @@ impl Editor {
             self.style.font = f;
             if let Some(i) = self.picked {
                 self.history.change(|d| {
-                    if let Kind::Text(_, _, old) = &mut d.elements[i].kind {
+                    if let Kind::Text(_, _, old, _) = &mut d.elements[i].kind {
                         *old = f;
                     }
                 });
@@ -817,7 +910,16 @@ impl Editor {
                 i.key_down(Key::Space),
             )
         });
-        if let Some(at) = hover.filter(|h| all.contains(*h)) {
+        // Over text (typing, the tool, a picked label) the wheel sizes the text; Ctrl+wheel zooms.
+        let text_size = pinch == 1.0 && scroll != 0.0 && self.texty();
+        if text_size && hover.is_some_and(|h| all.contains(h)) {
+            self.size = (self.size + scroll.signum() * 0.5).clamp(1.0, 16.0);
+            let size = self.size;
+            if let Some(i) = self.picked {
+                self.history.change(|d| d.elements[i].size = size);
+                self.dirty = true;
+            }
+        } else if let Some(at) = hover.filter(|h| all.contains(*h)) {
             let factor = pinch * (scroll * 0.002).exp();
             if factor != 1.0 {
                 let next = (k * factor).clamp(ZOOM_RANGE.0, ZOOM_RANGE.1);
@@ -853,7 +955,18 @@ impl Editor {
                 .corner_radius(10)
                 .paint_at(ui, rect);
         }
-        if resp.hovered() && !panning {
+        let handle = self.text_handle();
+        let near_handle = |p: Pt| {
+            handle.is_some_and(|h| (h.x - p.x).abs() < 10.0 / k && (h.y - p.y).abs() < 10.0 / k)
+        };
+        let hover_img = resp.hover_pos().map(to_img);
+        if resp.hovered()
+            && !panning
+            && self.tool == Tool::Select
+            && hover_img.is_some_and(near_handle)
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+        } else if resp.hovered() && !panning {
             ui.ctx().set_cursor_icon(match self.tool {
                 Tool::Text => egui::CursorIcon::Text,
                 Tool::Select => egui::CursorIcon::Default,
@@ -864,7 +977,10 @@ impl Editor {
         if resp.drag_started() && !panning {
             self.commit_text();
             if let Some(start) = ui.input(|i| i.pointer.press_origin()).map(to_img) {
-                if self.tool == Tool::Select {
+                if self.tool == Tool::Select && near_handle(start) {
+                    self.history.snapshot();
+                    self.resizing = true;
+                } else if self.tool == Tool::Select {
                     self.picked = annotate::pick(&self.history.doc, start);
                     if self.picked.is_some() {
                         self.history.snapshot();
@@ -880,10 +996,22 @@ impl Editor {
                     Tool::Marker => Some(Kind::Marker(vec![start])),
                     Tool::Pixelate => Some(Kind::Blur(vec![start], self.blur)),
                     Tool::Crop => Some(Kind::Pixelate(start, start)),
-                    Tool::Text | Tool::Step | Tool::Select => None,
+                    // A frame for text: its width wraps the lines.
+                    Tool::Text => Some(Kind::Rect(start, start)),
+                    Tool::Step | Tool::Select => None,
                 };
                 self.drag = kind.map(|k| self.el(k));
             }
+        }
+        if self.resizing
+            && let Some(p) = resp.interact_pointer_pos().map(to_img)
+            && let Some(Element {
+                kind: Kind::Text(at, _, _, frame),
+                ..
+            }) = self.picked_mut()
+        {
+            *frame = Some(((p.x - at.x).max(8.0), (p.y - at.y).max(0.0)));
+            self.dirty = true;
         }
         if let (Some(last), Some(at)) = (self.moving, resp.interact_pointer_pos().map(to_img)) {
             if let Some(e) = self.picked_mut() {
@@ -898,12 +1026,23 @@ impl Editor {
         }
         if resp.drag_stopped() {
             self.moving = None;
+            self.resizing = false;
             if let Some(el) = self.drag.take() {
                 match (self.tool, el.kind) {
                     (Tool::Crop, Kind::Pixelate(a, b)) => {
                         if (a.x - b.x).abs() >= 3.0 && (a.y - b.y).abs() >= 3.0 {
                             self.history.change(|d| d.crop = Some((a, b)));
                         }
+                    }
+                    (Tool::Text, Kind::Rect(a, b)) => {
+                        self.commit_text();
+                        let at = Pt {
+                            x: a.x.min(b.x),
+                            y: a.y.min(b.y),
+                        };
+                        let (w, h) = ((a.x - b.x).abs(), (a.y - b.y).abs());
+                        let size = vec2(w, h);
+                        self.typing = Some((at, String::new(), (w >= 8.0).then_some(size)));
                     }
                     (_, kind) => self.history.push(Element { kind, ..el }),
                 }
@@ -914,6 +1053,11 @@ impl Editor {
             && let Some(p) = resp.interact_pointer_pos().map(to_img)
         {
             match self.tool {
+                Tool::Select if resp.double_clicked() => {
+                    if let Some(i) = annotate::pick(&self.history.doc, p) {
+                        self.retype(i);
+                    }
+                }
                 Tool::Select => {
                     self.picked = annotate::pick(&self.history.doc, p);
                     if let Some(e) = self.picked_mut() {
@@ -929,8 +1073,11 @@ impl Editor {
                     self.dirty = true;
                 }
                 Tool::Text => {
-                    self.commit_text();
-                    self.typing = Some((p, String::new()));
+                    let hit = annotate::pick(&self.history.doc, p);
+                    if !hit.is_some_and(|i| self.retype(i)) {
+                        self.commit_text();
+                        self.typing = Some((p, String::new(), None));
+                    }
                 }
                 Tool::Crop => self.history.change(|d| d.crop = None),
                 _ => {}
@@ -952,13 +1099,34 @@ impl Editor {
             let r = Rect::from_two_pos(to_scr(a), to_scr(b)).expand(3.0);
             let s = Stroke::new(1.5, ACCENT);
             painter.rect_stroke(r, 4.0, s, StrokeKind::Outside);
+            if let Some(h) = self.text_handle() {
+                let h = Rect::from_center_size(to_scr(h), vec2(9.0, 9.0));
+                painter.rect(h, 3.0, Color32::WHITE, s, StrokeKind::Outside);
+            }
         }
         self.text_box(ui, k, to_scr);
         k
     }
 
+    /// Lower right corner of the picked label: dragging it sizes the frame.
+    fn text_handle(&self) -> Option<Pt> {
+        let e = self.history.doc.elements.get(self.picked?)?;
+        if !matches!(e.kind, Kind::Text(..)) {
+            return None;
+        }
+        Some(annotate::bounds(e).1)
+    }
+
+    /// Text is being typed, the tool is «Текст», or «Выбор» holds a label.
+    fn texty(&self) -> bool {
+        let picked = self.picked.and_then(|i| self.history.doc.elements.get(i));
+        self.typing.is_some()
+            || self.tool == Tool::Text
+            || picked.is_some_and(|e| matches!(e.kind, Kind::Text(..)))
+    }
+
     fn text_box(&mut self, ui: &mut egui::Ui, k: f32, to_scr: impl Fn(Pt) -> Pos2) {
-        let Some((at, text)) = &mut self.typing else {
+        let Some((at, text, frame)) = &mut self.typing else {
             return;
         };
         let px = annotate::text_px(self.size) * k;
@@ -971,26 +1139,44 @@ impl Editor {
             .fixed_pos(to_scr(*at))
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
-                let width = annotate::text_size_family(family, text, px).0 + px;
+                // Lines break only at Enter: the box grows with the text instead of wrapping.
+                let font = egui::FontId::new(px, face);
+                let wrap = frame.map_or(f32::INFINITY, |f| f.x * k);
+                let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _: f32| {
+                    let job = egui::text::LayoutJob::simple(
+                        buf.as_str().to_owned(),
+                        font.clone(),
+                        color,
+                        wrap,
+                    );
+                    ui.fonts_mut(|f| f.layout_job(job))
+                };
                 let edit = egui::TextEdit::multiline(text)
-                    .font(egui::FontId::new(px, face))
+                    .font(font.clone())
                     .text_color(color)
                     .frame(egui::Frame::NONE)
+                    .margin(Margin::ZERO)
                     .desired_rows(1)
-                    .desired_width(width)
+                    .desired_width(frame.map_or(px, |f| f.x * k))
+                    .min_size(frame.map_or(Vec2::ZERO, |f| f * k))
+                    .layouter(&mut layouter)
                     .hint_text(t("Текст"));
-                let r = egui::Frame::new()
-                    .stroke(Stroke::new(1.0, ACCENT))
-                    .corner_radius(4)
-                    .show(ui, |ui| ui.add(edit))
-                    .inner;
+                // Enter finishes, Shift+Enter breaks the line: taken before the box sees it.
+                done = ui.input_mut(|i| {
+                    !i.modifiers.shift && i.consume_key(Modifiers::NONE, Key::Enter)
+                });
+                // Text sits where it will be drawn; the thin outline is the frame as dragged.
+                let r = ui.add(edit);
+                ui.painter().rect_stroke(
+                    r.rect,
+                    0.0,
+                    Stroke::new(1.0, ACCENT),
+                    StrokeKind::Outside,
+                );
                 if !r.has_focus() && !r.lost_focus() {
                     r.request_focus();
                 }
                 ui.input_mut(|i| {
-                    if i.consume_key(Modifiers::NONE, Key::Enter) {
-                        done = true;
-                    }
                     if i.consume_key(Modifiers::NONE, Key::Escape) {
                         cancel = true;
                     }
@@ -1001,6 +1187,9 @@ impl Editor {
             });
         if cancel {
             self.typing = None;
+            if self.retyping.take().is_some() {
+                self.dirty |= self.history.undo();
+            }
         } else if done {
             self.commit_text();
         }
@@ -1127,12 +1316,12 @@ fn preview(
         Kind::Arrow(a, b, style) => arrow_preview(painter, &[*a, *b], el, *style, &to_scr, stroke),
         Kind::Curve(pts, style) => arrow_preview(painter, pts, el, *style, &to_scr, stroke),
         Kind::Rect(a, b) => {
-            painter.rect_stroke(
-                Rect::from_two_pos(to_scr(*a), to_scr(*b)),
-                0.0,
-                stroke,
-                StrokeKind::Middle,
-            );
+            let r = Rect::from_two_pos(to_scr(*a), to_scr(*b));
+            if tool == Tool::Text {
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, ACCENT), StrokeKind::Outside);
+            } else {
+                painter.rect_stroke(r, 0.0, stroke, StrokeKind::Middle);
+            }
         }
         Kind::Ellipse(a, b) => {
             let r = Rect::from_two_pos(to_scr(*a), to_scr(*b));
@@ -1180,4 +1369,8 @@ fn preview(
         }
         Kind::Text(..) | Kind::Step(..) => {}
     }
+}
+
+fn el_empty(e: &Element) -> bool {
+    matches!(&e.kind, Kind::Text(_, t, ..) if t.trim().is_empty())
 }

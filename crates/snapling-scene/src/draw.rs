@@ -11,7 +11,7 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
         }
         if let Some((at, typed)) = t.caret {
             let el = annotate::Element {
-                kind: annotate::Kind::Text(at, format!("{typed}|"), t.style.font),
+                kind: annotate::Kind::Text(at, format!("{typed}|"), t.style.font, None),
                 color: t.color,
                 size: t.size,
             };

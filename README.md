@@ -30,11 +30,11 @@
 - **Color picker:** click to copy a color as HEX, RGB, HSL, HSV or CMYK.
 - **Text:** recognition without internet, with small text enlarged first. Windows OCR or PaddleOCR.
 - **Translation:** 14 languages. Offline with OPUS-MT, or through DeepL, Yandex and Google with your own key, sent only when you press the button.
-- **Screen recording:** GIF or MP4, no sound, a countdown and cancel. The frame and timer never get into the file.
+- **Screen recording:** GIF or MP4 with system sound and microphone, pause, quality up to 60 fps, a countdown and cancel. The frame and timer never get into the file; an MP4 stays playable after a crash.
 - **Long screenshots:** scrolls the page by itself and stitches it, sticky headers stay single.
 - **Pin:** keep a shot on top of all windows, zoom it with the wheel.
 - **Gallery:** every shot in one window, search by the text on them, a large view, and recognition of old shots.
-- **Editor:** the same tools with undo, zoom, moving shapes and saving as PNG, WebP or JPEG.
+- **Editor:** the same tools with undo, zoom, moving shapes, text frames and saving as PNG, WebP or JPEG. A `.snapling.json` project next to the image lets you reopen it and fix arrows and text later.
 - **Settings:** hotkeys pressed right on the keyboard with conflict search, four themes including pure black, three sound sets or your own sounds, a proxy, settings import and export.
 - **Languages:** English and Russian. A new language is one TOML file.
 

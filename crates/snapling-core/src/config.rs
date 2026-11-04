@@ -47,6 +47,8 @@ jpeg_quality = 90
 name = "{yyyy}-{MM}/Snapling_{yyyy}-{MM}-{dd}_{HH}-{mm}-{ss}_{app}"
 # Сохранять каждый скопированный снимок в папку автоматически.
 auto_save = true
+# Рядом со снимком из редактора — проект .snapling.json: стрелки и текст можно поправить позже.
+project = true
 
 [capture]
 # Копировать снимок в буфер после Shift/Alt/Ctrl+PrtScn. Enter в выделении копирует всегда.
@@ -86,7 +88,7 @@ font = ''
 [record]
 # Формат записи: "gif" или "mp4".
 format = "gif"
-# Кадров в секунду: 10, 15 или 30.
+# Кадров в секунду: 10, 15, 30 или 60.
 fps = 15
 # Запись останавливается сама через столько секунд. 0 — только вручную.
 max_seconds = 0
@@ -94,6 +96,11 @@ max_seconds = 0
 cursor = true
 # Секунды отсчёта перед началом записи, 0 — сразу.
 countdown = 0
+# Качество MP4: 0 — низкое, 1 — среднее, 2 — высокое.
+quality = 1
+# Звук в MP4: то, что играет в колонках, и микрофон. В GIF звука нет.
+system_audio = true
+mic = false
 
 [history]
 # Сколько дней хранить записи галереи, 0 — всегда.
@@ -195,6 +202,12 @@ pub struct Record {
     pub max_seconds: u32,
     pub cursor: bool,
     pub countdown: u32,
+    /// MP4 bitrate step: 0 low, 1 medium, 2 high.
+    pub quality: u8,
+    /// MP4 only: what the speakers play.
+    pub system_audio: bool,
+    /// MP4 only: the default microphone.
+    pub mic: bool,
 }
 
 impl Default for Record {
@@ -205,6 +218,9 @@ impl Default for Record {
             max_seconds: 0,
             cursor: true,
             countdown: 0,
+            quality: 1,
+            system_audio: true,
+            mic: false,
         }
     }
 }
@@ -542,6 +558,8 @@ pub struct Save {
     pub jpeg_quality: u8,
     pub name: String,
     pub auto_save: bool,
+    /// The editor writes `*.snapling.json` next to what it saves.
+    pub project: bool,
 }
 
 impl Default for Save {
@@ -552,6 +570,7 @@ impl Default for Save {
             jpeg_quality: 90,
             name: "{yyyy}-{MM}/Snapling_{yyyy}-{MM}-{dd}_{HH}-{mm}-{ss}_{app}".into(),
             auto_save: true,
+            project: true,
         }
     }
 }

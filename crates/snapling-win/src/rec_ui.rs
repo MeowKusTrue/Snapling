@@ -5,7 +5,7 @@ use crate::lparam_point;
 use crate::toast::{blit, helper_window, under_cursor};
 use snapling_core::i18n::{t, tf};
 use snapling_core::selection::Rect;
-use snapling_scene::{PILL_SIZE, PILL_STOP, draw_pill, draw_rec_frame};
+use snapling_scene::{PILL_SIZE, draw_pill, draw_rec_frame, pill_button};
 use std::cell::Cell;
 use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -20,6 +20,7 @@ use windows::core::{PCWSTR, w};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {
     Stop,
+    Pause,
     Cancel,
 }
 
@@ -33,6 +34,8 @@ thread_local! {
     static SCROLLING: Cell<bool> = const { Cell::new(false) };
     static SCALE: Cell<f32> = const { Cell::new(1.0) };
     static BEGIN: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// Since when the recording is paused.
+    static PAUSED: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 fn window(class: PCWSTR, extra: WINDOW_EX_STYLE) -> Result<HWND, String> {
@@ -52,7 +55,10 @@ fn label() -> String {
     if SCROLLING.get() {
         return t("Прокрутка · Esc — стоп").to_string();
     }
-    let secs = BEGIN.get().map_or(0, |b| b.elapsed().as_secs());
+    let secs = BEGIN.get().map_or(0, |b| match PAUSED.get() {
+        Some(p) => p.duration_since(b).as_secs(),
+        None => b.elapsed().as_secs(),
+    });
     tf(
         "Стоп · {0}:{1}",
         &[("0", &(secs / 60)), ("1", &format!("{:02}", secs % 60))],
@@ -63,8 +69,31 @@ fn render_pill() {
     let hwnd = PILL.get();
     let s = SCALE.get();
     let (w, h) = ((PILL_SIZE.0 * s) as u32, (PILL_SIZE.1 * s) as u32);
-    let cancel = (!SCROLLING.get()).then(|| t("Отменить"));
-    blit(hwnd, w, h, |pm| draw_pill(pm, &label(), cancel, s));
+    let pause = if PAUSED.get().is_some() {
+        t("Дальше")
+    } else {
+        t("Пауза")
+    };
+    let buttons: &[&str] = if SCROLLING.get() {
+        &[]
+    } else {
+        &[pause, t("Отменить")]
+    };
+    blit(hwnd, w, h, |pm| draw_pill(pm, &label(), buttons, s));
+}
+
+/// Paused or going on again: the time stops and the button reads «Дальше».
+pub fn set_paused(on: bool) {
+    match (on, PAUSED.get(), BEGIN.get()) {
+        (true, None, _) => PAUSED.set(Some(Instant::now())),
+        // The pause is left out of the time by starting it that much later.
+        (false, Some(p), Some(b)) => {
+            BEGIN.set(Some(b + p.elapsed()));
+            PAUSED.set(None);
+        }
+        _ => {}
+    }
+    render_pill();
 }
 
 /// Marks `area` (desktop pixels). `scrolling`: a long shot, nothing to click.
@@ -78,6 +107,7 @@ pub fn show(area: Rect, scrolling: bool) {
     SCROLLING.set(scrolling);
     SCALE.set(s);
     BEGIN.set(Some(Instant::now()));
+    PAUSED.set(None);
     let (fw, fh) = (area.width + EDGE * 2, area.height + EDGE * 2);
     let (pw, ph) = ((PILL_SIZE.0 * s) as i32, (PILL_SIZE.1 * s) as i32);
     let px = (area.left + (area.width - pw) / 2).max(work.left);
@@ -124,8 +154,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         WM_TIMER => render_pill(),
         WM_LBUTTONUP => {
             let width = PILL_SIZE.0 * SCALE.get();
-            let stop = (lparam_point(lp).x as f32) < width * PILL_STOP;
-            ASKED.set(Some(if stop { Ask::Stop } else { Ask::Cancel }));
+            let ask = match pill_button(lparam_point(lp).x as f32, width, 2) {
+                None => Ask::Stop,
+                Some(0) => Ask::Pause,
+                Some(_) => Ask::Cancel,
+            };
+            ASKED.set(Some(ask));
         }
         _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }

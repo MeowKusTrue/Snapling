@@ -5,17 +5,18 @@
 use crate::i18n::tf;
 pub use ab_glyph::FontRef;
 use ab_glyph::{Font, OutlineCurve, ScaleFont};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Rect, Stroke, Transform};
 pub use tiny_skia::{Pixmap, PixmapMut};
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Pt {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     Arrow(Pt, Pt, ArrowStyle),
     /// Arrow along a hand-drawn stroke.
@@ -26,8 +27,14 @@ pub enum Kind {
     Pen(Vec<Pt>),
     /// Translucent wide stroke.
     Marker(Vec<Pt>),
-    /// Position, content, font family (`""`: bundled).
-    Text(Pt, String, &'static str),
+    /// Position, content, font family (`""`: bundled), frame (width, height): the width
+    /// wraps the lines, the height is the least the box takes.
+    Text(
+        Pt,
+        String,
+        #[serde(deserialize_with = "font_name")] FontName,
+        #[serde(default)] Option<(f32, f32)>,
+    ),
     /// Numbered badge centered at the point.
     Step(Pt, u32, StepStyle),
     /// Pixelated region: unlike blur it cannot be reversed.
@@ -37,7 +44,7 @@ pub enum Kind {
 }
 
 /// Arrow end, «Наконечник» in the editor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Head {
     #[default]
@@ -60,7 +67,7 @@ impl Head {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ArrowStyle {
     pub head: Head,
     /// The head is where the drag began, not where it ended.
@@ -68,7 +75,7 @@ pub struct ArrowStyle {
 }
 
 /// Look of a numbered badge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StepStyle {
     /// Filled circle with a contrasting ring.
@@ -127,7 +134,7 @@ impl DrawStyle {
 }
 
 /// Brush blur: «cubes» (pixelate, irreversible) or Gaussian; strength 0..=2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BlurStyle {
     pub gauss: bool,
     pub strength: u8,
@@ -145,18 +152,25 @@ impl BlurStyle {
     }
 }
 
+/// Font family as styles keep it; an alias so serde does not take it as borrowed.
+type FontName = &'static str;
+
+fn font_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<&'static str, D::Error> {
+    String::deserialize(d).map(|s| crate::fonts::intern(&s))
+}
+
 pub fn blur_width(size: f32) -> f32 {
     size * 8.0
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Element {
     pub kind: Kind,
     pub color: [u8; 3],
     pub size: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Doc {
     pub elements: Vec<Element>,
     /// Applied on export; elements outside are cut.
@@ -172,6 +186,13 @@ pub struct History {
 }
 
 impl History {
+    pub fn new(doc: Doc) -> Self {
+        Self {
+            doc,
+            ..Self::default()
+        }
+    }
+
     pub fn change(&mut self, f: impl FnOnce(&mut Doc)) {
         let before = self.doc.clone();
         f(&mut self.doc);
@@ -241,7 +262,7 @@ fn tiny(e: &Element) -> bool {
         }
         Kind::Pen(p) | Kind::Marker(p) | Kind::Blur(p, _) => p.is_empty(),
         Kind::Curve(p, _) => p.iter().all(|q| short(p[0], *q)),
-        Kind::Text(_, t, _) => t.trim().is_empty(),
+        Kind::Text(_, t, ..) => t.trim().is_empty(),
         Kind::Step(..) => false,
     }
 }
@@ -295,8 +316,11 @@ pub fn bounds(e: &Element) -> (Pt, Pt) {
         Kind::Pen(p) => (p.clone(), e.size),
         Kind::Marker(p) => (p.clone(), marker_width(e.size) / 2.0),
         Kind::Blur(p, _) => (p.clone(), blur_width(e.size) / 2.0),
-        Kind::Text(at, s, family) => {
-            let (w, h) = text_size_family(family, s, text_px(e.size));
+        Kind::Text(at, s, family, frame) => {
+            let px = text_px(e.size);
+            let lines = laid_out(family, s, px, frame.map(|f| f.0));
+            let (w, h) = text_size_family(family, &lines, px);
+            let (w, h) = frame.map_or((w, h), |f| (f.0, h.max(f.1)));
             let end = Pt {
                 x: at.x + w,
                 y: at.y + h,
@@ -608,6 +632,69 @@ pub fn text_size_in(font: &FontRef<'_>, text: &str, px: f32) -> (f32, f32) {
 /// Same in a font family, `""` being the bundled font.
 pub fn text_size_family(family: &str, text: &str, px: f32) -> (f32, f32) {
     with_family(family, |fonts| text_size_fonts(fonts, text, px))
+}
+
+/// The lines as drawn: wrapped to the frame, if the label has one.
+pub fn laid_out<'a>(
+    family: &str,
+    text: &'a str,
+    px: f32,
+    frame: Option<f32>,
+) -> std::borrow::Cow<'a, str> {
+    match frame {
+        Some(w) => wrap_text(family, text, px, w).into(),
+        None => text.into(),
+    }
+}
+
+/// Breaks lines to fit `width` at `px`: at spaces, inside a word only when it alone is too
+/// wide. Breaks already in the text stay.
+pub fn wrap_text(family: &str, text: &str, px: f32, width: f32) -> String {
+    let fits = |s: &str| text_size_family(family, s, px).0 <= width;
+    let mut out = Vec::new();
+    for para in text.split('\n') {
+        let mut line = String::new();
+        for word in para.split(' ') {
+            let joined = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if fits(&joined) {
+                line = joined;
+                continue;
+            }
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            for ch in word.chars() {
+                line.push(ch);
+                if line.chars().count() > 1 && !fits(&line) {
+                    line.pop();
+                    out.push(std::mem::replace(&mut line, ch.to_string()));
+                }
+            }
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    #[test]
+    fn wraps_at_spaces_then_inside_long_words() {
+        let px = 20.0;
+        let w = super::text_size_family("", "aaa bbb", px).0 + 1.0;
+        assert_eq!(super::wrap_text("", "aaa bbb ccc", px, w), "aaa bbb\nccc");
+        assert_eq!(super::wrap_text("", "x\ny", px, w), "x\ny");
+        let long = super::wrap_text("", &"m".repeat(40), px, w);
+        assert!(long.lines().count() > 1);
+        assert!(
+            long.lines()
+                .all(|l| super::text_size_family("", l, px).0 <= w)
+        );
+    }
 }
 
 fn text_size_fonts(fonts: &[&FontRef<'_>], text: &str, px: f32) -> (f32, f32) {
@@ -944,7 +1031,17 @@ pub fn draw(pm: &mut PixmapMut<'_>, e: &Element) {
                 );
             }
         }
-        Kind::Text(at, s, family) => draw_text(pm, family, s, *at, text_px(e.size), e.color),
+        Kind::Text(at, s, family, frame) => {
+            let px = text_px(e.size);
+            draw_text(
+                pm,
+                family,
+                &laid_out(family, s, px, frame.map(|f| f.0)),
+                *at,
+                px,
+                e.color,
+            );
+        }
         Kind::Step(c, n, style) => draw_step(pm, *c, *n, *style, e),
         Kind::Pixelate(a, b) => pixelate(pm, *a, *b, pixel_block(e.size)),
         Kind::Blur(pts, style) => blur_brush(pm, pts, blur_width(e.size), *style),
@@ -1246,7 +1343,7 @@ mod tests {
     fn text_and_steps_render_glyphs() {
         let b = base();
         for kind in [
-            Kind::Text(p(5.0, 5.0), "Привет\nmir".into(), ""),
+            Kind::Text(p(5.0, 5.0), "Привет\nmir".into(), "", None),
             Kind::Step(p(60.0, 40.0), 12, StepStyle::Solid),
         ] {
             let mut doc = Doc::default();

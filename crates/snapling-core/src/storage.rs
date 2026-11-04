@@ -311,6 +311,20 @@ pub fn save_bgra(
     format: crate::config::Format,
     jpeg_quality: u8,
 ) -> Result<PathBuf, String> {
+    let path = unique(dir.join(name).with_extension(format.ext()));
+    write_bgra(bgra, width, height, &path, format, jpeg_quality)?;
+    Ok(path)
+}
+
+/// Encodes top-down BGRA into exactly `path`, replacing it; `*.part` first, then renamed.
+pub fn write_bgra(
+    bgra: &[u8],
+    width: u32,
+    height: u32,
+    path: &Path,
+    format: crate::config::Format,
+    jpeg_quality: u8,
+) -> Result<(), String> {
     use crate::config::Format;
     use image::ImageEncoder;
 
@@ -330,7 +344,6 @@ pub fn save_bgra(
             })
             .collect()
     };
-    let path = unique(dir.join(name).with_extension(format.ext()));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -357,8 +370,7 @@ pub fn save_bgra(
         let _ = std::fs::remove_file(&part);
         return Err(format!("{}: {e}", path.display()));
     }
-    std::fs::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(path)
+    std::fs::rename(&part, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]

@@ -1,12 +1,21 @@
 use super::*;
 
 /// Size of the recording pill at scale 1.
-pub const PILL_SIZE: (f32, f32) = (300.0, 40.0);
-/// Share of the pill that stops the recording; the rest cancels it.
-pub const PILL_STOP: f32 = 0.62;
+pub const PILL_SIZE: (f32, f32) = (380.0, 40.0);
+/// Share of the pill that stops the recording; the side buttons split the rest.
+pub const PILL_STOP: f32 = 0.5;
 
-/// Status pill of a recording or a long shot. `cancel`: a second half that drops the recording.
-pub fn draw_pill(pm: &mut PixmapMut<'_>, label: &str, cancel: Option<&str>, s: f32) {
+/// Side button of the pill under `x` (0..width), `None`: the stop part.
+pub fn pill_button(x: f32, width: f32, buttons: usize) -> Option<usize> {
+    let main = width * PILL_STOP;
+    (buttons > 0 && x >= main)
+        .then(|| (((x - main) / (width - main) * buttons as f32) as usize).min(buttons - 1))
+}
+
+/// Status pill of a recording or a long shot. `buttons`: side parts after the stop part
+/// (pause, cancel); none for a long shot.
+pub fn draw_pill(pm: &mut PixmapMut<'_>, label: &str, buttons: &[&str], s: f32) {
+    let cancel = (!buttons.is_empty()).then_some(());
     let (w, h) = (pm.width() as f32, pm.height() as f32);
     let id = Transform::identity();
     if let Some(p) = rrect(0.5, 0.5, w - 1.0, h - 1.0, h / 2.0) {
@@ -39,14 +48,18 @@ pub fn draw_pill(pm: &mut PixmapMut<'_>, label: &str, cancel: Option<&str>, s: f
         13.5 * s,
         TEXT,
     );
-    if let Some(cancel) = cancel {
-        let line = tiny_skia::Rect::from_xywh(main, h * 0.25, s.max(1.0), h * 0.5);
-        if let Some(line) = line {
-            pm.fill_rect(line, &paint([255, 255, 255, 40]), id, None);
+    let seg = (w - main) / buttons.len().max(1) as f32;
+    for (i, b) in buttons.iter().enumerate() {
+        let left = main + seg * i as f32;
+        if i > 0 {
+            let line = tiny_skia::Rect::from_xywh(left, h * 0.25, s.max(1.0), h * 0.5);
+            if let Some(line) = line {
+                pm.fill_rect(line, &paint([255, 255, 255, 40]), id, None);
+            }
         }
-        let width = text_w(font, cancel, 13.5 * s);
-        let x = main + (w - main - width) / 2.0;
-        text(pm, font, cancel, x, h / 2.0, 13.5 * s, ICON_MUTED);
+        let width = text_w(font, b, 13.5 * s);
+        let x = left + (seg - width) / 2.0;
+        text(pm, font, b, x, h / 2.0, 13.5 * s, ICON_MUTED);
     }
 }
 

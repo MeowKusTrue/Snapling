@@ -514,7 +514,7 @@ impl Session {
     fn commit_text(&mut self) {
         if let Some((at, text)) = self.pen.typing.take() {
             let el = Element {
-                kind: Kind::Text(at, text.trim_end().to_string(), self.pen.style.font),
+                kind: Kind::Text(at, text.trim_end().to_string(), self.pen.style.font, None),
                 color: self.pen.color,
                 size: self.pen.size,
             };

@@ -6,6 +6,7 @@ pub mod history;
 pub mod hotkey;
 pub mod i18n;
 pub mod ocr;
+pub mod project;
 pub mod record;
 pub mod selection;
 pub mod sound;

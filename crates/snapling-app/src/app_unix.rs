@@ -618,6 +618,10 @@ pub fn history_hooks() -> crate::history_ui::Hooks {
         copy_text: unix::copy_text,
         copy_file: unix::copy_file,
         edit: |path, _| {
+            let saved = snapling_core::project::path_for(path);
+            if saved.exists() {
+                return spawn_self("--edit", &saved);
+            }
             let (bgra, width, height) = storage::load_bgra(path)?;
             open_editor(&Shot {
                 x: 0,

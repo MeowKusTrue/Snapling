@@ -689,6 +689,15 @@ pub fn history_hooks() -> crate::history_ui::Hooks {
         copy_text: snapling_win::copy_text,
         copy_file: snapling_win::copy_file,
         edit: |path, app| {
+            let saved = snapling_core::project::path_for(path);
+            if saved.exists() {
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let started = std::process::Command::new(exe)
+                    .arg("--edit")
+                    .arg(saved)
+                    .spawn();
+                return started.map(|_| ()).map_err(|e| e.to_string());
+            }
             open_editor(load_image(path)?, app.to_string());
             Ok(())
         },
@@ -902,15 +911,7 @@ fn begin_recording(area: Rect, app: String) {
         path.display()
     );
     let thread = snapling_win::record::this_thread();
-    let run = Recording::start(
-        area,
-        rec.format,
-        rec.fps,
-        rec.max_seconds,
-        rec.cursor,
-        path,
-        thread,
-    );
+    let run = Recording::start(area, rec, path, thread);
     RECORDING.with(|r| *r.borrow_mut() = Some((run, app)));
 }
 
@@ -943,6 +944,9 @@ fn finish_jobs() {
             }
             Ok(done) => {
                 info!("recorded {} s: {}", done.seconds, done.path.display());
+                for e in &done.sound_errors {
+                    warn!("record sound: {e}");
+                }
                 let entry = history::Entry::new(
                     history::time_string(snapling_win::local_stamp()),
                     &done.path.to_string_lossy(),
@@ -1420,6 +1424,7 @@ pub fn run() {
                 if let Some((run, _)) = r.borrow().as_ref() {
                     match ask {
                         Ask::Stop => run.stop(),
+                        Ask::Pause => snapling_win::rec_ui::set_paused(run.toggle_pause()),
                         Ask::Cancel => run.cancel(),
                     }
                 }

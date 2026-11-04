@@ -858,6 +858,18 @@ impl Settings {
                 key,
             );
             divider(ui);
+            let hint = t(
+                "Рядом со снимком из редактора — файл .snapling.json, чтобы потом поправить стрелки и текст.",
+            );
+            Self::flag(
+                ui,
+                store,
+                t("Сохранять проект для правки"),
+                hint,
+                &mut save.project,
+                ("save", "project"),
+            );
+            divider(ui);
             let key = ("capture", "open_editor");
             Self::flag(
                 ui,
@@ -1080,9 +1092,9 @@ impl Settings {
                 t("Кадров в секунду"),
                 t("Больше — плавнее, но файл тяжелее."),
                 |ui| {
-                    let all = [10, 15, 30];
+                    let all = [10, 15, 30, 60];
                     let now = all.iter().position(|v| *v == rec.fps).unwrap_or(1);
-                    if let Some(i) = segmented(ui, &["10", "15", "30"], now, 30.0) {
+                    if let Some(i) = segmented(ui, &["10", "15", "30", "60"], now, 30.0) {
                         rec.fps = all[i];
                         store.set("record", "fps", i64::from(all[i]));
                     }
@@ -1127,11 +1139,45 @@ impl Settings {
                 &mut rec.cursor,
                 ("record", "cursor"),
             );
+            if rec.format == RecordFormat::Mp4 {
+                divider(ui);
+                row(
+                    ui,
+                    t("Качество"),
+                    t("Выше — чётче мелкий текст, но файл больше."),
+                    |ui| {
+                        let items = [t("Низкое"), t("Среднее"), t("Высокое")];
+                        let now = usize::from(rec.quality.min(2));
+                        if let Some(i) = segmented(ui, &items, now, 30.0) {
+                            rec.quality = i as u8;
+                            store.set("record", "quality", i as i64);
+                        }
+                    },
+                );
+                divider(ui);
+                Self::flag(
+                    ui,
+                    store,
+                    t("Системный звук"),
+                    t("То, что играет в колонках или наушниках."),
+                    &mut rec.system_audio,
+                    ("record", "system_audio"),
+                );
+                divider(ui);
+                Self::flag(
+                    ui,
+                    store,
+                    t("Микрофон"),
+                    t("Микрофон по умолчанию в Windows."),
+                    &mut rec.mic,
+                    ("record", "mic"),
+                );
+            }
         });
         ui.label(
             RichText::new(t(
-                "Звук не записывается. Рамка, время и окна Snapling в файл не попадают. Отменить \
-                 можно кнопкой рядом со временем: файл не сохранится.",
+                "Звук пишется только в MP4. Рамка, время и окна Snapling в файл не попадают. \
+                 Пауза и отмена — кнопки рядом со временем; при отмене файл не сохранится.",
             ))
             .size(13.0)
             .color(ui::pal(ui.ctx()).muted),

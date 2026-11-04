@@ -50,6 +50,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
+pub mod audio;
 pub mod countdown;
 pub mod dup;
 pub mod menu;

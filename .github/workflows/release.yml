@@ -2,15 +2,24 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and publish'
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
   windows:
     runs-on: windows-latest
-    env:
-      SNAPLING_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Record source revision
+        shell: bash
+        run: echo "SNAPLING_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - run: choco install innosetup --no-progress -y
       - run: python tools/package.py
       - uses: actions/upload-artifact@v4
@@ -22,11 +31,14 @@ jobs:
             target/dist/Snapling-portable.zip
           if-no-files-found: error
   linux:
-    runs-on: ubuntu-22.04
-    env:
-      SNAPLING_COMMIT: ${{ github.sha }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Record source revision
+        shell: bash
+        run: echo "SNAPLING_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libxkbcommon-dev libwayland-dev
       - run: cargo build --locked --release -p snapling-app
@@ -61,6 +73,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+      - run: gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}

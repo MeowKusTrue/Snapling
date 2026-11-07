@@ -307,6 +307,15 @@ pub struct Release {
     pub page: String,
     /// Address of the Windows installer and of its SHA-256 file.
     pub setup: Option<(String, String)>,
+    pub linux: Option<(String, String)>,
+}
+
+pub fn linux_asset_name() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some("snapling-linux-x86_64"),
+        "aarch64" => Some("snapling-linux-aarch64"),
+        _ => None,
+    }
 }
 
 fn parse_release(json: &serde_json::Value) -> Option<Release> {
@@ -322,13 +331,41 @@ fn parse_release(json: &serde_json::Value) -> Option<Release> {
         tag: json["tag_name"].as_str()?.to_string(),
         page: json["html_url"].as_str()?.to_string(),
         setup: asset(SETUP).zip(asset(&format!("{SETUP}.sha256"))),
+        linux: linux_asset_name()
+            .and_then(|name| asset(name).zip(asset(&format!("{name}.sha256")))),
     })
 }
 
 /// Latest published version, `None` when nothing is published.
 /// Sends nothing but the request itself; call only on the user's click.
 pub fn latest_release() -> Result<Option<Release>, String> {
-    let resp = agent_via(None)
+    latest_release_with_proxy(None)
+}
+
+// Explicit app proxy wins. Linux also respects the desktop's existing HTTP/SOCKS proxy.
+fn update_proxy(proxy: Option<&str>) -> Option<String> {
+    proxy.map(str::to_owned).or_else(|| {
+        if cfg!(target_os = "linux") {
+            [
+                "HTTPS_PROXY",
+                "https_proxy",
+                "HTTP_PROXY",
+                "http_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+            ]
+            .iter()
+            .find_map(|key| std::env::var(key).ok().filter(|s| !s.is_empty()))
+        } else {
+            None
+        }
+    })
+}
+
+pub fn latest_release_with_proxy(proxy: Option<&str>) -> Result<Option<Release>, String> {
+    let proxy = update_proxy(proxy);
+    let proxy = proxy.as_deref();
+    let resp = agent_via(proxy.map(parse_proxy).transpose()?)
         .get(RELEASES)
         .header("User-Agent", "Snapling")
         .header("Accept", "application/vnd.github+json")
@@ -345,7 +382,7 @@ pub fn latest_release() -> Result<Option<Release>, String> {
 
 /// How far a download got, shared between its thread and the window showing it.
 #[derive(Default)]
-pub struct Progress(std::sync::Mutex<Fetched>);
+pub struct Progress(std::sync::Mutex<Fetched>, std::sync::atomic::AtomicBool);
 
 #[derive(Default)]
 struct Fetched {
@@ -357,6 +394,13 @@ struct Fetched {
 }
 
 impl Progress {
+    pub fn cancel(&self) {
+        self.1.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn cancelled(&self) -> bool {
+        self.1.load(std::sync::atomic::Ordering::Relaxed)
+    }
     /// Sets how many files the whole download has.
     pub fn plan(&self, files: usize) {
         if let Ok(mut f) = self.0.lock() {
@@ -423,20 +467,51 @@ pub fn download_setup(
     dir: &Path,
     progress: &Progress,
 ) -> Result<PathBuf, String> {
-    let mut sums = agent_via(None).get(&setup.1).call().map_err(err)?;
+    download_setup_with_proxy(setup, dir, progress, None)
+}
+
+pub fn download_setup_with_proxy(
+    setup: &(String, String),
+    dir: &Path,
+    progress: &Progress,
+    proxy: Option<&str>,
+) -> Result<PathBuf, String> {
+    if progress.cancelled() {
+        return Err(t("Загрузка отменена").into());
+    }
+    let proxy = update_proxy(proxy);
+    let proxy = proxy.as_deref();
+    if cfg!(target_os = "linux") {
+        let prefix = "https://github.com/MeowKusTrue/Snapling/releases/download/";
+        if !setup.0.starts_with(prefix) || !setup.1.starts_with(prefix) {
+            return Err(t("Обновление должно быть из официального выпуска Snapling").into());
+        }
+    }
+    let mut sums = agent_via(proxy.map(parse_proxy).transpose()?)
+        .get(&setup.1)
+        .call()
+        .map_err(err)?;
     let text = sums.body_mut().read_to_string().map_err(err)?;
     let want = text
         .split_whitespace()
         .next()
         .unwrap_or_default()
         .to_lowercase();
-    if want.len() != 64 {
+    if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(t("нет контрольной суммы").into());
     }
     std::fs::create_dir_all(dir).map_err(err)?;
-    let dest = dir.join(SETUP);
+    let name = if cfg!(target_os = "linux") {
+        linux_asset_name().ok_or_else(|| t("Нет сборки для этой архитектуры").to_string())?
+    } else {
+        SETUP
+    };
+    let dest = dir.join(name);
+    if progress.cancelled() {
+        return Err(t("Загрузка отменена").into());
+    }
     let _ = std::fs::remove_file(&dest);
-    fetch_file(&setup.0, &dest, &want, None, progress)?;
+    fetch_file(&setup.0, &dest, &want, proxy, progress)?;
     Ok(dest)
 }
 
@@ -492,6 +567,9 @@ pub(crate) fn fetch_file(
         let mut hash = Sha256::new();
         let mut buf = vec![0u8; 1 << 16];
         loop {
+            if progress.cancelled() {
+                return Err(t("Загрузка отменена").into());
+            }
             let n = body.read(&mut buf).map_err(|e| format!("{file}: {e}"))?;
             if n == 0 {
                 break;
@@ -727,6 +805,47 @@ mod tests {
         assert_eq!(r.setup.unwrap().1, "https://a/s.sha");
         let bare = serde_json::json!({ "tag_name": "v1", "html_url": "https://h", "assets": [] });
         assert_eq!(parse_release(&bare).unwrap().setup, None);
+    }
+
+    #[test]
+    fn linux_update_requires_matching_binary_and_checksum() {
+        let Some(name) = linux_asset_name() else {
+            return;
+        };
+        let mut json = serde_json::json!({
+            "tag_name": "v1.2.2", "html_url": "https://github.com/MeowKusTrue/Snapling/releases/tag/v1.2.2",
+            "assets": [{"name": name, "browser_download_url": "https://example/binary"}]
+        });
+        assert!(parse_release(&json).unwrap().linux.is_none());
+        json["assets"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": format!("{name}.sha256"), "browser_download_url": "https://example/checksum"
+            }));
+        let release = parse_release(&json).unwrap();
+        assert_eq!(
+            release.linux,
+            Some((
+                "https://example/binary".into(),
+                "https://example/checksum".into()
+            ))
+        );
+        assert!(release.setup.is_none());
+    }
+
+    #[test]
+    fn cancelled_download_does_not_start_network_request() {
+        let progress = Progress::default();
+        progress.cancel();
+        let result = download_setup_with_proxy(
+            &("invalid-url".into(), "invalid-checksum".into()),
+            &std::env::temp_dir(),
+            &progress,
+            None,
+        );
+        assert!(result.is_err());
+        assert!(progress.cancelled());
     }
 
     #[test]

@@ -124,3 +124,13 @@ Built on ideas and code from [EiSen](https://github.com/thucne/EiSen). Libraries
 ## License
 
 [MIT](LICENSE)
+
+### Linux downloads and updates
+
+GitHub releases include a ready-to-run **Linux x86_64** binary and a `.tar.gz` bundle with an icon and `install.sh`. Extract the bundle and run `./install.sh` as your desktop user (Python 3 required, no sudo or Rust build). It installs into `~/.local/bin` and the application menu. Desktop capture/portal dependencies remain specific to KDE/Hyprland; use `snapling --doctor`.
+
+For this user installation, **Settings → About → Download and install** verifies the official release's SHA-256, checks the executable architecture, atomically replaces the binary and restarts the tray. The previous executable is kept as `.snapling-update-previous` next to it; a failed new tray startup restores it. Other open Snapling windows/captures and active recordings block installation instead of losing unsaved work. A download can be cancelled.
+
+Both **Check at startup** and **Automatically install at startup** are opt-in and off by default. Automatic installation only runs for the user installation when it is idle. The updater uses the configured proxy, or the Linux desktop's HTTP/SOCKS proxy. Checksums are delivered over GitHub HTTPS; they are not a separate publisher signing-key verification mechanism.
+
+An Arch/AUR installation in `/usr/bin`, Flatpak, AppImage or a development build is **not overwritten** by the built-in updater: use its original package/update channel. If multiple copies exist, `snapling --version` refers to the one resolved by your shell; the running application may have been started from a different desktop entry. Keep one preferred installation channel. Releases currently provide a Linux x86_64 build; no ARM release is advertised.

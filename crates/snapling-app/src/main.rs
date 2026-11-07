@@ -152,6 +152,19 @@ fn main() {
         );
         return;
     }
+    #[cfg(target_os = "linux")]
+    if args.len() == 2 && args[1] == "--check-updates" {
+        return app_unix::check_updates();
+    }
+    #[cfg(target_os = "linux")]
+    if args.len() == 3 && args[1] == "--apply-update" {
+        if let Err(e) = snapling_unix::update::install(std::path::Path::new(&args[2])) {
+            eprintln!("snapling: {e}");
+            snapling_unix::notify("Snapling", &e);
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(e) = validate_args(&args) {
         eprintln!("snapling: {e}\nTry 'snapling --help' for more information.");
         std::process::exit(2);

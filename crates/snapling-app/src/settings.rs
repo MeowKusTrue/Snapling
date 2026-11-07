@@ -34,7 +34,7 @@ pub struct Hooks {
     pub snipping_owns: fn() -> bool,
     pub free_printscreen: fn() -> Result<(), String>,
     pub models: PathBuf,
-    /// An installed copy can replace itself; portable and Unix ones only show the page.
+    /// Only installations with a supported replacement mechanism can self-update.
     pub can_update: bool,
     pub ask: fn(&str) -> bool,
     pub gallery: fn() -> crate::history_ui::Hooks,
@@ -1579,6 +1579,17 @@ impl Settings {
                     ("ui", "check_updates"),
                 );
             });
+            #[cfg(target_os = "linux")]
+            ui.add_enabled_ui(self.cfg.ui.check_updates && self.hooks.can_update, |ui| {
+                Self::flag(ui, &mut self.store,
+                    t("Автоматически устанавливать при запуске"),
+                    t("Только пользовательская установка; открытые редакторы и запись блокируют обновление"),
+                    &mut self.cfg.ui.auto_update, ("ui", "auto_update"));
+            });
+            #[cfg(target_os = "linux")]
+            if !self.hooks.can_update {
+                ui.label(t("Эта установка обновляется через пакетный менеджер или исходный способ установки."));
+            }
             let busy = self.update.is_some();
             let label = if busy {
                 t("Проверяю…")
@@ -1592,8 +1603,9 @@ impl Settings {
             {
                 let (tx, rx) = channel();
                 let ctx = ui.ctx().clone();
+                let proxy = if cfg!(target_os = "linux") { (self.hooks.get_proxy)() } else { None };
                 std::thread::spawn(move || {
-                    let _ = tx.send(snapling_translate::latest_release());
+                    let _ = tx.send(snapling_translate::latest_release_with_proxy(proxy.as_deref()));
                     ctx.request_repaint();
                 });
                 self.update = Some(rx);
@@ -1607,18 +1619,21 @@ impl Settings {
                 && let Some(setup) = self.update_setup.clone()
                 && self.installing.is_none()
                 && ui::primary(ui, t("Скачать и установить"), None, 38.0).clicked()
-                && (self.hooks.ask)(t(
-                    "Все окна Snapling закроются, версия обновится и он запустится снова. \
-                     Несохранённые правки в редакторе пропадут.",
-                ))
+                && (self.hooks.ask)(if cfg!(target_os = "linux") {
+                    t("Обновить Snapling и перезапустить трей? Сначала заверши запись и закрой другие окна Snapling. Твои настройки и файлы сохранятся.")
+                } else {
+                    t("Все окна Snapling закроются, версия обновится и он запустится снова. \
+                     Несохранённые правки в редакторе пропадут.")
+                })
             {
                 let (tx, rx) = channel();
                 let ctx = ui.ctx().clone();
                 let dir = self.hooks.models.join("update");
                 self.installed = Arc::default();
                 let progress = self.installed.clone();
+                let proxy = if cfg!(target_os = "linux") { (self.hooks.get_proxy)() } else { None };
                 std::thread::spawn(move || {
-                    let got = snapling_translate::download_setup(&setup, &dir, &progress);
+                    let got = snapling_translate::download_setup_with_proxy(&setup, &dir, &progress, proxy.as_deref());
                     let _ = tx.send(got);
                     ctx.request_repaint();
                 });
@@ -1627,6 +1642,10 @@ impl Settings {
             }
             if self.installing.is_some() {
                 ui::centered_download(ui, &self.installed, 280.0);
+                #[cfg(target_os = "linux")]
+                if ui::tone(ui, t("Отменить загрузку"), None, 32.0).clicked() {
+                    self.installed.cancel();
+                }
             }
             if let Some(page) = &self.update_page
                 && ui::tone(ui, t("Открыть страницу выпуска"), None, 38.0).clicked()
@@ -1642,7 +1661,11 @@ impl Settings {
             self.update_text = match reply {
                 Ok(Some(r)) if snapling_translate::is_newer(&r.tag, snapling_core::VERSION) => {
                     self.update_page = r.page.starts_with("https://github.com/").then_some(r.page);
-                    self.update_setup = r.setup;
+                    self.update_setup = if cfg!(target_os = "linux") {
+                        r.linux
+                    } else {
+                        r.setup
+                    };
                     tf("Есть версия {0}", &[("0", &r.tag)])
                 }
                 Ok(Some(_)) => t("Установлена последняя версия").into(),

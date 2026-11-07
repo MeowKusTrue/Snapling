@@ -16,6 +16,8 @@ pub mod kde_keys;
 #[cfg(target_os = "linux")]
 pub mod tray;
 #[cfg(target_os = "linux")]
+pub mod update;
+#[cfg(target_os = "linux")]
 mod x11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

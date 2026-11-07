@@ -503,6 +503,15 @@ fn argb(rgba: &[u8]) -> Vec<u8> {
 /// No flag: the tray where there is one. It also opens the welcome screen once.
 pub fn run_tray() {
     #[cfg(target_os = "linux")]
+    let instance = match unix::update::Instance::acquire() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(e) => {
+            unix::warn(&e);
+            return;
+        }
+    };
+    #[cfg(target_os = "linux")]
     let _kde_keys = if unix::kde_wayland() {
         match unix::kde_keys::Keys::start(crate::ui::config_path()) {
             Ok(keys) => Some(keys),
@@ -515,6 +524,14 @@ pub fn run_tray() {
         None
     };
     let cfg = config();
+    #[cfg(target_os = "linux")]
+    if cfg.ui.check_updates
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let _ = std::process::Command::new(exe)
+            .arg("--check-updates")
+            .spawn();
+    }
     let now = history::time_string(stamp());
     if let Ok(old) = history::prune(&history_file(), &now, cfg.history.keep_days)
         && cfg.history.delete_files
@@ -551,7 +568,7 @@ pub fn run_tray() {
             Some((t("Выход").to_string(), "--quit")),
         ];
         let icon = crate::icon::frame_spark(32, [0xFF; 3], [0xFF, 0x8A, 0x1F]);
-        let shutdown = _kde_keys.as_ref().map(unix::kde_keys::Keys::shutdown_flag);
+        let shutdown = Some(instance.shutdown_flag());
         if let Err(e) = snapling_unix::tray::run_forever(rows, argb(&icon), shutdown) {
             unix::warn(&e);
         }
@@ -621,10 +638,10 @@ pub fn settings_hooks() -> crate::settings::Hooks {
         snipping_owns: || false,
         free_printscreen: || Ok(()),
         models: models_dir(),
-        can_update: false,
+        can_update: can_update(),
         ask: unix::ask,
         gallery: history_hooks,
-        run_update: |_| Ok(()),
+        run_update,
         get_proxy: || unix::secret_get(PROXY),
         set_proxy: |url| {
             if !url.is_empty() {
@@ -693,5 +710,64 @@ pub fn text_hooks() -> crate::translate_ui::Hooks {
         get_key: |s| unix::secret_get(s.name()),
         set_key: |s, k| unix::secret_set(s.name(), k),
         get_proxy: || unix::secret_get(PROXY),
+    }
+}
+
+fn can_update() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        unix::update::can_update()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+fn run_update(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        unix::update::install(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Err(t("Обнови приложение исходным способом установки").into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn check_updates() {
+    let cfg = config();
+    let proxy = unix::secret_get(PROXY);
+    let result = (|| -> Result<(), String> {
+        let Some(release) = snapling_translate::latest_release_with_proxy(proxy.as_deref())? else {
+            return Ok(());
+        };
+        if !snapling_translate::is_newer(&release.tag, snapling_core::VERSION) {
+            return Ok(());
+        }
+        if !cfg.ui.auto_update || !can_update() {
+            unix::notify(
+                "Snapling",
+                &tf(
+                    "Есть версия {0}. Открой настройки → О программе для обновления.",
+                    &[("0", &release.tag)],
+                ),
+            );
+            return Ok(());
+        }
+        let setup = release
+            .linux
+            .ok_or_else(|| t("В выпуске нет Linux-сборки для этой архитектуры").to_string())?;
+        let staged = snapling_translate::download_setup_with_proxy(
+            &setup,
+            &models_dir().join("update"),
+            &Default::default(),
+            proxy.as_deref(),
+        )?;
+        run_update(&staged)
+    })();
+    if let Err(e) = result {
+        unix::notify("Snapling", &e);
     }
 }

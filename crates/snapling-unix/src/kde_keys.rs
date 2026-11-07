@@ -82,6 +82,13 @@ fn id(a: Action) -> Vec<&'static str> {
     vec![COMPONENT, a.key(), "Snapling", a.title()]
 }
 
+/// Qt may pad a single QKeySequence to four slots; a second real key is different.
+fn matches_single_key(actual: &[(Vec<i32>,)], key: i32) -> bool {
+    actual.len() == 1
+        && actual[0].0.first() == Some(&key)
+        && actual[0].0[1..].iter().all(|slot| *slot == 0)
+}
+
 async fn proxy(c: &Connection) -> zbus::Result<Proxy<'_>> {
     Proxy::new(c, SERVICE, "/kglobalaccel", INTERFACE).await
 }
@@ -125,7 +132,7 @@ async fn bind(p: &Proxy<'_>, h: &Hotkeys) -> zbus::Result<Vec<(Action, i32)>> {
         let actual: Vec<(Vec<i32>,)> = p
             .call("setShortcutKeys", &(id(a), vec![(vec![qt],)], 6u32))
             .await?;
-        if actual == vec![(vec![qt],)] {
+        if matches_single_key(&actual, qt) {
             active.push((a, qt));
         } else {
             let _: bool = p.call("unregister", &(COMPONENT, a.key())).await?;
@@ -257,7 +264,7 @@ async fn session(path: &std::path::Path, stop: &AtomicBool) -> zbus::Result<()> 
             // Detect revocation or external reassignment; never claim the old combo still works.
             for (a, qt) in &active {
                 let actual: Vec<(Vec<i32>,)> = p.call("shortcutKeys", &(id(*a),)).await?;
-                if actual != vec![(vec![*qt],)] {
+                if !matches_single_key(&actual, *qt) {
                     let e = format!("{}: сочетание изменено или отключено в KDE. Измени его в настройках Snapling для повторной регистрации.", a.title());
                     if !revoked.contains(a) { report(&e); revoked.push(*a); }
                 }
@@ -335,6 +342,22 @@ pub fn probe() -> Result<(bool, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn daemon_padding_is_not_a_registration_failure_or_a_revocation() {
+        let key = 0x01000009;
+        assert!(matches_single_key(&[(vec![key],)], key));
+        assert!(matches_single_key(&[(vec![key, 0, 0, 0],)], key));
+        for invalid in [
+            vec![],
+            vec![(vec![],)],
+            vec![(vec![0, 0, 0, 0],)],
+            vec![(vec![key + 1, 0, 0, 0],)],
+            vec![(vec![key, key + 1, 0, 0],)],
+            vec![(vec![key],), (vec![key],)],
+        ] {
+            assert!(!matches_single_key(&invalid, key));
+        }
+    }
     #[test]
     fn qt_codes_preserve_modifiers_and_reject_windows_and_mouse_keys() {
         assert_eq!(

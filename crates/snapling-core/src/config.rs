@@ -308,6 +308,8 @@ pub struct Ui {
     /// Asks GitHub for a new version at start and offers to install it. Off: nothing leaves the
     /// machine unasked.
     pub check_updates: bool,
+    /// Linux user installs only; applies at startup when no editor/capture is open.
+    pub auto_update: bool,
 }
 
 impl Default for Ui {
@@ -320,6 +322,7 @@ impl Default for Ui {
             panel_width: 960,
             welcomed: false,
             check_updates: false,
+            auto_update: false,
         }
     }
 }

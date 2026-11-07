@@ -1200,6 +1200,36 @@ impl Settings {
         let p = ui::pal(ui.ctx());
         ui::heading(ui, t("Горячие клавиши"), 24.0);
         self.snipping_card(ui);
+        #[cfg(target_os = "linux")]
+        if snapling_unix::kde_wayland() {
+            ui.label("KDE/Wayland: сочетания регистрирует работающий трей Snapling. Введи, например, Ctrl+Shift+S. Изменения применяются после выхода из поля; конфликты и отказы KDE показываются уведомлением. Занятые клавиши других приложений не перехватываются.");
+            card(ui, |ui| {
+                for a in Action::ALL {
+                    if snapling_unix::kde_keys::action_flag(a).is_none() {
+                        ui.label(format!(
+                            "{} — пока не поддерживается в KDE/Wayland",
+                            a.title()
+                        ));
+                        continue;
+                    }
+                    row(ui, a.title(), "", |ui| {
+                        let mut combo = self.cfg.hotkeys.combo(a).to_string();
+                        let edit = ui.text_edit_singleline(&mut combo);
+                        if edit.changed() {
+                            self.cfg.hotkeys.set_combo(a, combo.clone());
+                        }
+                        if edit.lost_focus() {
+                            if combo.trim().is_empty() || Hotkey::parse(&combo).is_ok() {
+                                self.store.set("hotkeys", a.key(), combo);
+                            } else {
+                                self.store.error = format!("{}: неверное сочетание", a.title());
+                            }
+                        }
+                    });
+                }
+            });
+            return;
+        }
         if cfg!(not(windows)) {
             ui.label(RichText::new(t(
                 "Здесь сочетания задаются в самой системе: привяжи клавишу к команде. Для                  Hyprland: bind = , Print, exec, snapling --region",

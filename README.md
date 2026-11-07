@@ -71,6 +71,12 @@ makepkg -si
 
 It needs `grim`, `slurp`, `wl-clipboard` and `pipewire`. Optional: `wf-recorder` and `ffmpeg` for recording, `wlrctl` for long screenshots, `libnotify`, `libsecret`, `zenity`. Linux OCR uses PaddleOCR; its model is downloaded only after confirmation.
 
+KDE/Wayland uses `spectacle` for capture and native region selection, and KGlobalAccel
+for shortcuts while the tray is running. Recording and scrolling screenshots are not
+supported on KDE. See [KDE setup and verification](KDE-WAYLAND-VERIFICATION.md) for conflicts,
+monitor scaling, limitations and test commands. Generic Wayland protocol checks need
+`wayland-info` from `wayland-utils`.
+
 Wayland gives apps no global hotkeys, so bind them in `hyprland.conf`:
 
 ```

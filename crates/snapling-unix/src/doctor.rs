@@ -66,7 +66,21 @@ fn tools(d: Desktop) -> Vec<Tool> {
     let mut list = Vec::new();
     if matches!(d, Desktop::Hyprland | Desktop::Wayland) {
         list.extend([
-            tool(&["grim"], "grim", "capture", Need::Core),
+            if crate::kde_wayland() {
+                tool(
+                    &["spectacle"],
+                    "spectacle",
+                    "KWin capture and native region selection",
+                    Need::Core,
+                )
+            } else {
+                tool(
+                    &["grim"],
+                    "grim",
+                    "capture (protocol checked separately)",
+                    Need::Core,
+                )
+            },
             tool(&["wl-copy"], "wl-clipboard", "clipboard", Need::Core),
             tool(&["wf-recorder"], "wf-recorder", "recording", Need::Record),
             tool(&["wlrctl"], "wlrctl", "scrolling screenshot", Need::Long),
@@ -104,6 +118,9 @@ fn tools(d: Desktop) -> Vec<Tool> {
             Need::Extra,
         ),
     ]);
+    if crate::kde_wayland() {
+        list.retain(|t| !matches!(t.need, Need::Record | Need::Long));
+    }
     list
 }
 
@@ -180,10 +197,80 @@ fn check(name: &str, level: Level, detail: impl Into<String>) -> Check {
     }
 }
 
+fn capture_backend() -> Result<String, String> {
+    if crate::kde_wayland() {
+        let help = crate::output("spectacle", &["--help"])?;
+        let help = String::from_utf8_lossy(&help);
+        for option in [
+            "--new-instance",
+            "--background",
+            "--nonotify",
+            "--fullscreen",
+            "--region",
+            "--activewindow",
+            "--output",
+        ] {
+            if !help.contains(option) {
+                return Err(format!(
+                    "Spectacle does not offer {option}; update spectacle"
+                ));
+            }
+        }
+        let c = zbus::blocking::connection::Builder::session()
+            .and_then(|b| b.method_timeout(std::time::Duration::from_secs(3)).build())
+            .map_err(|e| e.to_string())?;
+        let p = zbus::blocking::Proxy::new(
+            &c,
+            "org.kde.KWin.ScreenShot2",
+            "/org/kde/KWin/ScreenShot2",
+            "org.freedesktop.DBus.Introspectable",
+        )
+        .map_err(|e| e.to_string())?;
+        let xml: String = p
+            .call("Introspect", &())
+            .map_err(|e| format!("KWin ScreenShot2: {e}"))?;
+        if !xml.contains("org.kde.KWin.ScreenShot2") {
+            return Err("KWin ScreenShot2 unavailable".into());
+        }
+        Ok(
+            "Spectacle + KWin ScreenShot2; actual capture permission is checked during capture"
+                .into(),
+        )
+    } else if desktop() == Desktop::Wayland {
+        let info = crate::output("wayland-info", &[])
+            .map_err(|e| format!("{e}; install wayland-utils to check compositor protocols"))?;
+        if !String::from_utf8_lossy(&info).contains("zwlr_screencopy_manager_v1") {
+            return Err("compositor does not advertise zwlr_screencopy_manager_v1 required by this grim backend".into());
+        }
+        Ok("wlroots screencopy advertised by compositor".into())
+    } else {
+        Ok(format!("{window:?}", window = desktop()))
+    }
+}
+
 /// Every check; `dirs` are the folders Snapling writes to.
 pub fn run(dirs: &[(&str, PathBuf)]) -> Vec<Check> {
     let d = desktop();
     let mut out = vec![session()];
+    out.push(match capture_backend() {
+        Ok(detail) => check("capture", Level::Ok, detail),
+        Err(e) => check("capture", Level::Fail, e),
+    });
+    if crate::kde_wayland() {
+        out.push(match crate::kde_keys::probe() {
+            Ok((live, detail)) => check(
+                "shortcuts",
+                if live { Level::Ok } else { Level::Warn },
+                detail,
+            ),
+            Err(e) => check(
+                "shortcuts",
+                Level::Warn,
+                format!("KGlobalAccel unavailable: {e}"),
+            ),
+        });
+        out.push(check("record/long", Level::Warn, crate::kde_unsupported()));
+    }
     out.push(match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(p) if Path::new(&p).is_dir() => check("runtime", Level::Ok, p.to_string_lossy()),
         _ => check(
@@ -367,6 +454,9 @@ pub fn preflight(flag: &str) -> Result<(), (i32, String)> {
     if s.level == Level::Fail {
         return Err((4, s.detail));
     }
+    if crate::kde_wayland() && matches!(flag, "--record" | "--long") {
+        return Err((1, crate::kde_unsupported().into()));
+    }
     let extra = match flag {
         "--record" => Need::Record,
         "--long" => Need::Long,
@@ -379,6 +469,9 @@ pub fn preflight(flag: &str) -> Result<(), (i32, String)> {
         .filter(|t| t.names.iter().all(|n| on_path(n).is_none()))
         .collect();
     if lost.is_empty() {
+        if matches!(desktop(), Desktop::Hyprland | Desktop::Wayland) {
+            capture_backend().map_err(|e| (1, e))?;
+        }
         return Ok(());
     }
     let names: Vec<&str> = lost.iter().map(|t| t.names[0]).collect();

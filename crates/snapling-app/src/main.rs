@@ -87,6 +87,7 @@ Usage: snapling [OPTION] [FILE]
   -V, --version          Show version, commit and target
       --region           Select a screen region (Linux/macOS)
       --screen           Capture the screen (Linux/macOS)
+      --window           Capture the active window (KDE/Wayland)
       --ocr              Recognize text in a region (Linux/macOS)
       --ocr-translate    Recognize and translate a region (Linux/macOS)
       --record           Start or stop recording (Linux/macOS)

@@ -12,6 +12,8 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "linux")]
 pub mod doctor;
 #[cfg(target_os = "linux")]
+pub mod kde_keys;
+#[cfg(target_os = "linux")]
 pub mod tray;
 #[cfg(target_os = "linux")]
 mod x11;
@@ -35,6 +37,21 @@ pub fn desktop() -> Desktop {
     } else {
         Desktop::X11
     }
+}
+
+fn kde_desktop(name: &str) -> bool {
+    name.split(':').any(|part| part.eq_ignore_ascii_case("kde"))
+}
+
+pub fn kde_wayland() -> bool {
+    desktop() == Desktop::Wayland
+        && kde_desktop(&std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default())
+}
+
+pub fn kde_unsupported() -> &'static str {
+    t(
+        "В KDE/Wayland запись и длинные скриншоты пока не поддерживаются: wf-recorder, grim и wlrctl требуют протоколы wlroots.",
+    )
 }
 
 /// Stdout of a tool. The message says what to install when the tool is not there.
@@ -214,6 +231,9 @@ pub fn capture() -> Result<Capture, String> {
                 scale: mon.scale,
             })
         }
+        Desktop::Wayland if kde_wayland() => {
+            kde_capture("--fullscreen")?.ok_or_else(|| t("Снимок не прочитан").to_string())
+        }
         Desktop::Wayland => {
             let ppm = output("grim", &["-t", "ppm", "-"])?;
             let (bgra, w, h) = ppm_to_bgra(&ppm).ok_or_else(no_image)?;
@@ -239,6 +259,57 @@ pub fn capture() -> Result<Capture, String> {
             })
         }
     }
+}
+
+/// KWin owns monitor placement and fractional scaling. Never stretch its composite
+/// screenshot over an unrelated winit fullscreen monitor.
+pub fn kde_capture(mode: &str) -> Result<Option<Capture>, String> {
+    kde_capture_with(Path::new("spectacle"), mode)
+}
+
+fn kde_capture_with(tool: &Path, mode: &str) -> Result<Option<Capture>, String> {
+    let dir = tempfile::Builder::new()
+        .prefix("snapling-capture-")
+        .tempdir()
+        .map_err(|e| e.to_string())?;
+    let file = dir.path().join("screen.png");
+    let result = Command::new(tool)
+        .args([
+            "--new-instance",
+            "--background",
+            "--nonotify",
+            mode,
+            "--output",
+        ])
+        .arg(&file)
+        .output()
+        .map_err(|e| format!("Spectacle: {e}"))?;
+    if !result.status.success() {
+        return Err(format!(
+            "Spectacle ({}): {}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+    // Spectacle exits successfully without writing an image on Escape.
+    if mode == "--region" && !file.exists() {
+        if !result.stderr.is_empty() {
+            return Err(format!(
+                "Spectacle: {}",
+                String::from_utf8_lossy(&result.stderr).trim()
+            ));
+        }
+        return Ok(None);
+    }
+    let (bgra, width, height) = snapling_core::storage::load_bgra(&file)?;
+    Ok(Some(Capture {
+        shot: shot_of(bgra, width, height),
+        targets: Vec::new(),
+        // Native selection is already cropped; these coordinates must never be
+        // used for wlroots recording or scrolling on KDE.
+        origin: (0, 0),
+        scale: 1.0,
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -271,6 +342,9 @@ pub fn geometry(area: Rect, origin: (i32, i32), scale: f32) -> String {
 
 /// An area of the screen again, for a long shot: BGRA of the same area every time.
 pub fn capture_area(area: Rect, origin: (i32, i32), scale: f32) -> Result<Vec<u8>, String> {
+    if kde_wayland() {
+        return Err(kde_unsupported().into());
+    }
     let geo = geometry(area, origin, scale);
     let ppm = output("grim", &["-g", &geo, "-t", "ppm", "-"])?;
     let (bgra, ..) = ppm_to_bgra(&ppm).ok_or(t("Снимок не прочитан"))?;
@@ -279,6 +353,9 @@ pub fn capture_area(area: Rect, origin: (i32, i32), scale: f32) -> Result<Vec<u8
 
 /// Puts the pointer over `area` and turns the wheel down. Needs `wlrctl` or `xdotool`.
 pub fn scroll_down(area: Rect, origin: (i32, i32), scale: f32) -> Result<(), String> {
+    if kde_wayland() {
+        return Err(kde_unsupported().into());
+    }
     let center = |pos: i32, side: i32, o: i32| o + ((pos + side / 2) as f32 / scale) as i32;
     let (x, y) = (
         center(area.left, area.width, origin.0),
@@ -643,6 +720,9 @@ pub fn start_recording(
     path: &Path,
     gif: Option<PathBuf>,
 ) -> Result<(), String> {
+    if kde_wayland() {
+        return Err(kde_unsupported().into());
+    }
     let (tool, args): (&str, Vec<String>) = match desktop() {
         Desktop::Hyprland | Desktop::Wayland => (
             "wf-recorder",
@@ -718,6 +798,79 @@ pub fn stop_recording(run: Running) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kde_detection_matches_desktop_tokens_only() {
+        for name in ["KDE", "plasma:KDE", "kde"] {
+            assert!(kde_desktop(name));
+        }
+        for name in ["", "notKDE", "GNOME", "Hyprland"] {
+            assert!(!kde_desktop(name));
+        }
+    }
+
+    #[test]
+    fn spectacle_decodes_cleans_up_and_distinguishes_cancel_and_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("image.png");
+        let log = dir.path().join("path.txt");
+        let pixels = [3, 2, 1, 255, 6, 5, 4, 255];
+        std::fs::write(
+            &image,
+            snapling_core::storage::encode_png(&pixels, 2, 1).unwrap(),
+        )
+        .unwrap();
+        #[cfg(windows)]
+        let tool = dir.path().join("spectacle.cmd");
+        #[cfg(not(windows))]
+        let tool = dir.path().join("spectacle");
+        let script = |body: &str| {
+            std::fs::write(&tool, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        };
+        #[cfg(windows)]
+        script(
+            "@echo off\r\nif not \"%~1\"==\"--new-instance\" exit /b 2\r\nif not \"%~2\"==\"--background\" exit /b 2\r\nif not \"%~3\"==\"--nonotify\" exit /b 2\r\nif not \"%~5\"==\"--output\" exit /b 2\r\n>\"%~dp0path.txt\" echo %~6\r\ncopy /b \"%~dp0image.png\" \"%~6\" >nul\r\n",
+        );
+        #[cfg(not(windows))]
+        script(
+            "#!/bin/sh\n[ \"$#\" = 6 ] && [ \"$1\" = --new-instance ] && [ \"$2\" = --background ] && [ \"$3\" = --nonotify ] && [ \"$5\" = --output ] || exit 2\nprintf '%s' \"$6\" > \"$(dirname \"$0\")/path.txt\"\ncp \"$(dirname \"$0\")/image.png\" \"$6\"\n",
+        );
+        for mode in ["--fullscreen", "--region", "--activewindow"] {
+            let cap = kde_capture_with(&tool, mode).unwrap().unwrap();
+            assert_eq!((cap.shot.width, cap.shot.height), (2, 1));
+            assert_eq!(cap.shot.bgra, pixels);
+            let path = PathBuf::from(std::fs::read_to_string(&log).unwrap().trim());
+            assert!(!path.parent().unwrap().exists());
+        }
+        #[cfg(windows)]
+        script(
+            "@echo off\r\n>\"%~dp0path.txt\" echo %~6\r\necho capture denied 1>&2\r\nexit /b 1\r\n",
+        );
+        #[cfg(not(windows))]
+        script(
+            "#!/bin/sh\nprintf '%s' \"$6\" > \"$(dirname \"$0\")/path.txt\"\necho 'capture denied' >&2\nexit 1\n",
+        );
+        assert!(
+            kde_capture_with(&tool, "--fullscreen")
+                .err()
+                .unwrap()
+                .contains("capture denied")
+        );
+        let path = PathBuf::from(std::fs::read_to_string(&log).unwrap().trim());
+        assert!(!path.parent().unwrap().exists());
+        #[cfg(windows)]
+        script("@exit /b 0\r\n");
+        #[cfg(not(windows))]
+        script("#!/bin/sh\nexit 0\n");
+        assert!(kde_capture_with(&tool, "--region").unwrap().is_none());
+        assert!(kde_capture_with(&tool, "--fullscreen").is_err());
+        assert!(kde_capture_with(&dir.path().join("missing"), "--region").is_err());
+    }
 
     #[test]
     fn user_dirs_resolve_home_and_skip_the_home_itself() {

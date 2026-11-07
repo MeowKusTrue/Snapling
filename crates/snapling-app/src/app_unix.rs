@@ -347,6 +347,19 @@ fn after(cfg: &Config, cap: &unix::Capture, img: Shot, outcome: Outcome) -> Resu
 
 /// `false` when the selection was cancelled.
 fn region(cfg: &Config, auto: Option<Outcome>) -> Result<bool, String> {
+    if unix::kde_wayland() {
+        if matches!(auto, Some(Outcome::Record | Outcome::Scroll)) {
+            return Err(unix::kde_unsupported().into());
+        }
+        let Some(cap) = unix::kde_capture("--region")? else {
+            return Ok(false);
+        };
+        match auto {
+            Some(outcome) => after(cfg, &cap, cap.shot.clone(), outcome)?,
+            None => deliver(cfg, &cap.shot, "region", false),
+        }
+        return Ok(true);
+    }
     let cap = unix::capture()?;
     let opts = Options {
         scale: 0.0,
@@ -403,6 +416,7 @@ fn region(cfg: &Config, auto: Option<Outcome>) -> Result<bool, String> {
 pub const ACTIONS: &[&str] = &[
     "--region",
     "--screen",
+    "--window",
     "--ocr",
     "--ocr-translate",
     "--long",
@@ -429,6 +443,15 @@ pub fn run_flag(flag: &str) -> Option<i32> {
             deliver(&cfg, &cap.shot, "screen", false);
             true
         }),
+        "--window" if unix::kde_wayland() => unix::kde_capture("--activewindow").map(|cap| {
+            if let Some(cap) = cap {
+                deliver(&cfg, &cap.shot, "window", false);
+                true
+            } else {
+                false
+            }
+        }),
+        "--window" => Err(t("Захват активного окна здесь не поддерживается").into()),
         "--ocr" => region(&cfg, Some(Outcome::Text)),
         "--ocr-translate" => region(&cfg, Some(Outcome::Translate)),
         "--long" => region(&cfg, Some(Outcome::Scroll)),
@@ -479,6 +502,18 @@ fn argb(rgba: &[u8]) -> Vec<u8> {
 
 /// No flag: the tray where there is one. It also opens the welcome screen once.
 pub fn run_tray() {
+    #[cfg(target_os = "linux")]
+    let _kde_keys = if unix::kde_wayland() {
+        match unix::kde_keys::Keys::start(crate::ui::config_path()) {
+            Ok(keys) => Some(keys),
+            Err(e) => {
+                unix::warn(&e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let cfg = config();
     let now = history::time_string(stamp());
     if let Ok(old) = history::prune(&history_file(), &now, cfg.history.keep_days)
@@ -516,7 +551,8 @@ pub fn run_tray() {
             Some((t("Выход").to_string(), "--quit")),
         ];
         let icon = crate::icon::frame_spark(32, [0xFF; 3], [0xFF, 0x8A, 0x1F]);
-        if let Err(e) = snapling_unix::tray::run_forever(rows, argb(&icon)) {
+        let shutdown = _kde_keys.as_ref().map(unix::kde_keys::Keys::shutdown_flag);
+        if let Err(e) = snapling_unix::tray::run_forever(rows, argb(&icon), shutdown) {
             unix::warn(&e);
         }
     }

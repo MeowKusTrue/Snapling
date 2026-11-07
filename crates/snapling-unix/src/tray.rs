@@ -11,6 +11,7 @@ pub type Row = Option<(String, &'static str)>;
 struct Snapling {
     rows: Vec<Row>,
     icon: Icon,
+    quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Tray for Snapling {
@@ -39,7 +40,13 @@ impl Tray for Snapling {
                     let flag = *flag;
                     StandardItem {
                         label: label.clone(),
-                        activate: Box::new(move |_: &mut Self| run(flag)),
+                        activate: Box::new(move |s: &mut Self| {
+                            if flag == "--quit" {
+                                s.quit.store(true, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                run(flag);
+                            }
+                        }),
                         ..Default::default()
                     }
                     .into()
@@ -50,25 +57,34 @@ impl Tray for Snapling {
 }
 
 fn run(flag: &str) {
-    if flag == "--quit" {
-        std::process::exit(0);
-    }
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).arg(flag).spawn();
     }
 }
 
 /// Shows the tray and never returns. `argb`: the icon, 32×32, alpha first.
-pub fn run_forever(rows: Vec<Row>, argb: Vec<u8>) -> Result<(), String> {
+pub fn run_forever(
+    rows: Vec<Row>,
+    argb: Vec<u8>,
+    shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<(), String> {
     let icon = Icon {
         width: 32,
         height: 32,
         data: argb,
     };
-    let handle = Snapling { rows, icon }.spawn().map_err(|e| e.to_string())?;
+    let quit =
+        shutdown.unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let handle = Snapling {
+        rows,
+        icon,
+        quit: quit.clone(),
+    }
+    .spawn()
+    .map_err(|e| e.to_string())?;
     loop {
-        std::thread::park();
-        if handle.is_closed() {
+        std::thread::park_timeout(std::time::Duration::from_millis(200));
+        if handle.is_closed() || quit.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
         }
     }

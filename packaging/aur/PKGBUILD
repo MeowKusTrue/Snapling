@@ -1,6 +1,6 @@
 # Maintainer: MeowKusTrue
 pkgname=snapling-git
-pkgver=1.2.0
+pkgver=1.2.1
 pkgrel=1
 pkgdesc='Screenshots with annotation, OCR and translation'
 arch=('x86_64')
@@ -9,6 +9,9 @@ license=('MIT')
 depends=('grim' 'wl-clipboard' 'libxkbcommon' 'openssl' 'pipewire')
 makedepends=('cargo' 'git')
 optdepends=(
+  'spectacle: KDE/Wayland screenshots and native region selection'
+  'kglobalacceld: global shortcuts on KDE/Wayland'
+  'wayland-utils: compositor protocol checks on other Wayland desktops'
   'wf-recorder: screen recording on Wayland'
   'ffmpeg: GIF recording, recording on X11'
   'wlrctl: long screenshots on Wayland'
@@ -25,7 +28,7 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd Snapling
-  printf '1.2.0.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  printf '1.2.1.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 prepare() {

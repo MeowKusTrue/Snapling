@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -68,7 +69,19 @@ def service(args, label):
     return name
 
 try:
-    service([target], 'tray')
+    # Inherit a live helper and an unreaped child, as desktop tray services can.
+    launcher = root / 'launch.py'
+    helper_file = root / 'helper.pid'
+    launcher.write_text(
+        'import os, subprocess, sys, time\n'
+        'from pathlib import Path\n'
+        'helper = subprocess.Popen(["sleep", "120"])\n'
+        'zombie = subprocess.Popen(["true"])\n'
+        'Path(sys.argv[2]).write_text(str(helper.pid))\n'
+        'time.sleep(.2)\n'
+        'os.execv(sys.argv[1], [sys.argv[1]])\n'
+    )
+    service([sys.executable, launcher, target, helper_file], 'tray')
     wait_for(ping, 'isolated old tray failed to start')
     old_pid = ping()
     original_hash = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -76,6 +89,19 @@ try:
     staged.write_bytes(binary.read_bytes() + b'\nSNAPLING_UPDATE_INTEGRATION\n')
     staged.chmod(0o700)
     new_hash = hashlib.sha256(staged.read_bytes()).hexdigest()
+    helper_pid = int(helper_file.read_text())
+    blocked_env = env.copy()
+    blocked_env.update(SNAPLING_UPDATE_WORKER='1', DBUS_SESSION_BUS_ADDRESS='unix:path=/nonexistent-snapling-test-bus')
+    blocked = subprocess.run([target, '--apply-update', staged], env=blocked_env,
+                             capture_output=True, text=True, timeout=15)
+    assert blocked.returncode != 0 and 'Закрой другие окна Snapling' in blocked.stderr
+    assert ping() == old_pid
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == original_hash
+    os.kill(helper_pid, 0)
+    print('PASS: live sibling blocks update without stopping the tray or helper', flush=True)
+    os.kill(helper_pid, signal.SIGTERM)
+    wait_for(lambda: 'State:\tZ' in Path(f'/proc/{helper_pid}/status').read_text(),
+             'helper did not become a finished child')
     service([target, '--apply-update', staged], 'client')
     wait_for(lambda: hashlib.sha256(target.read_bytes()).hexdigest() == new_hash and ping() not in [None, old_pid],
              'service update did not replace/restart tray')

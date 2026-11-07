@@ -181,7 +181,18 @@ fn busy(exe: &Path, daemon: Option<u32>, caller: Option<u32>) -> bool {
         else {
             return false;
         };
-        pid != std::process::id()
+        let active = fs::read_to_string(entry.path().join("status"))
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    line.strip_prefix("State:")
+                        .and_then(|value| value.split_whitespace().next())
+                        .map(|state| state != "Z" && state != "X")
+                })
+            })
+            .unwrap_or(false);
+        active
+            && pid != std::process::id()
             && Some(pid) != daemon
             && Some(pid) != caller
             && (fs::read_link(entry.path().join("exe")).is_ok_and(|p| p == exe)

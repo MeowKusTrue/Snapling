@@ -77,8 +77,9 @@ pub fn qt_key(h: &Hotkey) -> Result<i32, String> {
         | if h.win { 0x10000000 } else { 0 })
 }
 
-fn id(a: Action) -> [&'static str; 4] {
-    [COMPONENT, a.key(), "Snapling", a.title()]
+fn id(a: Action) -> Vec<&'static str> {
+    // Fixed Rust arrays encode as D-Bus structs; KDE expects a string array (`as`).
+    vec![COMPONENT, a.key(), "Snapling", a.title()]
 }
 
 async fn proxy(c: &Connection) -> zbus::Result<Proxy<'_>> {

@@ -398,6 +398,27 @@ pub fn draw(pm: &mut PixmapMut<'_>, sc: &Scene<'_>, lay: &Layout) {
     if let (Some(panel), Some(l)) = (lay.loupe, &sc.loupe) {
         draw_loupe(pm, panel, l, s);
     }
+    if let Some((tip, label)) = &lay.tooltip {
+        if let Some(path) = rr(*tip, 8.0 * s) {
+            pm.fill_path(
+                &path,
+                &paint([18, 22, 32, 255]),
+                FillRule::Winding,
+                id,
+                None,
+            );
+            pm.stroke_path(&path, &paint([255, 255, 255, 65]), &stroke(s), id, None);
+        }
+        text(
+            pm,
+            &f.semibold,
+            label,
+            tip.left as f32 + 10.0 * s,
+            tip.top as f32 + tip.height as f32 / 2.0,
+            12.5 * s,
+            [255; 4],
+        );
+    }
 }
 
 /// `name` cut with an ellipsis to fit `max`.

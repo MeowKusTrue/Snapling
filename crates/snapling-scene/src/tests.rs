@@ -62,6 +62,45 @@ fn toolbar_flips_above_at_screen_bottom() {
 }
 
 #[test]
+fn hover_labels_fit_monitor_and_do_not_capture_clicks() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut sc = scene(
+            Some(Rect {
+                left: -700,
+                top: 150,
+                width: 300,
+                height: 200,
+            }),
+            true,
+        );
+        sc.scale = scale;
+        sc.monitor.left = -1440;
+        sc.monitor.top = -100;
+        sc.cursor_monitor = sc.monitor;
+        let plain = layout(&sc);
+        assert!(plain.tooltip.is_none());
+        for (_, control) in &plain.buttons {
+            sc.hover_button = Some(*control);
+            let lay = layout(&sc);
+            let (tip, label) = lay.tooltip.as_ref().expect("each button has a label");
+            assert!(!label.is_empty());
+            assert!(tip.left >= sc.monitor.left && tip.right() <= sc.monitor.right());
+            assert!(tip.top >= sc.monitor.top && tip.bottom() <= sc.monitor.bottom());
+            assert_eq!(
+                lay.buttons, plain.buttons,
+                "a tooltip must not alter hit targets"
+            );
+            assert!(lay.bounds.unwrap().left <= tip.left);
+        }
+        sc.dragging = true;
+        assert!(layout(&sc).tooltip.is_none());
+        sc.dragging = false;
+        sc.hover_button = None;
+        assert!(layout(&sc).tooltip.is_none());
+    }
+}
+
+#[test]
 fn draws_into_bgra_buffer() {
     let (w, h) = (1440u32, 900u32);
     let mut buf = vec![40u8; (w * h * 4) as usize];
@@ -286,6 +325,17 @@ fn rail_leaves_room_for_a_selection_on_the_left() {
     assert_eq!(lay.strip.unwrap().left, 24);
     assert!(lay.options.is_some());
     assert_eq!(lay.buttons[0].1, Control::Select);
+    for tool in TOOLS {
+        sc.tools = Some(draw(Some(tool)));
+        for (_, control) in layout(&sc).buttons {
+            sc.hover_button = Some(control);
+            let lay = layout(&sc);
+            let (tip, label) = lay.tooltip.as_ref().expect("rail and options have labels");
+            assert!(!label.is_empty());
+            assert!(tip.left >= mon.left && tip.right() <= mon.right());
+            assert!(tip.top >= mon.top && tip.bottom() <= mon.bottom());
+        }
+    }
     let sel = Rect {
         left: 60,
         top: 200,
@@ -310,6 +360,7 @@ fn svg_subset_parses_all_icons() {
         Button::Pin,
         Button::Record,
         Button::Scroll,
+        Button::Draw,
         Button::Blur,
         Button::Cancel,
     ] {

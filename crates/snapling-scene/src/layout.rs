@@ -135,6 +135,61 @@ pub fn layout(sc: &Scene<'_>) -> Layout {
         out.bounds = union(out.bounds, inflate(panel, 2));
         out.loupe = Some(panel);
     }
+    if !sc.dragging
+        && let Some(hovered) = sc.hover_button
+        && let Some((button, _)) = out.buttons.iter().find(|(_, c)| *c == hovered)
+    {
+        let mon = if matches!(hovered, Control::Action(_)) {
+            sc.monitor
+        } else {
+            sc.tools.as_ref().map_or(sc.monitor, |tools| tools.monitor)
+        };
+        let margin = 10.0 * s;
+        let room = (mon.width as f32 - margin * 2.0).max(1.0);
+        let label = fit_text(
+            &f.semibold,
+            &hovered.label(),
+            12.5 * s,
+            (room - 20.0 * s).max(1.0),
+        );
+        let w = (text_w(&f.semibold, &label, 12.5 * s) + 20.0 * s).min(room);
+        let h = 32.0 * s;
+        let x = (button.left as f32 + (button.width as f32 - w) / 2.0).clamp(
+            mon.left as f32 + margin,
+            (mon.right() as f32 - w - margin).max(mon.left as f32 + margin),
+        );
+        let above = button.top as f32 - h - 8.0 * s;
+        let y = if above >= mon.top as f32 + margin {
+            above
+        } else {
+            button.bottom() as f32 + 8.0 * s
+        };
+        let (x, y) = if matches!(hovered, Control::Action(_)) {
+            (x, y)
+        } else {
+            let right = button.right() as f32 + 8.0 * s;
+            let x = if right + w <= mon.right() as f32 - margin {
+                right
+            } else {
+                button.left as f32 - w - 8.0 * s
+            };
+            (
+                x.max(mon.left as f32 + margin),
+                button.top as f32 + (button.height as f32 - h) / 2.0,
+            )
+        };
+        let tip = r(
+            x,
+            y.clamp(
+                mon.top as f32,
+                (mon.bottom() as f32 - h).max(mon.top as f32),
+            ),
+            w,
+            h,
+        );
+        out.bounds = union(out.bounds, inflate(tip, (12.0 * s) as i32));
+        out.tooltip = Some((tip, label));
+    }
     out
 }
 

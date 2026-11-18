@@ -240,6 +240,7 @@ pub struct Layout {
     hover_pill: Option<Rect>,
     hint_bar: Option<Rect>,
     loupe: Option<Rect>,
+    tooltip: Option<(Rect, String)>,
 }
 
 // Mockup tokens.

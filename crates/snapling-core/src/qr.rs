@@ -8,19 +8,30 @@ pub fn decode(bgra: &[u8], width: u32, height: u32) -> Result<Vec<String>, Strin
     if width == 0 || height == 0 || bytes != Some(bgra.len()) {
         return Err(t("Неверный размер изображения QR-кода").into());
     }
-    let mut image =
-        rqrr::PreparedImage::prepare_from_greyscale(width as usize, height as usize, |x, y| {
-            let i = (y * width as usize + x) * 4;
-            ((u32::from(bgra[i + 2]) * 77 + u32::from(bgra[i + 1]) * 150 + u32::from(bgra[i]) * 29)
-                >> 8) as u8
-        });
-    let mut texts = Vec::new();
-    for grid in image.detect_grids() {
-        if let Ok((_, text)) = grid.decode()
-            && !text.is_empty()
-            && !texts.contains(&text)
-        {
-            texts.push(text);
+    let gray: Vec<u8> = bgra
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| ((u32::from(p[2]) * 77 + u32::from(p[1]) * 150 + u32::from(p[0]) * 29) >> 8) as u8)
+        .collect();
+    // Styled QR codes often use light/colored modules on dark backgrounds.
+    let mut hints = rxing::DecodeHints {
+        TryHarder: Some(true),
+        AlsoInverted: Some(true),
+        PossibleFormats: Some(std::collections::HashSet::from([
+            rxing::BarcodeFormat::QR_CODE,
+        ])),
+        ..Default::default()
+    };
+    let results =
+        rxing::helpers::detect_multiple_in_luma_with_hints(gray, width, height, &mut hints);
+    let mut texts: Vec<String> = Vec::new();
+    if let Ok(results) = results {
+        for result in results {
+            let text = result.getText();
+            if !text.is_empty() && !texts.iter().any(|s| s == text) {
+                texts.push(text.to_owned());
+            }
         }
     }
     if texts.is_empty() {
@@ -49,6 +60,15 @@ pub fn web_link(text: &str) -> bool {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "local user-supplied QR case; prints no payload"]
+    fn local_qr_case() {
+        let path = std::env::var_os("SNAP_QR_CASE").expect("SNAP_QR_CASE");
+        let (pixels, w, h) = crate::storage::load_bgra(std::path::Path::new(&path)).unwrap();
+        let texts = decode(&pixels, w, h).expect("attached QR must decode");
+        assert!(!texts.is_empty());
+        println!("Decoded {} QR payload(s); contents not logged", texts.len());
+    }
+    #[test]
     fn reads_generated_qr_at_multiple_scales_and_rotations() {
         // Generated locally with python-qrcode 8.2; this fixture contains no user data.
         let matrix: Vec<_> = include_str!("../tests/data/qr-example.txt")
@@ -56,7 +76,7 @@ mod tests {
             .map(str::as_bytes)
             .collect();
         let n = matrix.len();
-        for scale in [2, 4] {
+        for (scale, inverted) in [(2, false), (4, false), (4, true)] {
             for rotated in [false, true] {
                 let side = n * scale;
                 let mut pixels = vec![255; side * side * 4];
@@ -70,6 +90,15 @@ mod tests {
                         if matrix[my][mx] == b'1' {
                             let at = (y * side + x) * 4;
                             pixels[at..at + 3].fill(0);
+                        }
+                        if inverted {
+                            let at = (y * side + x) * 4;
+                            let color = if pixels[at] == 0 {
+                                [230, 100, 150]
+                            } else {
+                                [24, 24, 24]
+                            };
+                            pixels[at..at + 3].copy_from_slice(&color);
                         }
                     }
                 }

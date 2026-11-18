@@ -1,5 +1,69 @@
 use super::*;
 
+impl Control {
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::Action(b) => t(match b {
+                Button::Copy => n("Копировать снимок (Enter / C)"),
+                Button::Save => n("Сохранить снимок (S)"),
+                Button::Edit => n("Открыть редактор (E)"),
+                Button::Text => n("Распознать текст (O)"),
+                Button::Translate => n("Распознать и перевести (R)"),
+                Button::Qr => n("Прочитать QR-код (Q)"),
+                Button::Pin => n("Закрепить поверх окон (P)"),
+                Button::Record => n("Записать область экрана (G)"),
+                Button::Scroll => n("Длинный скриншот с прокруткой (D)"),
+                Button::Draw => n("Показать инструменты рисования"),
+                Button::Blur => n("Размыть часть снимка"),
+                Button::Cancel => n("Отменить захват (Esc)"),
+            })
+            .into(),
+            Self::Tool(tool) => t(match tool {
+                Tool::Arrow => n("Стрелка (1)"),
+                Tool::Line => n("Линия (2)"),
+                Tool::Rect => n("Прямоугольник (3)"),
+                Tool::Ellipse => n("Эллипс (4)"),
+                Tool::Pen => n("Перо (5)"),
+                Tool::Marker => n("Маркер (6)"),
+                Tool::Text => n("Текстовая надпись (7)"),
+                Tool::Step => n("Нумерация (8)"),
+                Tool::Blur => n("Размытие кистью (9)"),
+                Tool::Redact => n("Сплошное скрытие данных (H)"),
+            })
+            .into(),
+            Self::Select => t("Выделить прямоугольную область (V)").into(),
+            Self::Lasso => t("Выделить произвольную область (L)").into(),
+            Self::Undo => t("Отменить пометку (Ctrl+Z)").into(),
+            Self::Redo => t("Вернуть пометку (Ctrl+Y)").into(),
+            Self::Color(i) => {
+                let [r, g, b] = COLORS[i];
+                format!("{} #{r:02X}{g:02X}{b:02X}", t("Цвет"))
+            }
+            Self::Size(i) => format!("{}: {}", t("Толщина"), SIZES[i]),
+            Self::Gauss(false) => t("Размытие: кубики").into(),
+            Self::Gauss(true) => t("Размытие: гаусс").into(),
+            Self::Strength(i) => format!("{}: {}", t("Сила"), i + 1),
+            Self::Picker => t("Пипетка: копировать цвет (I)").into(),
+            Self::ColorFormat(i) => {
+                format!("{}: {}", t("Формат цвета"), ColorFormat::ALL[i].label())
+            }
+            Self::Head(i) => t(match Head::ALL[i] {
+                Head::Sharp => n("Острый наконечник"),
+                Head::Soft => n("Мягкий наконечник"),
+                Head::Double => n("Двойной наконечник"),
+            })
+            .into(),
+            Self::Free(false) => t("Прямая стрелка").into(),
+            Self::Free(true) => t("Стрелка от руки").into(),
+            Self::ToStart(false) => t("Наконечник в конце стрелки").into(),
+            Self::ToStart(true) => t("Наконечник в начале стрелки").into(),
+            Self::StepStyle(i) => StepStyle::ALL[i].label().into(),
+            Self::Font(false) => t("Предыдущий шрифт").into(),
+            Self::Font(true) => t("Следующий шрифт").into(),
+        }
+    }
+}
+
 /// Mockup icons (24-unit grid, 2-unit round strokes) as SVG path data.
 pub(crate) const UNDO: [&str; 2] = [
     "M 9 14 L 4 9 L 9 4",
@@ -76,18 +140,29 @@ pub(crate) fn tool_icon(t: Tool) -> &'static [&'static str] {
 
 pub(crate) fn icon_data(b: Button) -> &'static [&'static str] {
     match b {
-        Button::Draw => tool_icon(Tool::Arrow),
+        Button::Draw => &[
+            "M 14 3 L 21 10 L 12 19 L 5 12 Z",
+            "M 5 12 L 3 21 L 12 19",
+            "M 7 14 L 10 17",
+        ],
         Button::Qr => &[
             "M 3 3 H 9 V 9 H 3 Z",
+            "M 6 5 V 7",
             "M 15 3 H 21 V 9 H 15 Z",
+            "M 18 5 V 7",
             "M 3 15 H 9 V 21 H 3 Z",
+            "M 6 17 V 19",
             "M 15 15 H 18 V 18 H 21 V 21 H 15 Z",
         ],
         Button::Copy => &[
             "M 10.5 8 H 17.5 Q 20 8 20 10.5 V 17.5 Q 20 20 17.5 20 H 10.5 Q 8 20 8 17.5 V 10.5 Q 8 8 10.5 8 Z",
             "M 16 8 V 6 Q 16 4 14 4 H 6 Q 4 4 4 6 V 14 Q 4 16 6 16 H 8",
         ],
-        Button::Save => &["M 12 4 V 15", "M 7 10 L 12 15 L 17 10", "M 5 20 H 19"],
+        Button::Save => &[
+            "M 4 3 H 17 L 21 7 V 21 H 3 V 3 Z",
+            "M 7 3 V 9 H 16 V 3",
+            "M 7 21 V 14 H 17 V 21",
+        ],
         Button::Edit => &["M 4 20 L 8 19 L 19 8 L 16 5 L 5 16 L 4 20 Z"],
         Button::Text => &[
             "M 4 8 V 5 H 7",
@@ -110,10 +185,7 @@ pub(crate) fn icon_data(b: Button) -> &'static [&'static str] {
             "M 16 4 L 10 10 L 6 10 L 14 18 L 14 14 L 20 8",
             "M 9 15 L 4 20",
         ],
-        Button::Record => &[
-            CIRCLE,
-            "M 12 9 C 13.7 9 15 10.3 15 12 C 15 13.7 13.7 15 12 15 C 10.3 15 9 13.7 9 12 C 9 10.3 10.3 9 12 9 Z",
-        ],
+        Button::Record => &["M 3 6 H 15 V 18 H 3 Z", "M 15 10 L 22 6 V 18 L 15 14"],
         Button::Scroll => &[
             "M 7 3 H 17 Q 19 3 19 5 V 13 Q 19 15 17 15 H 7 Q 5 15 5 13 V 5 Q 5 3 7 3 Z",
             "M 12 18 V 22",

@@ -6,6 +6,7 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6, no vulnerability; pulled by ksni, Linux tray only" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6, no vulnerability; pulled by ksni, Linux tray only" },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained, no vulnerability; compile-time macro pulled by tokenizers/ort" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, no vulnerability reported; rxing uses it only for the unused decode timestamp, calendar parsing is disabled" },
 ]
 
 [licenses]

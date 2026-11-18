@@ -56,7 +56,14 @@ impl eframe::App for Pin {
         let ctx = ui.ctx().clone();
         let (scroll, ctrl, close) = ctx.input(|i| {
             (
-                i.raw_scroll_delta.y,
+                i.raw
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                        _ => None,
+                    })
+                    .sum::<f32>(),
                 i.modifiers.ctrl,
                 i.key_pressed(egui::Key::Escape) || i.pointer.secondary_clicked(),
             )

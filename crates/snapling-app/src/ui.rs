@@ -326,6 +326,23 @@ pub fn viewport(title: &str, size: [f32; 2], min: [f32; 2]) -> ViewportBuilder {
         })
 }
 
+/// A result requested by the user is raised once; completed background work never steals focus.
+pub fn focus_result(ctx: &egui::Context, frame: &eframe::Frame) {
+    ctx.send_viewport_cmd(ViewportCommand::Focus);
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(h) = frame.window_handle()
+            && let RawWindowHandle::Win32(w) = h.as_raw()
+        {
+            let hwnd = windows::Win32::Foundation::HWND(w.hwnd.get() as *mut _);
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd) };
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = frame;
+}
+
 fn maximized(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.viewport().maximized == Some(true))
 }

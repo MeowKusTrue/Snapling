@@ -6,10 +6,13 @@ pub mod history;
 pub mod hotkey;
 pub mod i18n;
 pub mod ocr;
+pub mod pin;
 pub mod project;
+pub mod qr;
 pub mod record;
 pub mod selection;
 pub mod sound;
+pub mod spelling;
 pub mod storage;
 
 pub const APP_NAME: &str = "Snapling";

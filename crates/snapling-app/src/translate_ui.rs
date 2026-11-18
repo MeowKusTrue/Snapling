@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 pub struct Hooks {
+    pub spelling: fn(&str) -> Result<Vec<snapling_core::spelling::Suggestion>, String>,
     pub copy_text: fn(&str) -> Result<(), String>,
     pub warn: fn(&str),
     pub models: PathBuf,
@@ -52,7 +53,9 @@ pub fn run(file: &Path, hooks: Hooks, text_only: bool) {
             t("Snapling — текст и перевод"),
             [400.0, 600.0],
             [360.0, 480.0],
-        ),
+        )
+        .with_active(true)
+        .with_always_on_top(),
         ..Default::default()
     };
     let warn = hooks.warn;
@@ -127,6 +130,16 @@ fn worker(
 }
 
 struct Window {
+    recognized_original: String,
+    spell_source: String,
+    spelling: Vec<snapling_core::spelling::Suggestion>,
+    spell_rx: Option<Receiver<SpellingReply>>,
+    raised: bool,
+    opened: std::time::Instant,
+    pinned: bool,
+    settled: bool,
+    spell_status: String,
+    show_spelling: bool,
     original: String,
     translation: String,
     from: Lang,
@@ -158,7 +171,122 @@ struct Window {
     consented: bool,
 }
 
+type SpellingReply = (
+    String,
+    Result<Vec<snapling_core::spelling::Suggestion>, String>,
+);
+
 impl Window {
+    fn text_changed(&mut self) {
+        self.spelling.clear();
+        self.spell_status.clear();
+        if !self.fetching {
+            self.pending = None;
+        }
+        self.translation.clear();
+        self.show_spelling = false;
+    }
+
+    fn check_spelling(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = channel();
+        let text = self.original.clone();
+        let check = self.hooks.spelling;
+        let ctx = ctx.clone();
+        self.spell_rx = Some(rx);
+        self.spell_status = t("Проверяю по локальному словарю…").into();
+        std::thread::spawn(move || {
+            let result = check(&text);
+            let _ = tx.send((text, result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_spelling(&mut self) {
+        let Some(rx) = &self.spell_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((source, result)) => {
+                self.spell_rx = None;
+                if source != self.original {
+                    return;
+                }
+                self.spell_source = source;
+                match result {
+                    Ok(suggestions) => {
+                        self.spelling = suggestions;
+                        self.show_spelling = !self.spelling.is_empty();
+                        self.spell_status = if self.spelling.is_empty() {
+                            t("Словарь не предложил исправлений. Это не гарантирует точность OCR.")
+                                .into()
+                        } else {
+                            t("Есть варианты исправления. Текст изменится только после выбора.")
+                                .into()
+                        };
+                    }
+                    Err(e) => self.spell_status = e,
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.spell_rx = None;
+                self.spell_status = t("Проверка слов завершилась с ошибкой").into();
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn spelling_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_spelling {
+            return;
+        }
+        let mut replace = None;
+        let mut close = false;
+        egui::Modal::new(egui::Id::new("spelling")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 64.0).clamp(220.0, 420.0));
+            ui.heading(t("Проверка слов OCR"));
+            ui.label(t("Словарь может ошибаться в именах и терминах. Выбери подходящий вариант или оставь слово как есть. Проверяются первые 256 слов."));
+            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                for (i, proposal) in self.spelling.iter().enumerate() {
+                    ui.push_id(i, |ui| {
+                        ui.label(egui::RichText::new(&proposal.word).strong());
+                        ui.horizontal_wrapped(|ui| {
+                            for candidate in &proposal.replacements {
+                                if ui.button(candidate).clicked() { replace = Some((i, candidate.clone())); }
+                            }
+                        });
+                        ui.separator();
+                    });
+                }
+            });
+            close = ui.button(t("Готово")).clicked();
+        });
+        if let Some((i, replacement)) = replace {
+            let proposal = self.spelling[i].clone();
+            if self.original == self.spell_source
+                && snapling_core::spelling::apply(&mut self.original, &proposal, &replacement)
+            {
+                let delta = replacement.len() as isize - proposal.word.len() as isize;
+                self.spelling.remove(i);
+                for p in &mut self.spelling {
+                    if p.start >= proposal.end {
+                        p.start = p.start.saturating_add_signed(delta);
+                        p.end = p.end.saturating_add_signed(delta);
+                    }
+                }
+                self.spell_source = self.original.clone();
+                if !self.fetching {
+                    self.pending = None;
+                }
+                self.translation.clear();
+                self.spell_status =
+                    t("Исправление применено. Можно перевести текст заново.").into();
+            }
+        }
+        if close || self.spelling.is_empty() {
+            self.show_spelling = false;
+        }
+    }
+
     fn new(original: String, hooks: Hooks, text_only: bool, ctx: egui::Context) -> Self {
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
@@ -166,6 +294,16 @@ impl Window {
         std::thread::spawn(move || worker(models, proxy, wrx, wtx, ctx));
         let from = detect(&original);
         let mut w = Self {
+            recognized_original: original.clone(),
+            spell_source: String::new(),
+            spelling: Vec::new(),
+            spell_rx: None,
+            raised: false,
+            opened: std::time::Instant::now(),
+            pinned: false,
+            settled: false,
+            spell_status: String::new(),
+            show_spelling: false,
             from,
             to: target_for(from, &hooks.target),
             need: Vec::new(),
@@ -445,6 +583,7 @@ impl Window {
     fn one_line(&mut self) {
         let joined: Vec<&str> = self.original.split_whitespace().collect();
         self.original = joined.join(" ");
+        self.text_changed();
     }
 
     fn copy_original(&mut self) {
@@ -456,9 +595,25 @@ impl Window {
 }
 
 impl eframe::App for Window {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.poll();
         let ctx = ui.ctx().clone();
+        if !self.raised {
+            ui::focus_result(&ctx, frame);
+            self.raised = true;
+        }
+        if !self.settled && self.opened.elapsed() >= std::time::Duration::from_millis(500) {
+            self.settled = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.pinned {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }));
+        } else if !self.settled {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        self.poll_spelling();
+        self.spelling_modal(&ctx);
         ui::preview(&ctx);
         let (run, copy, close) = ctx.input_mut(|i| {
             (
@@ -488,6 +643,16 @@ impl eframe::App for Window {
                         if ui::ghost_icon(ui, icon::X, 32.0, t("Закрыть")).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
+                        if ui.selectable_label(self.pinned, t("Поверх окон")).clicked() {
+                            self.pinned = !self.pinned;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                                if self.pinned {
+                                    egui::WindowLevel::AlwaysOnTop
+                                } else {
+                                    egui::WindowLevel::Normal
+                                },
+                            ));
+                        }
                         egui::Frame::new()
                             .fill(p.ghost)
                             .corner_radius(10)
@@ -500,14 +665,49 @@ impl eframe::App for Window {
                 });
                 let gap = ui.spacing().item_spacing.y;
                 let high = if self.text_only {
-                    ui.available_height() - 40.0 - 38.0 - gap * 2.0
+                    (ui.available_height() - 40.0 - 38.0 - 72.0 - gap * 4.0).max(60.0)
                 } else {
                     104.0
                 };
-                ui.add_sized(
-                    [width, high],
-                    egui::TextEdit::multiline(&mut self.original)
-                        .margin(egui::Margin::symmetric(14, 12)),
+                let edited = ui
+                    .add_sized(
+                        [width, high],
+                        egui::TextEdit::multiline(&mut self.original)
+                            .margin(egui::Margin::symmetric(14, 12)),
+                    )
+                    .changed();
+                if edited {
+                    self.text_changed();
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.spell_rx.is_none(),
+                            egui::Button::new(t("Проверить слова")),
+                        )
+                        .clicked()
+                    {
+                        self.check_spelling(&ctx);
+                    }
+                    if ui
+                        .add_enabled(
+                            self.original != self.recognized_original,
+                            egui::Button::new(t("Вернуть OCR")),
+                        )
+                        .clicked()
+                    {
+                        self.original = self.recognized_original.clone();
+                        self.text_changed();
+                    }
+                    if !self.text_only && ui.button(t("Перевести заново")).clicked()
+                    {
+                        self.redo();
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(&self.spell_status)
+                        .size(12.0)
+                        .color(p.muted),
                 );
                 ui.horizontal(|ui| {
                     let line = 118.0;

@@ -37,8 +37,10 @@ pub enum Kind {
     ),
     /// Numbered badge centered at the point.
     Step(Pt, u32, StepStyle),
-    /// Pixelated region: unlike blur it cannot be reversed.
+    /// Pixelated region; use Redact for sensitive content.
     Pixelate(Pt, Pt),
+    /// Opaque rectangle. Source pixels are discarded in exported images and saved projects.
+    Redact(Pt, Pt),
     /// Brush stroke that hides what is under it.
     Blur(Vec<Pt>, BlurStyle),
 }
@@ -89,15 +91,21 @@ pub enum StepStyle {
     Square,
     /// Map pin pointing down.
     Pin,
+    Diamond,
+    Label,
+    Outline,
 }
 
 impl StepStyle {
-    pub const ALL: [StepStyle; 5] = [
+    pub const ALL: [StepStyle; 8] = [
         StepStyle::Solid,
         StepStyle::Ring,
         StepStyle::Shadow,
         StepStyle::Square,
         StepStyle::Pin,
+        StepStyle::Diamond,
+        StepStyle::Label,
+        StepStyle::Outline,
     ];
 
     pub fn key(self) -> &'static str {
@@ -107,6 +115,23 @@ impl StepStyle {
             StepStyle::Shadow => "shadow",
             StepStyle::Square => "square",
             StepStyle::Pin => "pin",
+            StepStyle::Diamond => "diamond",
+            StepStyle::Label => "label",
+            StepStyle::Outline => "outline",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        use crate::i18n::t;
+        match self {
+            Self::Solid => t("Контрастный круг"),
+            Self::Ring => t("Кольцо"),
+            Self::Shadow => t("С тенью"),
+            Self::Square => t("Квадрат"),
+            Self::Pin => t("Метка"),
+            Self::Diamond => t("Ромб"),
+            Self::Label => t("Плашка"),
+            Self::Outline => t("Светлый квадрат"),
         }
     }
 }
@@ -133,7 +158,7 @@ impl DrawStyle {
     }
 }
 
-/// Brush blur: «cubes» (pixelate, irreversible) or Gaussian; strength 0..=2.
+/// Brush blur: «cubes» (pixelate) or Gaussian; strength 0..=2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BlurStyle {
     pub gauss: bool,
@@ -257,7 +282,7 @@ fn tiny(e: &Element) -> bool {
     let short = |a: Pt, b: Pt| (a.x - b.x).abs() < 3.0 && (a.y - b.y).abs() < 3.0;
     match &e.kind {
         Kind::Arrow(a, b, _) | Kind::Line(a, b) => short(*a, *b),
-        Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
+        Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) | Kind::Redact(a, b) => {
             (a.x - b.x).abs() < 3.0 || (a.y - b.y).abs() < 3.0
         }
         Kind::Pen(p) | Kind::Marker(p) | Kind::Blur(p, _) => p.is_empty(),
@@ -272,7 +297,7 @@ fn tiny(e: &Element) -> bool {
 pub fn drag_to(kind: &mut Kind, p: Pt, shift: bool, min_step: f32) {
     match kind {
         Kind::Arrow(a, b, _) | Kind::Line(a, b) => *b = if shift { snap45(*a, p) } else { p },
-        Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
+        Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) | Kind::Redact(a, b) => {
             *b = if shift { square(*a, p) } else { p }
         }
         Kind::Pen(pts) | Kind::Marker(pts) | Kind::Blur(pts, _) | Kind::Curve(pts, _)
@@ -309,9 +334,11 @@ fn square(a: Pt, p: Pt) -> Pt {
 pub fn bounds(e: &Element) -> (Pt, Pt) {
     let (pts, pad): (Vec<Pt>, f32) = match &e.kind {
         Kind::Arrow(a, b, _) => (vec![*a, *b], arrow_head_len(e.size)),
-        Kind::Line(a, b) | Kind::Rect(a, b) | Kind::Ellipse(a, b) | Kind::Pixelate(a, b) => {
-            (vec![*a, *b], e.size)
-        }
+        Kind::Line(a, b)
+        | Kind::Rect(a, b)
+        | Kind::Ellipse(a, b)
+        | Kind::Pixelate(a, b)
+        | Kind::Redact(a, b) => (vec![*a, *b], e.size),
         Kind::Curve(p, _) => (p.clone(), arrow_head_len(e.size)),
         Kind::Pen(p) => (p.clone(), e.size),
         Kind::Marker(p) => (p.clone(), marker_width(e.size) / 2.0),
@@ -329,7 +356,14 @@ pub fn bounds(e: &Element) -> (Pt, Pt) {
         }
         Kind::Step(c, n, style) => {
             let r = step_radius(e.size, *n);
-            (vec![*c], if *style == StepStyle::Pin { r * 1.8 } else { r })
+            (
+                vec![*c],
+                if *style == StepStyle::Pin {
+                    r * 1.8
+                } else {
+                    r * 1.4
+                },
+            )
         }
     };
     let fold =
@@ -364,7 +398,8 @@ pub fn translate(kind: &mut Kind, dx: f32, dy: f32) {
         | Kind::Line(a, b)
         | Kind::Rect(a, b)
         | Kind::Ellipse(a, b)
-        | Kind::Pixelate(a, b) => {
+        | Kind::Pixelate(a, b)
+        | Kind::Redact(a, b) => {
             mv(a);
             mv(b);
         }
@@ -962,7 +997,17 @@ fn draw_step(pm: &mut PixmapMut<'_>, c: Pt, n: u32, style: StepStyle, e: &Elemen
     let circle = PathBuilder::from_circle(c.x, c.y, r);
     let thin = Some((other, (r * 0.1).max(1.5)));
     let (path, fill, ring, ink) = match style {
-        StepStyle::Solid => (circle, e.color, Some((other, (r * 0.12).max(2.0))), other),
+        StepStyle::Solid => {
+            if let Some(p) = PathBuilder::from_circle(c.x, c.y, r + 2.5) {
+                pm.stroke_path(&p, &paint([0, 0, 0], 210), &stroke(2.0), id, None);
+            }
+            (
+                circle,
+                e.color,
+                Some(([255; 3], (r * 0.14).max(2.5))),
+                other,
+            )
+        }
         StepStyle::Ring => (circle, other, Some((e.color, (r * 0.2).max(2.5))), e.color),
         StepStyle::Shadow => {
             for (grow, alpha) in [(1.34, 22), (1.22, 30), (1.1, 44)] {
@@ -974,6 +1019,28 @@ fn draw_step(pm: &mut PixmapMut<'_>, c: Pt, n: u32, style: StepStyle, e: &Elemen
         }
         StepStyle::Square => (rounded_square(c, r * 0.92, r * 0.32), e.color, thin, other),
         StepStyle::Pin => (pin(c, r), e.color, thin, other),
+        StepStyle::Diamond => {
+            let mut p = PathBuilder::new();
+            p.move_to(c.x, c.y - r * 1.2);
+            p.line_to(c.x + r * 1.2, c.y);
+            p.line_to(c.x, c.y + r * 1.2);
+            p.line_to(c.x - r * 1.2, c.y);
+            p.close();
+            (p.finish(), e.color, thin, other)
+        }
+        StepStyle::Label => (
+            Rect::from_xywh(c.x - r * 1.25, c.y - r * 0.85, r * 2.5, r * 1.7)
+                .map(PathBuilder::from_rect),
+            e.color,
+            Some((other, 3.0)),
+            other,
+        ),
+        StepStyle::Outline => (
+            rounded_square(c, r * 0.92, r * 0.25),
+            [255; 3],
+            Some((e.color, 3.0)),
+            [17; 3],
+        ),
     };
     if let Some(p) = path {
         pm.fill_path(&p, &paint(fill, 255), FillRule::Winding, id, None);
@@ -982,15 +1049,39 @@ fn draw_step(pm: &mut PixmapMut<'_>, c: Pt, n: u32, style: StepStyle, e: &Elemen
         }
     }
     let label = n.to_string();
-    let px = r * 1.1;
-    let (w, h) = text_size(&label, px);
-    let at = Pt {
-        x: c.x - w / 2.0,
-        y: c.y - h / 2.0,
-    };
-    if let Some(p) = text_path(&label, at, px) {
+    let px = r * 1.3;
+    if let Some(p) = text_path(&label, Pt::default(), px) {
+        // Center visible glyphs, not the font's line box; keep multi-digit labels inside the badge.
+        let b = p.bounds();
+        let k = (r * 1.35 / b.width()).min(r * 1.25 / b.height()).min(1.0);
+        let Some(p) = p.transform(Transform::from_scale(k, k)) else {
+            return;
+        };
+        let b = p.bounds();
+        let Some(p) = p.transform(Transform::from_translate(
+            c.x - (b.left() + b.right()) / 2.0,
+            c.y - (b.top() + b.bottom()) / 2.0,
+        )) else {
+            return;
+        };
         pm.fill_path(&p, &paint(ink, 255), FillRule::Winding, id, None);
         pm.stroke_path(&p, &paint(ink, 255), &stroke(px * 0.06), id, None);
+    }
+}
+
+/// Integer coverage with no translucent edge pixels, including fractional selections.
+fn redact(pm: &mut PixmapMut<'_>, a: Pt, b: Pt, color: [u8; 3]) {
+    let w = pm.width();
+    let h = pm.height();
+    let x0 = a.x.min(b.x).floor().clamp(0.0, w as f32) as u32;
+    let y0 = a.y.min(b.y).floor().clamp(0.0, h as f32) as u32;
+    let x1 = a.x.max(b.x).ceil().clamp(0.0, w as f32) as u32;
+    let y1 = a.y.max(b.y).ceil().clamp(0.0, h as f32) as u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let i = ((y * w + x) * 4) as usize;
+            pm.data_mut()[i..i + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
+        }
     }
 }
 
@@ -1044,6 +1135,7 @@ pub fn draw(pm: &mut PixmapMut<'_>, e: &Element) {
         }
         Kind::Step(c, n, style) => draw_step(pm, *c, *n, *style, e),
         Kind::Pixelate(a, b) => pixelate(pm, *a, *b, pixel_block(e.size)),
+        Kind::Redact(a, b) => redact(pm, *a, *b, e.color),
         Kind::Blur(pts, style) => blur_brush(pm, pts, blur_width(e.size), *style),
     }
 }
@@ -1189,6 +1281,71 @@ mod cut_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redaction_discards_all_covered_pixels_including_fractional_edges() {
+        let mut a = Pixmap::new(20, 20).unwrap();
+        a.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 100));
+        let mut b = a.clone();
+        for y in 3..11 {
+            for x in 2..13 {
+                let at = ((y * 20 + x) * 4) as usize;
+                b.data_mut()[at..at + 4].copy_from_slice(&[0, 100, 0, 100]);
+            }
+        }
+        let doc = Doc {
+            elements: vec![Element {
+                kind: Kind::Redact(Pt { x: 12.1, y: 10.1 }, Pt { x: 2.9, y: 3.9 }),
+                color: [0; 3],
+                size: 4.0,
+            }],
+            crop: None,
+        };
+        let (out, w, h) = export(&a, &doc);
+        assert_eq!((w, h), (20, 20));
+        assert_eq!(
+            out,
+            export(&b, &doc).0,
+            "covered source pixels must have no effect on export"
+        );
+        for y in 3..11 {
+            for x in 2..13 {
+                let at = ((y * w + x) * 4) as usize;
+                assert_eq!(&out[at..at + 4], &[0, 0, 0, 255]);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "writes a visual style sheet under target/testdata"]
+    fn numbering_style_sheet() {
+        let mut pm = Pixmap::new(760, 680).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(33, 37, 46, 255));
+        for (row, style) in StepStyle::ALL.into_iter().enumerate() {
+            for (col, n) in [1, 2, 10, 123].into_iter().enumerate() {
+                draw(
+                    &mut pm.as_mut(),
+                    &Element {
+                        kind: Kind::Step(
+                            Pt {
+                                x: 110.0 + col as f32 * 180.0,
+                                y: 38.0 + row as f32 * 81.0,
+                            },
+                            n,
+                            style,
+                        ),
+                        color: [255, 59, 48],
+                        size: 4.0,
+                    },
+                );
+            }
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/testdata/numbering-styles.png");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bgra = export(&pm, &Doc::default()).0;
+        std::fs::write(path, crate::storage::encode_png(&bgra, 760, 680).unwrap()).unwrap();
+    }
 
     const W: u32 = 120;
     const H: u32 = 80;

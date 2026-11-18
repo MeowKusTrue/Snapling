@@ -1,6 +1,6 @@
 # Maintainer: MeowKusTrue
 pkgname=snapling-git
-pkgver=1.2.3
+pkgver=1.2.4
 pkgrel=1
 pkgdesc='Screenshots with annotation, OCR and translation'
 arch=('x86_64')
@@ -20,6 +20,9 @@ optdepends=(
   'libnotify: notifications'
   'libsecret: API keys in the system keyring'
   'zenity: file dialogs and questions'
+  'hunspell: local OCR spelling suggestions'
+  'hunspell-ru: Russian spelling dictionary'
+  'hunspell-en_us: English spelling dictionary'
 )
 provides=('snapling')
 conflicts=('snapling')
@@ -28,7 +31,7 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd Snapling
-  printf '1.2.3.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  printf '1.2.4.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 prepare() {

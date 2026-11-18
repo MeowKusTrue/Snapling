@@ -73,7 +73,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+      - run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}

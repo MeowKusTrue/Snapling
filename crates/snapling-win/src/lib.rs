@@ -60,6 +60,7 @@ pub mod pin;
 pub mod rec_ui;
 pub mod record;
 pub mod secret;
+pub mod spelling;
 pub mod targets;
 pub mod toast;
 pub mod uia;

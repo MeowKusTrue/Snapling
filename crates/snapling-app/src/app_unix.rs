@@ -181,7 +181,7 @@ fn pin(img: &Shot) -> Result<(), String> {
 /// `snapling --pin <file>`: blocks until the pin is closed; a file from `temp_dir` then goes.
 pub fn run_pin(path: &Path) {
     let res = storage::load_bgra(path).and_then(|(bgra, width, height)| {
-        snapling_overlay::pin(Shot {
+        crate::pin_ui::run(Shot {
             x: 0,
             y: 0,
             width,
@@ -325,6 +325,7 @@ fn after(cfg: &Config, cap: &unix::Capture, img: Shot, outcome: Outcome) -> Resu
             save(cfg, &img, "region")?;
         }
         Outcome::Edit => open_editor(&img),
+        Outcome::Qr => crate::qr_ui::spawn(&img.bgra, img.width, img.height)?,
         Outcome::Text => recognize(cfg, &img, false),
         Outcome::Translate => recognize(cfg, &img, true),
         Outcome::Pin => {
@@ -418,6 +419,7 @@ pub const ACTIONS: &[&str] = &[
     "--screen",
     "--window",
     "--ocr",
+    "--qr",
     "--ocr-translate",
     "--long",
     "--delay",
@@ -452,6 +454,7 @@ pub fn run_flag(flag: &str) -> Option<i32> {
             }
         }),
         "--window" => Err(t("Захват активного окна здесь не поддерживается").into()),
+        "--qr" => region(&cfg, Some(Outcome::Qr)),
         "--ocr" => region(&cfg, Some(Outcome::Text)),
         "--ocr-translate" => region(&cfg, Some(Outcome::Translate)),
         "--long" => region(&cfg, Some(Outcome::Scroll)),
@@ -701,6 +704,7 @@ pub fn history_hooks() -> crate::history_ui::Hooks {
 pub fn text_hooks() -> crate::translate_ui::Hooks {
     let cfg = config();
     crate::translate_ui::Hooks {
+        spelling: unix::spelling::check,
         copy_text: unix::copy_text,
         warn: unix::warn,
         models: models_dir(),

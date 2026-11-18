@@ -70,12 +70,19 @@ pub(crate) fn tool_icon(t: Tool) -> &'static [&'static str] {
             "M 10.5 9.5 L 12.5 8 V 16",
         ],
         Tool::Blur => &CUBES,
+        Tool::Redact => &["M 4 7 H 20 V 17 H 4 Z", "M 6 10 H 18", "M 6 14 H 18"],
     }
 }
 
 pub(crate) fn icon_data(b: Button) -> &'static [&'static str] {
     match b {
         Button::Draw => tool_icon(Tool::Arrow),
+        Button::Qr => &[
+            "M 3 3 H 9 V 9 H 3 Z",
+            "M 15 3 H 21 V 9 H 15 Z",
+            "M 3 15 H 9 V 21 H 3 Z",
+            "M 15 15 H 18 V 18 H 21 V 21 H 15 Z",
+        ],
         Button::Copy => &[
             "M 10.5 8 H 17.5 Q 20 8 20 10.5 V 17.5 Q 20 20 17.5 20 H 10.5 Q 8 20 8 17.5 V 10.5 Q 8 8 10.5 8 Z",
             "M 16 8 V 6 Q 16 4 14 4 H 6 Q 4 4 4 6 V 14 Q 4 16 6 16 H 8",

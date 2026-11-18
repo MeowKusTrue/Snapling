@@ -282,10 +282,11 @@ pub(crate) fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
             ];
             rows.push((shape, 30.0));
         }
-        Tool::Step => rows.push((
-            (0..StepStyle::ALL.len()).map(Control::StepStyle).collect(),
-            26.0,
-        )),
+        Tool::Step => {
+            for row in (0..StepStyle::ALL.len()).collect::<Vec<_>>().chunks(4) {
+                rows.push((row.iter().map(|&i| Control::StepStyle(i)).collect(), 26.0));
+            }
+        }
         Tool::Text => rows.push((vec![Control::Font(false), Control::Font(true)], 26.0)),
         _ => {}
     }
@@ -294,7 +295,7 @@ pub(crate) fn rail_layout(out: &mut Layout, sc: &Scene<'_>, t: &Draw<'_>) {
     let top = first_tool - 6.0 * s;
     for (i, (row, cell)) in rows.iter().enumerate() {
         let cell = cell * s;
-        let step = (inner - cell) / (row.len() - 1) as f32;
+        let step = (inner - cell) / row.len().saturating_sub(1).max(1) as f32;
         for (k, c) in row.iter().enumerate() {
             let cx = ox + 12.0 * s + k as f32 * step;
             out.buttons.push((r(cx, cy, cell, cell), *c));

@@ -28,6 +28,7 @@ pub enum Outcome {
     Pin,
     Record,
     Scroll,
+    Qr,
     /// `I`: the image is the one pixel under the cursor.
     Color,
 }
@@ -563,6 +564,7 @@ impl Session {
             Tool::Pen => Kind::Pen(vec![at]),
             Tool::Marker => Kind::Marker(vec![at]),
             Tool::Blur => Kind::Blur(vec![at], pen.blur),
+            Tool::Redact => Kind::Redact(at, at),
             Tool::Step => Kind::Step(at, pen.history.next_step(), pen.style.step),
             Tool::Text => {
                 self.pen.typing = Some((at, String::new()));
@@ -609,6 +611,7 @@ impl Session {
                     Button::Pin => Step::Done(Outcome::Pin),
                     Button::Record => Step::Done(Outcome::Record),
                     Button::Scroll => Step::Done(Outcome::Scroll),
+                    Button::Qr => Step::Done(Outcome::Qr),
                     Button::Draw => {
                         self.rail_open = true;
                         Step::Stay
@@ -865,6 +868,9 @@ impl Session {
     }
 
     fn letter(&mut self, c: char, confirmed: bool) -> Step {
+        if c == 'h' {
+            return self.control(Control::Tool(Tool::Redact));
+        }
         if let Some(i) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
             return self.control(Control::Tool(TOOLS[i as usize - 1]));
         }
@@ -880,6 +886,7 @@ impl Session {
             'p' => Outcome::Pin,
             'g' => Outcome::Record,
             'd' => Outcome::Scroll,
+            'q' => Outcome::Qr,
             _ => return Step::Stay,
         };
         if confirmed {
@@ -1192,6 +1199,27 @@ mod tests {
         };
         s.key(Key::Char('z'), ctrl);
         assert_eq!(s.annot, s.shot.bgra);
+    }
+
+    #[test]
+    fn redaction_and_qr_keyboard_actions_reach_the_selected_image() {
+        let mut s = session(Options::default());
+        s.key(Key::Char('h'), NONE);
+        assert_eq!(s.pen.tool, Some(Tool::Redact));
+        drag(&mut s, pt(30, 30), pt(90, 90));
+        assert!(matches!(
+            s.pen.history.doc.elements[0].kind,
+            Kind::Redact(..)
+        ));
+        s.control(Control::Select);
+        drag(&mut s, pt(20, 20), pt(120, 120));
+        assert_eq!(s.key(Key::Char('q'), NONE), Step::Done(Outcome::Qr));
+        let shot = s.result(Outcome::Qr).unwrap();
+        let at = (30 * shot.width as usize + 30) * 4;
+        assert_eq!(
+            &shot.bgra[at..at + 4],
+            &[s.pen.color[2], s.pen.color[1], s.pen.color[0], 255]
+        );
     }
 
     #[test]

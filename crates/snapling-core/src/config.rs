@@ -80,7 +80,7 @@ head = "sharp"
 free = false
 # Наконечник там, откуда начал тянуть.
 to_start = false
-# Кружки с номером: "solid", "ring", "shadow", "square", "pin".
+# Нумерация: "solid" (контрастный круг), "ring", "shadow", "square", "pin", "diamond", "label", "outline".
 step = "solid"
 # Шрифт текста, имя из системы. Пусто — встроенный.
 font = ''

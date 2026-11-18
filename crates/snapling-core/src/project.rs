@@ -54,6 +54,23 @@ pub fn format_of(image: &Path) -> Format {
 /// Writes the project for `image`; returns its path.
 pub fn save(image: &Path, base: &Pixmap, app: &str, doc: &Doc) -> Result<PathBuf, String> {
     use image::ImageEncoder;
+    // A redacted project must not retain the source pixels in its embedded original.
+    let flattened;
+    let flattened_doc;
+    let (base, doc) = if doc
+        .elements
+        .iter()
+        .any(|e| matches!(e.kind, crate::annotate::Kind::Redact(..)))
+    {
+        flattened = crate::annotate::compose(base, doc);
+        flattened_doc = Doc {
+            crop: doc.crop,
+            ..Doc::default()
+        };
+        (&flattened, &flattened_doc)
+    } else {
+        (base, doc)
+    };
     let (w, h) = (base.width(), base.height());
     let mut png = Vec::new();
     image::codecs::png::PngEncoder::new(&mut png)
@@ -101,11 +118,20 @@ pub fn load(path: &Path) -> Result<Project, String> {
     }
     let size = tiny_skia::IntSize::from_wh(file.width, file.height).ok_or_else(bad)?;
     let base = Pixmap::from_vec(img.into_raw(), size).ok_or_else(bad)?;
+    let image = Path::new(&file.image);
+    if image.components().count() != 1
+        || !matches!(
+            image.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(bad());
+    }
     Ok(Project {
         base,
         app: file.app,
         doc: file.doc,
-        image: path.with_file_name(&file.image),
+        image: path.with_file_name(image),
     })
 }
 
@@ -150,6 +176,40 @@ mod tests {
     use crate::annotate::{ArrowStyle, Element, Kind, Pt};
 
     #[test]
+    fn redacted_projects_discard_embedded_original_and_editable_annotations() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/testdata");
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join(format!("redacted-project-{}.png", std::process::id()));
+        let mut base = Pixmap::new(12, 8).unwrap();
+        base.fill(tiny_skia::Color::from_rgba8(210, 180, 90, 255));
+        let doc = Doc {
+            elements: vec![Element {
+                kind: Kind::Redact(Pt { x: 0.2, y: 0.3 }, Pt { x: 11.9, y: 7.8 }),
+                color: [0; 3],
+                size: 1.0,
+            }],
+            crop: None,
+        };
+        let path = save(&image, &base, "app", &doc).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(loaded.doc.elements.is_empty());
+        assert_eq!(
+            crate::annotate::export(&loaded.base, &loaded.doc),
+            crate::annotate::export(&base, &doc)
+        );
+        assert!(
+            loaded
+                .base
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|px| *px == [0, 0, 0, 255])
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn base64_round_trips() {
         for n in 0..10 {
             let data: Vec<u8> = (0..n).map(|i: u8| i.wrapping_mul(37)).collect();
@@ -189,6 +249,20 @@ mod tests {
         assert_eq!(p.doc, doc);
         assert_eq!(p.base.data(), base.data());
         assert_eq!(p.image, image);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for invalid in ["../outside.png", "nested/shot.png", ""] {
+            json["image"] = invalid.into();
+            std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+            assert!(load(&path).is_err(), "accepted image path {invalid:?}");
+        }
+        json["image"] = dir
+            .join("outside.png")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(load(&path).is_err(), "accepted an absolute image path");
         std::fs::write(&path, b"{\"snapling_project\":1").unwrap();
         assert!(load(&path).is_err());
         std::fs::remove_dir_all(&dir).unwrap();

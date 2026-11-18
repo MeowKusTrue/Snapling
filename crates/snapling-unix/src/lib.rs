@@ -8,6 +8,7 @@ use snapling_overlay::Shot;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+pub mod spelling;
 
 #[cfg(target_os = "linux")]
 pub mod doctor;

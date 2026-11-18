@@ -51,13 +51,14 @@ pub enum Button {
     Pin,
     Record,
     Scroll,
+    Qr,
     /// Brings the tool rail back next to a finished selection.
     Draw,
     Blur,
     Cancel,
 }
 
-/// Drawing tools of the in-overlay editor, keys 1–9 in this order.
+/// Drawing tools: keys 1–9 keep their order, H selects redaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Arrow,
@@ -69,9 +70,10 @@ pub enum Tool {
     Text,
     Step,
     Blur,
+    Redact,
 }
 
-pub const TOOLS: [Tool; 9] = [
+pub const TOOLS: [Tool; 10] = [
     Tool::Arrow,
     Tool::Line,
     Tool::Rect,
@@ -81,6 +83,7 @@ pub const TOOLS: [Tool; 9] = [
     Tool::Text,
     Tool::Step,
     Tool::Blur,
+    Tool::Redact,
 ];
 
 pub const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
@@ -256,12 +259,13 @@ const RAIL_BTN: (f32, f32) = (44.0, 40.0);
 const OPTS_W: f32 = 160.0;
 
 /// Toolbar buttons in mockup order; `None` is the divider.
-const BAR: [Option<Button>; 12] = [
+const BAR: [Option<Button>; 13] = [
     Some(Button::Copy),
     Some(Button::Save),
     Some(Button::Edit),
     Some(Button::Text),
     Some(Button::Translate),
+    Some(Button::Qr),
     Some(Button::Pin),
     Some(Button::Record),
     Some(Button::Scroll),
@@ -271,7 +275,8 @@ const BAR: [Option<Button>; 12] = [
     Some(Button::Cancel),
 ];
 
-const HINTS_SELECTED: [(&str, &str); 11] = [
+const HINTS_SELECTED: [(&str, &str); 12] = [
+    ("Q", n("QR-код")),
     ("Enter", n("копировать")),
     ("S", n("сохранить")),
     ("E", n("редактор")),

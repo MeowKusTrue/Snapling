@@ -1,5 +1,5 @@
 //! A shot pinned over all windows, in the tray process. Dragged by any point, the wheel scales
-//! it, Ctrl+C copies it; Esc, a right click or a double click closes it.
+//! it, Ctrl+wheel changes opacity, Ctrl+C copies the opaque original.
 
 use crate::{Image, copy_image, dib_header, style_window};
 use std::cell::{Cell, RefCell};
@@ -13,10 +13,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HTCAPTION,
-    HWND_TOPMOST, IDC_SIZEALL, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SW_SHOW,
-    SWP_NOMOVE, SetWindowPos, ShowWindow, TranslateMessage, WM_DESTROY, WM_KEYDOWN, WM_MOUSEWHEEL,
-    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_PAINT, WNDCLASSW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    HWND_TOPMOST, IDC_SIZEALL, LWA_ALPHA, LoadCursorW, MSG, PostQuitMessage, RegisterClassW,
+    SW_SHOW, SWP_NOMOVE, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, TranslateMessage,
+    WM_DESTROY, WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONDOWN,
+    WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::w;
 
@@ -27,6 +27,7 @@ const WHEEL_STEP: f32 = 1.1;
 struct Pin {
     img: Image,
     scale: f32,
+    opacity: u8,
 }
 
 thread_local! {
@@ -65,7 +66,7 @@ pub fn show(mut img: Image) -> Result<(), String> {
             }
         }
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             class,
             w!("Snapling"),
             WS_POPUP,
@@ -80,9 +81,22 @@ pub fn show(mut img: Image) -> Result<(), String> {
         )
         .map_err(|e| format!("CreateWindowExW: {e}"))?;
         PINS.with(|p| {
-            p.borrow_mut()
-                .insert(hwnd.0 as isize, Pin { img, scale: 1.0 })
+            p.borrow_mut().insert(
+                hwnd.0 as isize,
+                Pin {
+                    img,
+                    scale: 1.0,
+                    opacity: 255,
+                },
+            )
         });
+        SetLayeredWindowAttributes(
+            hwnd,
+            windows::Win32::Foundation::COLORREF(0),
+            255,
+            LWA_ALPHA,
+        )
+        .map_err(|e| e.to_string())?;
         style_window(hwnd.0 as isize);
         let _ = ShowWindow(hwnd, SW_SHOW);
     }
@@ -139,6 +153,22 @@ fn paint(hwnd: HWND) {
 }
 
 fn wheel(hwnd: HWND, up: bool) {
+    if unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0 {
+        PINS.with(|p| {
+            if let Some(pin) = p.borrow_mut().get_mut(&(hwnd.0 as isize)) {
+                pin.opacity = snapling_core::pin::opacity_step(pin.opacity, up);
+                let _ = unsafe {
+                    SetLayeredWindowAttributes(
+                        hwnd,
+                        windows::Win32::Foundation::COLORREF(0),
+                        pin.opacity,
+                        LWA_ALPHA,
+                    )
+                };
+            }
+        });
+        return;
+    }
     let size = PINS.with(|p| {
         let mut p = p.borrow_mut();
         let pin = p.get_mut(&(hwnd.0 as isize))?;

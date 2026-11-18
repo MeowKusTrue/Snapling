@@ -504,6 +504,7 @@ fn text_window(text: &str, mode: &str) {
 pub fn text_hooks() -> crate::translate_ui::Hooks {
     let cfg = Config::load_or_create(&crate::ui::config_path()).unwrap_or_default();
     crate::translate_ui::Hooks {
+        spelling: snapling_win::spelling::check,
         copy_text: snapling_win::copy_text,
         warn: snapling_win::warn,
         models: models_dir(),
@@ -807,6 +808,13 @@ fn capture_region(auto: Option<Outcome>) {
             Outcome::Edit => {
                 play(Sound::Capture);
                 open_editor(img, app);
+            }
+            Outcome::Qr => {
+                std::thread::spawn(move || {
+                    if let Err(e) = crate::qr_ui::spawn(&img.bgra, img.width, img.height) {
+                        snapling_win::warn(&e);
+                    }
+                });
             }
             Outcome::Text => recognize(img),
             Outcome::Translate => translate(img),

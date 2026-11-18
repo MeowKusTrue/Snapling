@@ -33,6 +33,11 @@
 - **Screen recording:** GIF or MP4 with system sound and microphone, pause, quality up to 60 fps, a countdown and cancel. The frame and timer never get into the file; an MP4 stays playable after a crash.
 - **Long screenshots:** scrolls the page by itself and stitches it, sticky headers stay single.
 - **Pin:** keep a shot on top of all windows, zoom it with the wheel.
+- **Pin opacity:** Ctrl+wheel adjusts transparency; the copied image stays opaque.
+- **QR codes:** select a code and click QR (or press Q). Decode locally, copy its contents, and open HTTP(S) links only on an explicit click. Linux/macOS also accept `snapling --qr`.
+- **Redaction:** H selects an opaque rectangle in the overlay/editor. Exported pixels are replaced. Projects containing redaction are flattened on save so they do not embed the hidden original; existing source files are not erased.
+- **Numbering:** eight styles with visual previews, larger centered digits and a high-contrast default.
+- **OCR spelling:** Check spelling proposes local dictionary corrections, applied only when selected. Restore OCR recovers the original text; Translate again uses your edits. Windows uses installed ru-RU/en-US spelling dictionaries; Linux uses Hunspell with ru_RU/en_US dictionaries. Text/translation results open in front, with an optional Keep on top toggle.
 - **Gallery:** every shot in one window, search by the text on them, a large view, and recognition of old shots.
 - **Editor:** the same tools with undo, zoom, moving shapes, text frames and saving as PNG, WebP or JPEG. A `.snapling.json` project next to the image lets you reopen it and fix arrows and text later.
 - **Settings:** hotkeys pressed right on the keyboard with conflict search, four themes including pure black, three sound sets or your own sounds, a proxy, settings import and export.

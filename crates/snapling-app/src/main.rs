@@ -7,6 +7,9 @@ mod app_win;
 mod editor;
 mod history_ui;
 mod icon;
+#[cfg(not(windows))]
+mod pin_ui;
+mod qr_ui;
 mod settings;
 mod translate_ui;
 mod ui;
@@ -88,6 +91,7 @@ Usage: snapling [OPTION] [FILE]
       --region           Select a screen region (Linux/macOS)
       --screen           Capture the screen (Linux/macOS)
       --window           Capture the active window (KDE/Wayland)
+      --qr               Read a QR code in a region (Linux/macOS)
       --ocr              Recognize text in a region (Linux/macOS)
       --ocr-translate    Recognize and translate a region (Linux/macOS)
       --record           Start or stop recording (Linux/macOS)
@@ -114,7 +118,10 @@ fn validate_args(args: &[std::ffi::OsString]) -> Result<(), String> {
     let Some(flag) = flag.to_str() else {
         return Err("argument is not valid UTF-8".into());
     };
-    let file_arg = matches!(flag, "--edit" | "--translate" | "--pin" | "--text");
+    let file_arg = matches!(
+        flag,
+        "--edit" | "--translate" | "--pin" | "--text" | "--qr-result"
+    );
     let window = matches!(flag, "--settings" | "--welcome" | "--gallery");
     let window = window || flag == "--print-paths";
     #[cfg(not(windows))]
@@ -190,6 +197,10 @@ fn main() {
     ui::apply_language(&cfg.map_or("auto".to_string(), |c| c.ui.language));
     if args.len() == 3 && args[1] == "--edit" {
         return editor::run(std::path::Path::new(&args[2]), hooks());
+    }
+    if args.len() == 3 && args[1] == "--qr-result" {
+        let hooks = text_hooks();
+        return qr_ui::run(std::path::Path::new(&args[2]), hooks.copy_text, hooks.warn);
     }
     if args.len() == 3 && args[1] == "--translate" {
         return translate_ui::run(std::path::Path::new(&args[2]), text_hooks(), false);

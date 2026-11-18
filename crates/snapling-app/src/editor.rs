@@ -42,7 +42,7 @@ const COLORS: [[u8; 3]; 8] = [
     [17, 17, 17],
     [255, 255, 255],
 ];
-const RAIL_H: f32 = 582.0;
+const RAIL_H: f32 = 626.0;
 const ZOOM_STEP: f32 = 1.25;
 const ZOOM_RANGE: (f32, f32) = (0.1, 8.0);
 
@@ -58,10 +58,11 @@ enum Tool {
     Text,
     Step,
     Pixelate,
+    Redact,
     Crop,
 }
 
-const TOOLS: [(Tool, &str, &str, Key); 11] = [
+const TOOLS: [(Tool, &str, &str, Key); 12] = [
     (Tool::Select, icon::CURSOR, n("Выбор"), Key::V),
     (Tool::Arrow, icon::ARROW_UP_RIGHT, n("Стрелка"), Key::A),
     (Tool::Line, icon::LINE_SEGMENT, n("Линия"), Key::L),
@@ -72,6 +73,7 @@ const TOOLS: [(Tool, &str, &str, Key); 11] = [
     (Tool::Text, icon::TEXT_T, n("Текст"), Key::T),
     (Tool::Step, icon::NUMBER_CIRCLE_ONE, n("Нумерация"), Key::N),
     (Tool::Pixelate, icon::CHECKERBOARD, n("Размытие"), Key::B),
+    (Tool::Redact, icon::SQUARE, n("Скрыть данные"), Key::H),
     (Tool::Crop, icon::CROP, n("Обрезка"), Key::C),
 ];
 
@@ -555,6 +557,7 @@ impl Editor {
                 Kind::Text(..) => t("Текст"),
                 Kind::Step(..) => t("Нумерация"),
                 Kind::Pixelate(..) | Kind::Blur(..) => t("Размытие"),
+                Kind::Redact(..) => t("Скрыть данные"),
             };
         }
         TOOLS
@@ -610,6 +613,9 @@ impl Editor {
                     ui.set_width(216.0);
                     ui.spacing_mut().item_spacing.y = 8.0;
                     ui.label(RichText::new(title).font(ui::semi(15.0)));
+                    if self.tool == Tool::Redact || picked.is_some_and(|e| matches!(e.kind, Kind::Redact(..))) {
+                        ui.label(t("Сплошная заливка удаляет пиксели под рамкой из сохранённого изображения. При сохранении проекта все пометки закрепляются: скрытый оригинал в проект не попадёт."));
+                    }
                     if bare {
                         let hint = if self.tool == Tool::Crop {
                             t("Обведи рамкой. Клик — сбросить обрезку.")
@@ -696,24 +702,14 @@ impl Editor {
                     if step {
                         ui.add_space(6.0);
                         ui.label(RichText::new(t("Вид")).size(12.5).color(p.muted));
-                        let names = [
-                            t("Круг"),
-                            t("Кольцо"),
-                            t("С тенью"),
-                            t("Квадрат"),
-                            t("Метка"),
-                        ];
-                        let at = StepStyle::ALL.iter().position(|s| *s == step_now);
-                        egui::ComboBox::from_id_salt("step style")
-                            .selected_text(names[at.unwrap_or(0)])
-                            .width(216.0)
-                            .show_ui(ui, |ui| {
-                                for (s, name) in StepStyle::ALL.into_iter().zip(names) {
-                                    if ui.selectable_label(s == step_now, name).clicked() {
-                                        new_step = Some(s);
-                                    }
-                                }
-                            });
+                        egui::Grid::new("numbering styles").num_columns(4).spacing([6.0, 6.0]).show(ui, |ui| {
+                            for (i, style) in StepStyle::ALL.into_iter().enumerate() {
+                                if step_swatch(ui, style, color, style == step_now).clicked() { new_step = Some(style); }
+                                if i % 4 == 3 { ui.end_row(); }
+                            }
+                        });
+                        ui.label(step_now.label());
+                        ui.label(t("Клик — следующий номер · колесо — размер"));
                     }
                     if text {
                         ui.add_space(6.0);
@@ -996,6 +992,7 @@ impl Editor {
                     Tool::Marker => Some(Kind::Marker(vec![start])),
                     Tool::Pixelate => Some(Kind::Blur(vec![start], self.blur)),
                     Tool::Crop => Some(Kind::Pixelate(start, start)),
+                    Tool::Redact => Some(Kind::Redact(start, start)),
                     // A frame for text: its width wraps the lines.
                     Tool::Text => Some(Kind::Rect(start, start)),
                     Tool::Step | Tool::Select => None,
@@ -1209,7 +1206,44 @@ fn key_name(tool: Tool) -> char {
         Tool::Step => 'N',
         Tool::Pixelate => 'B',
         Tool::Crop => 'C',
+        Tool::Redact => 'H',
     }
+}
+
+/// Use the export rasterizer in the style picker too, so its preview is accurate.
+fn step_swatch(
+    ui: &mut egui::Ui,
+    style: StepStyle,
+    color: [u8; 3],
+    selected: bool,
+) -> egui::Response {
+    let id = egui::Id::new(("step sample", style.key(), color));
+    let texture = ui
+        .ctx()
+        .data(|d| d.get_temp::<TextureHandle>(id))
+        .unwrap_or_else(|| {
+            let mut pm = Pixmap::new(48, 48).expect("small preview");
+            annotate::draw(
+                &mut pm.as_mut(),
+                &Element {
+                    kind: Kind::Step(Pt { x: 24.0, y: 21.0 }, 1, style),
+                    color,
+                    size: 1.0,
+                },
+            );
+            let texture = ui.ctx().load_texture(
+                format!("step-{}-{color:?}", style.key()),
+                ColorImage::from_rgba_premultiplied([48, 48], pm.data()),
+                TextureOptions::LINEAR,
+            );
+            ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
+            texture
+        });
+    ui.add(
+        egui::Button::image(egui::Image::new(&texture).fit_to_exact_size(vec2(42.0, 42.0)))
+            .selected(selected),
+    )
+    .on_hover_text(style.label())
 }
 
 /// Round color button, 32 px; the selected one gets a ring.
@@ -1346,6 +1380,9 @@ fn preview(
                 color.gamma_multiply(0.45),
             );
             painter.add(Shape::line(pts.iter().map(|p| to_scr(*p)).collect(), s));
+        }
+        Kind::Redact(a, b) => {
+            painter.rect_filled(Rect::from_two_pos(to_scr(*a), to_scr(*b)), 0.0, color);
         }
         Kind::Pixelate(a, b) => {
             let r = Rect::from_two_pos(to_scr(*a), to_scr(*b));

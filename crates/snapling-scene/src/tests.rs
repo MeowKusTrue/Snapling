@@ -32,7 +32,12 @@ fn toolbar_matches_mockup_geometry() {
     let lay = layout(&scene(Some(sel), true));
     let bar = lay.toolbar.unwrap();
     assert_eq!((bar.left, bar.top, bar.height), (368, 438, 46));
-    assert_eq!(lay.buttons.len(), 11);
+    assert_eq!(lay.buttons.len(), 12);
+    assert!(
+        lay.buttons
+            .iter()
+            .any(|(_, c)| *c == Control::Action(Button::Qr))
+    );
     assert_eq!(lay.buttons[0].1, Control::Action(Button::Copy));
     let pill = lay.size_pill.as_ref().unwrap();
     assert_eq!((pill.0.left, pill.0.top), (368, 182));
@@ -301,6 +306,7 @@ fn svg_subset_parses_all_icons() {
         Button::Edit,
         Button::Text,
         Button::Translate,
+        Button::Qr,
         Button::Pin,
         Button::Record,
         Button::Scroll,
